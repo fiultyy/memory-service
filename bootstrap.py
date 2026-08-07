@@ -43,9 +43,17 @@ def init_memory(
         return {"files": 0, "added": 0, "updated": 0, "deleted": 0, "noop": 0,
                 "skipped": str(memory_dir)}
 
-    totals = {"files": 0, "added": 0, "updated": 0, "deleted": 0, "noop": 0, "errors": 0}
+    totals = {"files": 0, "added": 0, "updated": 0, "deleted": 0, "noop": 0, "errors": 0, "skipped": 0}
     for md in sorted(memory_dir.glob("*.md")):
         text = md.read_text(encoding="utf-8")
+        # ADR-16f: 跳过 mem-service 投影产物 (frontmatter 含 source: mem-service)
+        if text.startswith("---"):
+            fm_end = text.find("---", 3)
+            if fm_end != -1:
+                fm_block = text[3:fm_end]
+                if "source: mem-service" in fm_block or "source:mem-service" in fm_block:
+                    totals["skipped"] += 1
+                    continue
         # 分段: 大 .md 切 CHUNK 字段, 各段独立喂 autodream — 覆盖全文 (非截断丢后部),
         # 每段短不超时。单条记忆多 <CHUNK 不分段 (1 段)。
         CHUNK = 4000

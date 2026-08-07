@@ -26,12 +26,21 @@ from llm_provider import (
 # transforms (diversity via prompt variation).
 DEFAULT_WINGS = 3
 
+# Quality guard: entities must be conceptual (projects, tech, roles, orgs),
+# never file paths, function signatures, code symbols, or env var names.
+_ENTITY_QUALITY = (
+    "实体必须是概念级名称（项目名/技术名/角色名/组织名），"
+    "禁止使用文件路径、函数签名、代码符号或环境变量名作为实体。"
+    "错误示例：data/memory.db、adapter.py、ZhipuAnthropicProvider._load_zhipu_key()、ZHIPU_API_KEY。"
+    "正确示例：mem-service、CC memory、KG、智谱、Claude Code。"
+)
+
 # Prompt transforms for butterfly-wing diversity. Each wraps the input text in
 # a different framing; the JSON contract is identical, only the surface varies.
 _WING_PROMPTS = [
-    "抽取事实:",                        # bare
-    "请仔细阅读并提取其中的事实三元组:",  # careful reframe
-    "识别以下文本中的实体关系:",         # relation-focused reframe
+    f"抽取事实: {_ENTITY_QUALITY} ",                        # bare
+    f"请仔细阅读并提取其中的事实三元组: {_ENTITY_QUALITY} ",  # careful reframe
+    f"识别以下文本中的实体关系: {_ENTITY_QUALITY} ",         # relation-focused reframe
 ]
 
 

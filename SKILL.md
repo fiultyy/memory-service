@@ -29,41 +29,42 @@ v1 形态: **CC 按需调 cli**(用户手动触发,或你读完本 skill 后主�
 
 ## cli 路径与调用约束
 
-服务源在仓内 `services/memory-service/`,cli 入口 = `cli.py`。**cli 直接 import 同目录模块(`extractor`/`store`/`db`),不是 Python 包,必须在服务目录下用 `python3 cli.py` 调,不能从别处 import。**
+服务源在 `/home/yy/projects/memory-service/`(独立项目, cli 在顶层),cli 入口 = `cli.py`。**cli 直接 import 同目录模块(`extractor`/`store`/`db`),不是 Python 包,必须在服务目录下用 `python3 cli.py` 调,不能从别处 import。**
 
-部署形态两步(Spec §9):
-- **仓内源(P2, 已就位)**: `services/memory-service/cli.py` ← 当前可用
-- **deploy 到 CC(P4, 独立步骤)**: 软链/拷贝到 `~/.claude/skills/mem/` ← deploy 后 CC 才能 `/mem` 调
+部署形态(2026-08-07 从 AO2 `services/memory-service/` cp 独立后):
+- **源码**: `/home/yy/projects/memory-service/`(cli 在顶层)
+- **CC deploy(已就位)**: 软链 `~/.claude/skills/mem → /home/yy/projects/memory-service` ← CC `/mem` 走软链读源码,无需拷贝
 
-**当前 v1 green(P2): 只仓内源就绪。** deploy 未做时,CC 直接调 cli 需用绝对路径(见下)。ADR-7: skill 源仓内 + deploy 独立,本文件就是仓内源。
+ADR-7: skill 源即独立项目根, 软链是 deploy 形态, 本文件就是源。
 
 ### 调用方式
 
 ```bash
-# 绝对路径(P2 green, deploy 前):
-python3 <repo>/services/memory-service/cli.py <subcommand> ...
-
-# deploy 后(P4, 软链到 ~/.claude/skills/mem/):
+# deploy 后(软链, 已就位 — 推荐):
 python3 ~/.claude/skills/mem/cli.py <subcommand> ...
+
+# 或直接源码绝对路径:
+python3 /home/yy/projects/memory-service/cli.py <subcommand> ...
 ```
 
-**cwd 任意**——cli 用绝对路径即可。但注意 cli 内部 `import extractor`/`import store` 是同目录裸 import,**实际只接受 cwd = 服务目录 或 把服务目录加进 PYTHONPATH**。最稳的调法:
+**注意** cli 内部 `import extractor`/`import store` 是同目录裸 import,**实际只接受 cwd = 服务目录 或 把服务目录加进 PYTHONPATH**(绝对路径调若 cwd 不对会 import 失败)。最稳的调法:
 
 ```bash
-cd <repo>/services/memory-service && python3 cli.py <subcommand> ...
+cd /home/yy/projects/memory-service && python3 cli.py <subcommand> ...
+# 等价: cd ~/.claude/skills/mem && python3 cli.py <subcommand> ...
 ```
 
 ---
 
 ## 子命令契约(严格对齐 cli.py)
 
-三个子命令,**无 `query`**(调试用 `recall --verbose` 或 `sqlite3 services/memory-service/data/memory.db`, Spec §3 Defer)。
+三个子命令,**无 `query`**(调试用 `recall --verbose` 或 `sqlite3 data/memory.db`(cwd=服务目录), Spec §3 Defer)。
 
-deploy 后 CC 以 `mem` 为调用名(skill 名 = `mem`, deploy 到 `~/.claude/skills/mem/`, Spec §9)。即:**面向 CC 的调用 = `mem recall` / `mem ingest` / `mem consolidate`**,底层 = `cli.py <subcmd>`。两种写法等价:
+CC 以 `mem` 为调用名(skill 名 = `mem`, 软链到 `~/.claude/skills/mem/`)。即:**面向 CC 的调用 = `mem recall` / `mem ingest` / `mem consolidate`**,底层 = `cli.py <subcmd>`。两种写法等价:
 
 ```bash
-mem ingest "<text>"                        # CC 调用名(deploy 后)
-python3 cli.py ingest "<text>"             # 底层 cli(仓内源,P2)
+mem ingest "<text>"                        # CC 调用名(软链 deploy 后)
+python3 cli.py ingest "<text>"             # 底层 cli(cwd=服务目录)
 ```
 
 ### 1. `ingest` / `mem ingest` — 抽实体+事实入 KG
@@ -124,7 +125,7 @@ mem consolidate
 ## 闭环示例(Spec §4 story 6)
 
 ```bash
-$ cd services/memory-service
+$ cd /home/yy/projects/memory-service
 $ python3 cli.py ingest "用户使用 rust 进行开发"
 {"entities": 2, "facts": ["..."]}
 $ python3 cli.py recall "rust"           # → 命中 uses(用户, rust), scored=1.0×LIF
@@ -135,8 +136,8 @@ $ python3 cli.py consolidate             # → {"superseded": 0, "active": 1}
 
 ## 数据与状态
 
-- KG 数据: `services/memory-service/data/memory.db`(SQLite,服务自治, ADR-7)
-- schema: `services/memory-service/schema.sql`(Entity + Fact reified,**无 MemoryItem 表**, ADR-2/3)
+- KG 数据: `data/memory.db`(cwd=服务目录; SQLite,服务自治, ADR-7)
+- schema: `schema.sql`(Entity + Fact reified,**无 MemoryItem 表**, ADR-2/3)
 - 状态独立于 CC memory md;v1 不投影回 md(桥接留后, Spec Defer)
 
 ## 何时不该用

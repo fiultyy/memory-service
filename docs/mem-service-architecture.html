@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>mem-service 架构 — agent-os-v2 (v1→v6 全栈)</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 1240px; margin: 0 auto; padding: 24px; color: #2d3436; line-height: 1.65; background: #fafbfc; }
+  h1 { color: #1a1a2e; border-bottom: 3px solid #6c5ce7; padding-bottom: 10px; font-size: 1.8em; }
+  h2 { color: #6c5ce7; margin-top: 44px; border-left: 5px solid #6c5ce7; padding-left: 12px; font-size: 1.35em; }
+  h3 { color: #2d3436; margin-top: 22px; font-size: 1.1em; }
+  .subtitle { color: #636e72; margin-top: -8px; font-size: 0.95em; }
+  .layer { background: white; border: 1px solid #dfe6e9; border-radius: 10px; padding: 14px 16px; margin: 10px 0; }
+  .layer-title { color: #6c5ce7; font-weight: bold; font-size: 0.92em; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .mod { display: inline-block; background: #f8f9ff; border: 1.5px solid #6c5ce7; border-radius: 6px; padding: 5px 11px; margin: 3px; font-family: "SF Mono", Consolas, monospace; font-size: 0.86em; color: #1a1a2e; }
+  .mod-desc { color: #636e72; font-size: 0.85em; }
+  .module { background: white; border: 1px solid #dfe6e9; border-radius: 8px; padding: 14px; margin: 10px 0; transition: box-shadow 0.2s; }
+  .module:hover { box-shadow: 0 2px 8px rgba(108,92,231,0.15); }
+  .module-name { color: #6c5ce7; font-weight: bold; font-family: "SF Mono", Consolas, monospace; font-size: 1.05em; }
+  .adr { display: inline-block; background: #6c5ce7; color: white; padding: 1px 7px; border-radius: 10px; font-size: 0.78em; margin-left: 5px; vertical-align: middle; }
+  .flow { background: #fffbf0; border: 1px solid #ffeaa7; border-left: 4px solid #fdcb6e; border-radius: 6px; padding: 12px 14px; margin: 10px 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.84em; white-space: pre-wrap; line-height: 1.5; overflow-x: auto; }
+  .stat { background: #f0fff4; border: 1px solid #b2f7c1; border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; background: white; }
+  th, td { border: 1px solid #dfe6e9; padding: 7px 10px; text-align: left; font-size: 0.92em; }
+  th { background: #6c5ce7; color: white; }
+  tr:nth-child(even) { background: #f8f9fa; }
+  .defer-row td { color: #856404; }
+  code { background: #e9ecef; padding: 1px 5px; border-radius: 3px; font-size: 0.88em; font-family: "SF Mono", Consolas, monospace; }
+  .arrow { color: #6c5ce7; font-weight: bold; }
+  .tag-done { color: #00b894; font-weight: bold; }
+  .tag-defer { color: #fdcb6e; font-weight: bold; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 768px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>mem-service 架构</h1>
+<div class="subtitle">agent-os-v2 / services/memory-service — v1→v6 全栈 · KG-based structured recall · 11 ADR · 叠加在 CC file-based memory 之上(不改 MEMORY.md)</div>
+
+<h2>总览</h2>
+<div class="layer">
+mem-service 是一个 <b>KG (Entity + Fact reified) 结构化记忆服务</b>。它把对话事实/实体落 <code>fact</code> 表(正交元数据 + LIF 五维), 按需召回相关 Fact, 叠加在 Claude Code 现有 file-based memory(MEMORY.md 索引)之上, 双轨运行。
+<p>三层能力:<br>
+<b>① ingest 侧抽取</b> — 蝴蝶翼 LLM(N=3 投票 + regex fallback, ADR-5b) 解中文盲区(v4)<br>
+<b>② 治理</b> — type-aware decay(idempotent)+ pagerank + LIF 五维 + autoDream(session→KG 增量)+ KG init bootstrap(CC memory 种子)<br>
+<b>③ query 侧召回</b> — α·match+β·centrality+γ·LIF+δ·vec_sim 融合(v6 向量解 synonym/rewrite 盲区)</p>
+</div>
+
+<h2>分层架构</h2>
+<div class="layer">
+  <div class="layer-title">入口层</div>
+  <span class="mod">cli.py</span><span class="mod-desc">ingest / recall / consolidate / autodream / init-memory 子命令(thin wrapper 调深化模块)</span><br>
+  <span class="mod">hooks/pre-compact-mem.sh</span><span class="mod-desc">CC PreCompact hook(compact 前触发 autodream, exit 0 放行)</span>
+</div>
+<div class="layer">
+  <div class="layer-title">抽取层 (ingest)</div>
+  <span class="mod">adapter.py</span><span class="mod-desc">蝴蝶翼 LLM(N=3 fan-out + 投票 quorum ⌈n/2⌉ + regex fallback + merge voted)</span><br>
+  <span class="mod">llm_provider.py</span><span class="mod-desc">LLMProvider Protocol + ZhipuAnthropicProvider(直连智谱 glm-5-turbo) + CCRProvider(fallback)</span><br>
+  <span class="mod">extractor.py</span><span class="mod-desc">regex(7 英文模式 + 中文同义 + 9 关系)ADR-5 fallback</span>
+</div>
+<div class="layer">
+  <div class="layer-title">向量层 (query)</div>
+  <span class="mod">embedding.py</span><span class="mod-desc">EmbeddingProvider + OpenAICompatEmbedding(LM Studio qwen3-embedding-4b-2560 默认 + Ollama fallback)ADR-13</span>
+</div>
+<div class="layer">
+  <div class="layer-title">KG 层</div>
+  <span class="mod">store.py</span><span class="mod-desc">Entity/Fact CRUD(put_entity/put_fact/get_facts_by_subject)</span><br>
+  <span class="mod">db.py</span><span class="mod-desc">SQLite 连接 + schema.sql init(idempotent, WAL)</span>
+</div>
+<div class="layer">
+  <div class="layer-title">召回层</div>
+  <span class="mod">recall.py</span><span class="mod-desc">KG 导航(entity LIKE + value match + 向量候选 use_vec)+ pagerank centrality</span><br>
+  <span class="mod">scoring.py</span><span class="mod-desc">score_fact(α·match+β·c+γ·LIF+δ·vec_sim)+ compute_lif 五维 + refresh_lif_on_recall</span>
+</div>
+<div class="layer">
+  <div class="layer-title">治理层</div>
+  <span class="mod">consolidate.py</span><span class="mod-desc">decay(type-aware idempotent, original_lif 重基)+ dedup(exact supersede)</span><br>
+  <span class="mod">autodream.py</span><span class="mod-desc">session transcript→KG 增量(ADD/UPDATE/DELETE/NOOP)ADR-10</span><br>
+  <span class="mod">bootstrap.py</span><span class="mod-desc">CC memory .md→KG permanent 种子(autodream 复用)ADR-12</span>
+</div>
+
+<h2>核心 Flow</h2>
+
+<h3>① ingest — 文本→KG fact <span class="adr">ADR-5b</span></h3>
+<div class="flow">cli.ingest(text, fact_type, providers)
+  <span class="arrow">→</span> adapter.extract_facts(text, providers)
+        ├─ providers 可达 <span class="arrow">→</span> N=3 wings(LLM 抽 + 3 prompt transform)→ 投票(quorum ⌈n/2⌉)
+        │     ├─ confidence ≥ 0.6 <span class="arrow">→</span> voted facts(exttractor="llm")
+        │     └─ 低置信/空 <span class="arrow">→</span> regex fallback + merge voted(不丢, extractor="regex")
+        └─ providers 不可达 <span class="arrow">→</span> _regex_fallback(extractor.extract)
+  <span class="arrow">→</span> for fact in Extraction.facts: store.put_fact(subject_id, predicate, value, fact_type, extractor=ext_label)
+  <span class="arrow">→</span> return {entities, facts}</div>
+
+<h3>② recall — query→排序 Fact 列表 <span class="adr">ADR-4v2</span> <span class="adr">ADR-2v2</span> <span class="adr">ADR-13</span></h3>
+<div class="flow">cli.recall(query, --vector, weights)
+  <span class="arrow">→</span> tokens = query_tokens(query)
+  <span class="arrow">→</span> 候选集 candidates:
+        ├─ search_entities(tokens): entity.name LIKE per token
+        ├─ _facts_for_entities: entity 的 subject/object fact
+        ├─ value substring: fact.value 含 token
+        └─ [use_vec] qv=embed(query) <span class="arrow">→</span> 扫 active fact, embed(value), cosine ≥ VEC_MIN(0.30) top-N(20) 加入
+  <span class="arrow">→</span> centrality = _build_centralities(): networkx pagerank(on-the-fly, 不持久化)
+  <span class="arrow">→</span> for f in candidates:
+        vec_sim = cosine(qv, embed(f.value))   [use_vec]
+        score_fact(f, query, centrality, vec_sim)
+          = α·match + β·centrality + γ·LIF + δ·vec_sim   (α0.5/β0.3/γ0.2/δ0.3)
+  <span class="arrow">→</span> drop score≤0, sort desc, top_k
+  <span class="arrow">→</span> [boost] refresh_lif_on_recall: access_count+=1, last_accessed_at=now, seen_sessions 吸收, LIF 重算(强化反馈)
+  <span class="arrow">→</span> return Fact list</div>
+
+<h3>③ autodream — session transcript→KG 增量 <span class="adr">ADR-10</span> <span class="adr">ADR-11</span></h3>
+<div class="flow">PreCompact hook(CC /compact 前触发, stdin JSON {session_id, transcript_path, trigger, cwd})
+  <span class="arrow">→</span> bash 读 stdin(jq + python3 fallback) <span class="arrow">→</span> cli autodream --session --transcript
+  <span class="arrow">→</span> autodream.autodream(session_id, transcript_path, providers, fact_type)
+        ├─ db.get_conn()(schema init)
+        ├─ consolidate.consolidate()(decay+dedup, 复用 v2/v3)
+        ├─ text = _read_transcript(JSONL user/assistant message.content 拼文本)
+        ├─ result = adapter.extract_facts(text)(蝴蝶翼 LLM, ADR-11 接入 v4)
+        └─ 增量决策 per fact:
+              ├─ ADD: 新 (subject,predicate,value) <span class="arrow">→</span> put_fact
+              ├─ UPDATE: 已存, 新 session <span class="arrow">→</span> refresh LIF + absorb session
+              ├─ DELETE: 同 (subject,predicate) 不同 value <span class="arrow">→</span> 老 supersede + 新 add
+              └─ NOOP: 已存无变化(幂等: 同 transcript 二次全 NOOP)
+  <span class="arrow">→</span> exit 0 放行 compact(不阻断, 副作用落盘 KG)</div>
+
+<h3>④ init-memory — CC memory→KG 种子 <span class="adr">ADR-12</span></h3>
+<div class="flow">cli init-memory [--memory-dir ~/.claude/projects/-home-yy--claude/memory/]
+  <span class="arrow">→</span> bootstrap.init_memory(memory_dir, providers, fact_type="permanent")
+        for each *.md(sorted):
+          ├─ text = read(.md)
+          ├─ tmp JSONL = {type:user, message:{content:text}}
+          ├─ autodream.autodream(session_id="memory:<file>", tmp, fact_type="permanent")
+          └─ 累加 counts
+  <span class="arrow">→</span> return {files, added, updated, deleted, noop}
+  (幂等: 重跑 NOOP/UPDATE; 不改 CC MEMORY.md 双轨)</div>
+
+<h3>⑤ consolidate — decay + dedup <span class="adr">ADR-8</span> <span class="adr">ADR-8v2</span></h3>
+<div class="flow">cli.consolidate() / autodream phase a
+  ├─ decay pass: LIF *= 0.5**(Δt/half_life)
+  │     half_life: ephemeral=7d / stable=90d / permanent=∞
+  │     idempotent: 从 original_lif 重基(非累乘, ADR-8 fix)
+  │     LIF < 0.1 <span class="arrow">→</span> status active→deprecated
+  └─ dedup pass: exact (subject,predicate,value) 重复 <span class="arrow">→</span> supersede</div>
+
+<h2>ADR 清单 (11)</h2>
+<table>
+<tr><th>ADR</th><th>决策</th><th>状态</th></tr>
+<tr><td><b>ADR-2</b></td><td>Entity + Fact reified KG(无 MemoryItem 层, SQLite single-file)</td><td><span class="tag-done">upheld</span></td></tr>
+<tr><td><b>ADR-4v2</b></td><td>score = α·match + β·centrality + γ·LIF(+ δ·vec_sim v6), 替代 v1 match×lif</td><td><span class="tag-done">upheld</span></td></tr>
+<tr><td><b>ADR-5</b></td><td>regex extractor(7 英文 + 中文同义 + 9 关系模式)</td><td><span class="tag-done">upheld(fallback)</span></td></tr>
+<tr><td><b>ADR-5b</b></td><td>adapter 蝴蝶翼 LLM(N=3 fan-out + 投票 quorum + regex fallback + merge voted)</td><td><span class="tag-done">upheld</span></td></tr>
+<tr><td><b>ADR-8v2</b></td><td>LIF 五维(freq/recency/spread/coherence/source)+ type-aware decay(idempotent, original_lif 重基)</td><td><span class="tag-done">upheld</span></td></tr>
+<tr><td><b>ADR-9</b></td><td>recall baseline(hit@k 量化 synonym/rewrite 盲区: 0%)</td><td><span class="tag-done">upheld</span></td></tr>
+<tr><td><b>ADR-10</b></td><td>PreCompact autoDream hook(session transcript→KG 增量, exit 0 放行)</td><td><span class="tag-done">upheld</span></td></tr>
+<tr><td><b>ADR-11</b></td><td>蝴蝶翼 LLM 接入 autodream(regex 降 fallback)</td><td><span class="tag-done">upheld</span></td></tr>
+<tr><td><b>ADR-12</b></td><td>KG init bootstrap(CC memory→KG permanent 种子, autodream 复用)</td><td><span class="tag-done">upheld</span></td></tr>
+<tr><td><b>ADR-13</b></td><td>向量层 embedding(LM Studio nomic + Ollama fallback)+ recall --vector 融合</td><td><span class="tag-done">upheld</span></td></tr>
+</table>
+
+<h2>实测数据</h2>
+<div class="grid2">
+<div class="stat">
+<b>v4 蝴蝶翼 vs regex 抽取</b>(同文本)<br>
+LLM: <b>4 干净 fact</b>(conf 0.70, MemoryService/蝴蝶翼/PreCompact hook)<br>
+regex: 2 fact(含 <code>yService</code> 垃圾, conf 0.50)<br>
+<span class="mod-desc">→ 接入 autodream 解中文盲区</span>
+</div>
+<div class="stat">
+<b>v5 KG 冷启动</b>(22 CC memory .md)<br>
+72 fact / 48 entity 入 KG(llm 46 + regex 26)<br>
+autodream 增量: deleted=15(矛盾 supersede)<br>
+<span class="mod-desc">→ recall 端到端命中验证</span>
+</div>
+<div class="stat">
+<b>v6 向量层盲区解</b>(eval KG, 21 syn/rew query)<br>
+字面 baseline: hit@5 <b>0%</b>(ADR-9 盲区)<br>
+recall --vector 融合(qwen3-embedding-4b): <b>57.1%</b><br>
+<span class="mod-desc">(nomic 融合 23.8% 对比; qwen3-4b 中文原生 4B 碾压)</span><br>
+<span class="mod-desc">教训: cosine 绝对值 ≠ 相对排序, 选模型必跑 hit@k baseline</span>
+</div>
+<div class="stat">
+<b>PreCompact hook 实测</b><br>
+本会话 /compact 触发 stdout:<br>
+"PreCompact [...] completed successfully"<br>
+<span class="mod-desc">→ 端到端真实闭环</span>
+</div>
+</div>
+
+<h2>模块职责详表</h2>
+<table>
+<tr><th>模块</th><th>职责</th><th>关键函数</th><th>ADR</th></tr>
+<tr><td><code>cli.py</code></td><td>入口(thin wrapper): ingest/recall/consolidate/autodream/init-memory</td><td>ingest, recall, autodream, init_memory, _main</td><td>1/5b/10/12</td></tr>
+<tr><td><code>db.py</code></td><td>SQLite 连接 + schema init(idempotent, WAL, FK on)</td><td>init, get_conn</td><td>2</td></tr>
+<tr><td><code>store.py</code></td><td>Entity/Fact CRUD, Fact reified(value/object_id 双模式)</td><td>put_entity, put_fact, get_facts_by_subject, find_entities_by_name</td><td>2/3</td></tr>
+<tr><td><code>extractor.py</code></td><td>regex 抽取(7 英文 + 中文同义 + 9 关系)</td><td>extract</td><td>5</td></tr>
+<tr><td><code>adapter.py</code></td><td>蝴蝶翼 LLM(N=3 fan-out 3 prompt transform + 投票 + regex fallback + merge)</td><td>extract_facts, default_providers, _vote, _regex_fallback</td><td>5b</td></tr>
+<tr><td><code>llm_provider.py</code></td><td>LLMProvider Protocol + CCRProvider(glm-4.5-air)+ stubs</td><td>CCRProvider.extract_facts</td><td>5b</td></tr>
+<tr><td><code>embedding.py</code></td><td>EmbeddingProvider + OpenAICompatEmbedding(LM Studio/Ollama), passive + cache</td><td>embed, default_providers</td><td>13</td></tr>
+<tr><td><code>scoring.py</code></td><td>score_fact(4 维融合)+ compute_lif(五维)+ refresh_lif_on_recall(强化)</td><td>score_fact, compute_lif, match_item, refresh_lif_on_recall</td><td>4v2/8v2</td></tr>
+<tr><td><code>recall.py</code></td><td>KG 导航(entity LIKE + value match + 向量候选)+ pagerank centrality + _cosine</td><td>recall, search_entities, _build_centralities</td><td>2v2/4v2/13</td></tr>
+<tr><td><code>consolidate.py</code></td><td>decay(type-aware idempotent)+ dedup(exact supersede)</td><td>consolidate, decay</td><td>8/8v2</td></tr>
+<tr><td><code>autodream.py</code></td><td>session transcript→KG 增量(ADD/UPDATE/DELETE/NOOP, 幂等)</td><td>autodream, _read_transcript</td><td>10/11</td></tr>
+<tr><td><code>bootstrap.py</code></td><td>CC memory .md→KG permanent 种子(autodream 复用, DRY)</td><td>init_memory</td><td>12</td></tr>
+<tr><td><code>hooks/pre-compact-mem.sh</code></td><td>PreCompact hook(jq+python3 fallback, cli 缺失静默 exit 0)</td><td>—</td><td>10</td></tr>
+</table>
+
+<h2>defer 队列 (9 项, 优化/扩展)</h2>
+<table>
+<tr><th>#</th><th>defer 项</th><th>依赖/理由</th></tr>
+<tr class="defer-row"><td>1</td><td>autoDream daemon</td><td>CC server-side flag <code>tengu_onyx_plover</code> 未开</td></tr>
+<tr class="defer-row"><td>2</td><td>向量持久化(schema BLOB / FAISS / SQLite-vec)</td><td>MVP 内存 cache 够</td></tr>
+<tr class="defer-row"><td>3</td><td>中文 embedding 调优(BGE-M3 / qwen3-4b)</td><td>nomic 中英跨语言弱, 实证驱动</td></tr>
+<tr class="defer-row"><td>4</td><td>fact on-ingest 预计算 embedding</td><td>避免 on-recall 延迟</td></tr>
+<tr class="defer-row"><td>5</td><td>跨 scope memory 向量联邦</td><td>多 CC project</td></tr>
+<tr class="defer-row"><td>6</td><td>memory 变更增量检测(mtime)</td><td>全量幂等重跑够</td></tr>
+<tr class="defer-row"><td>7</td><td>新 LLM/embedding provider(claude-api/LMStudio)</td><td>当前 CCR+LM Studio+Ollama 够</td></tr>
+<tr class="defer-row"><td>8</td><td>冷层归档</td><td>依赖向量, KG 小不需</td></tr>
+<tr class="defer-row"><td>9</td><td>fact 投影回 CC MEMORY.md</td><td>双轨当前不改 CC</td></tr>
+</table>
+<p class="mod-desc"><b>已否定(用户决策)</b>: UserPromptSubmit 自动注入 / SessionStart(compact) 注入 — agent 自主召回(非自动注入)。</p>
+
+<h2>部署拓扑</h2>
+<div class="layer">
+<div class="layer-title">本机 LLM/embedding 基础设施(mem-service 依赖)</div>
+<span class="mod">智谱直连</span><span class="mod-desc">open.bigmodel.cn/api/anthropic glm-5-turbo(蝴蝶翼抽取默认, ZhipuAnthropicProvider, key 复用 CCR config)</span><br>
+<span class="mod">CCR 3456</span><span class="mod-desc">LLM 路由 fallback(Zhipu 不可达时)</span><br>
+<span class="mod">LM Studio 16666</span><span class="mod-desc">qwen3-embedding-4b dim 2560(embedding 默认, 需 lms load)</span><br>
+<span class="mod">Ollama 11434</span><span class="mod-desc">qwen3-embedding:4b dim 2560(embedding fallback)</span><br>
+<span class="mod">~/.claude/settings.json</span><span class="mod-desc">PreCompact hook 注册(command → AO2 仓内源绝对路径)</span><br>
+<span class="mod">~/.claude/skills/mem</span><span class="mod-desc">软链 → services/memory-service/(deploy)</span>
+</div>
+
+<div class="subtitle" style="margin-top:40px; text-align:center; border-top:1px solid #dfe6e9; padding-top:12px;">
+mem-service v1→v6 · 11 ADR · 46 pytest + eval_recall 2 · main <code>cea7557</code> · 生成于 2026-08-07
+</div>
+
+</body>
+</html>

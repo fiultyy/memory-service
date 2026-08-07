@@ -14,6 +14,7 @@ API: ``adapter.extract_facts(text, providers=None)`` → ``llm_provider.Extracti
 from __future__ import annotations
 
 import os
+import re
 
 from llm_provider import (
     Extraction,
@@ -97,12 +98,23 @@ def extract_facts(
 
 # ── voting / aggregation ──────────────────────────────────────────────
 
+# #2: env 变量名正则 (全大写,至少一个下划线,如 CLAUDE_CODE_SESSION_ID/ZHIPU_API_KEY)
+_ENV_PATTERN = re.compile(r'^[A-Z][A-Z0-9_]*_[A-Z0-9_]+$')
+
+
+def _is_env_entity(name: str) -> bool:
+    """检查 name 是否匹配 env 变量名 pattern (全大写+下划线)。"""
+    return bool(_ENV_PATTERN.match(name.strip()))
+
+
 def _vote(extractions: list[Extraction]) -> Extraction:
     """Majority vote per (subject, predicate, object) triple; confidence = max.
 
     case-fold 投票 key (A2A/a2a 合并达 quorum), 但 surviving 保留原 FactOut
     (大小写原样存 KG)。ponytail: 最浅归一 (case-fold only), 不做 lemmatize/
     alias (upgrade path)。A triple survives if it appears in ≥ ⌈n/2⌉ wings.
+
+    #2: 过滤 env-pattern entity (全大写下划线) 作为 subject/object 的 fact。
     """
     n = len(extractions)
     quorum = (n + 1) // 2  # ⌈n/2⌉: 3→2, 2→1, 1→1
@@ -119,7 +131,11 @@ def _vote(extractions: list[Extraction]) -> Extraction:
     for key, wing_facts in triple_wings.items():
         agree_hist.append(len(wing_facts))
         if len(wing_facts) >= quorum:
-            surviving.append(wing_facts[0][1])  # 保留首个原 FactOut (大小写原样)
+            fact = wing_facts[0][1]  # 保留首个原 FactOut (大小写原样)
+            # #2: 过滤 env-pattern (subject 或 object 匹配 env 变量名则跳过)
+            if _is_env_entity(fact.subject) or _is_env_entity(fact.object):
+                continue
+            surviving.append(fact)
             for wi, _ in wing_facts:
                 contributing_confidences.append(extractions[wi].confidence)
 

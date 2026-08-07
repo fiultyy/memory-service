@@ -50,6 +50,28 @@ if ! printf '%s' "${FILE_PATH}" | grep -qE '^'"${HOME}"'/.claude/projects/.*/mem
     exit 0
 fi
 
+# #3: 从 file_path 反推 project cwd (优先于 stdin cwd)
+# file_path 格式: ~/.claude/projects/<encoded>/memory/X.md
+# encoded = cwd.replace("/", "-").replace(".", "-")
+# 逆: encoded 首字符 "-" → cwd 是 "/" (根); 否则 cwd="/" + encoded 替 "-" → "/"
+INFERRED_CWD=""
+if printf '%s' "${FILE_PATH}" | grep -qE '^'"${HOME}"'/.claude/projects/'; then
+    # 抽取 encoded (projects/ 和 /memory 之间)
+    ENCODED="$(printf '%s' "${FILE_PATH}" | sed -E 's|^'"${HOME}"'/.claude/projects/([^/]+)/memory/.*$|\1|')"
+    if [ -n "${ENCODED}" ]; then
+        # 粗略逆 encoded → cwd (实践中 cwd 多无 ".",encoded 首字符 "-" = 根 "/")
+        if [ "${ENCODED}" = "-" ]; then
+            INFERRED_CWD="/"
+        else
+            # 去掉首字符 "-" (根标记), 然后把剩余 "-" 替换回 "/"
+            REST="${ENCODED#-}"  # 去首字符 "-"
+            INFERRED_CWD="/$(printf '%s' "${REST}" | tr '-' '/')"
+        fi
+    fi
+fi
+# 优先 file_path 反推, fallback stdin cwd
+CWD="${INFERRED_CWD:-${CWD}}"
+
 # Need cli.py and python3 to re-ingest.
 if [ ! -f "${CLI}" ] || ! command -v python3 >/dev/null 2>&1; then
     exit 0

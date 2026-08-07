@@ -22,8 +22,15 @@ import autodream as autodream_mod
 
 
 # ── ADR-16f 过滤: 跳过 mem-service 投影产物 ─────────────────────────────
-def _is_mem_service_projection(text: str) -> bool:
-    """检查 md frontmatter 是否含 source: mem-service (ADR-16f)。"""
+def _is_mem_service_projection(text: str, filename: str | None = None) -> bool:
+    """检查 md frontmatter 是否含 source: mem-service (ADR-16f) 或 filename 是 MEMORY.md。
+
+    MEMORY.md 是 CC 产出的索引投影,不应被 re-ingest (自指循环/噪音)。
+    """
+    # #1: filename 检测 (确定性,无需读内容)
+    if filename is not None and filename == "MEMORY.md":
+        return True
+    # ADR-16f: frontmatter source:mem-service 检测
     if not text.startswith("---"):
         return False
     fm_end = text.find("---", 3)
@@ -50,8 +57,8 @@ def re_ingest_file(
                 "error": f"Not a file: {file_path}"}
 
     text = file_path.read_text(encoding="utf-8")
-    # ADR-16f: 跳过 mem-service 投影产物
-    if _is_mem_service_projection(text):
+    # ADR-16f: 跳过 mem-service 投影产物 + #1 跳过 MEMORY.md (自指循环)
+    if _is_mem_service_projection(text, filename=file_path.name):
         return {"added": 0, "updated": 0, "deleted": 0, "noop": 0, "skipped": 1}
 
     totals = {"added": 0, "updated": 0, "deleted": 0, "noop": 0, "errors": 0}
@@ -112,8 +119,8 @@ def init_memory(
     totals = {"files": 0, "added": 0, "updated": 0, "deleted": 0, "noop": 0, "errors": 0, "skipped": 0}
     for md in sorted(memory_dir.glob("*.md")):
         text = md.read_text(encoding="utf-8")
-        # ADR-16f: 跳过 mem-service 投影产物 (复用共享函数)
-        if _is_mem_service_projection(text):
+        # ADR-16f: 跳过 mem-service 投影产物 + #1 跳过 MEMORY.md (自指循环)
+        if _is_mem_service_projection(text, filename=md.name):
             totals["skipped"] += 1
             continue
         # 分段: 大 .md 切 CHUNK 字段, 各段独立喂 autodream — 覆盖全文 (非截断丢后部),

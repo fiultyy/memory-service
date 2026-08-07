@@ -8,3 +8,6 @@ __pycache__/
 *.db-wal
 *.db-shm
 logs/
+
+# codebase-memory MCP 索引产物 (index_repository 可重建)
+.codebase-memory/

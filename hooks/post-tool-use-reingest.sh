@@ -50,10 +50,11 @@ if ! printf '%s' "${FILE_PATH}" | grep -qE '^'"${HOME}"'/.claude/projects/.*/mem
     exit 0
 fi
 
-# #3: 从 file_path 反推 project cwd (优先于 stdin cwd)
+# #3: 从 file_path 反推 project cwd (优先于 stdin cwd,需 isdir 验证)
 # file_path 格式: ~/.claude/projects/<encoded>/memory/X.md
-# encoded = cwd.replace("/", "-").replace(".", "-")
-# 逆: encoded 首字符 "-" → cwd 是 "/" (根); 否则 cwd="/" + encoded 替 "-" → "/"
+# encoded = cwd.replace("/", "-").replace(".", "-").replace("-", "-")
+# 注意: 编码不可逆! 原始的 "/" 和 "." 和连字符 "-" 都变成 "-"，无法区分。
+# 反推仅对无连字符的 cwd 可靠(如 /home/yy/projects/foo),含连字符则必错(如 memory-service)。
 INFERRED_CWD=""
 if printf '%s' "${FILE_PATH}" | grep -qE '^'"${HOME}"'/.claude/projects/'; then
     # 抽取 encoded (projects/ 和 /memory 之间)
@@ -69,8 +70,12 @@ if printf '%s' "${FILE_PATH}" | grep -qE '^'"${HOME}"'/.claude/projects/'; then
         fi
     fi
 fi
-# 优先 file_path 反推, fallback stdin cwd
-CWD="${INFERRED_CWD:-${CWD}}"
+# isdir 验证: 只有反推 cwd 是真实目录才采信，否则 fallback stdin cwd
+# 含连字符的 cwd(如 memory-service)反推错 → isdir 失败 → 用 stdin cwd
+if [ -n "${INFERRED_CWD}" ] && [ -d "${INFERRED_CWD}" ]; then
+    CWD="${INFERRED_CWD}"
+fi
+# CWD 已设: 优先 isdir 通过的反推值，否则保留 stdin cwd
 
 # Need cli.py and python3 to re-ingest.
 if [ ! -f "${CLI}" ] || ! command -v python3 >/dev/null 2>&1; then

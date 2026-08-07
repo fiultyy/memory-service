@@ -14,3 +14,7 @@ logs/
 
 # 环境变量 (含 API key, 不进 git; .env.example 是模板)
 .env
+
+# orchestrator 运行时编排 state (不版本化)
+.claude/orchestrator-state.json
+.claude/orchestrator-state.lock

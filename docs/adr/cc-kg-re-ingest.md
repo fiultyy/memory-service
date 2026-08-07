@@ -3,8 +3,10 @@ Date: 2026-08-07
 Status: Active
 
 ## ADR-17: CC→KG 反向 re-ingest(memory md → KG 增量)
-Status: Accepted
+Status: Accepted (e/f 修订 2026-08-08, 见下)
 Date: 2026-08-07
+
+> **修订 2026-08-08**:(e)/(f) PostToolUse 自动 re-ingest hook 已从 `~/.claude/settings.json` 移除——每次 memory 编辑都触发 LLM 抽取太激进(KG 活态难控,连文档编辑都喂进 KG 产 ~6 fact)。回退到 **手动 `cli re-ingest <file>`** 单路径(a/b/c/d 仍生效,DELETE prune 不受影响)。脚本 `hooks/post-tool-use-reingest.sh` 保留 dormant(可重启用)。PostToolUse 现 4 entry(orchestrator Bash/Write/Agent + orca *)。
 
 Context: KG→CC 单向(build_index,ADR-15/16)。CC→KG 仅 `init-memory`(全量种子,一次性)。用户编辑 `memory/*.md` 后 KG 不更新——反向增量缺。grill #4 警告:反向 re-ingest 必须过滤 `source:mem-service` 投影 md(否则吃回污染,同 bootstrap 既有 bug ADR-16f)。
 

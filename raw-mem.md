@@ -2,7 +2,7 @@
 
 > **来源**:CC memory(`~/.claude/projects/-home-yy-projects-agent-os-v2/memory/`)里 memory-service 相关 + 本会话(2026-08-07)迭代。迁移到独立项目自包含,不再依赖 CC memory。
 >
-> **日期**:2026-08-07 · 独立项目 HEAD(从 agent-os-v2 cp)· 47 pytest 绿
+> **日期**:2026-08-07 · 独立项目(纯代码+文档;tests/data 精简,验证留原仓 `agent-os-v2/services/memory-service/tests`)
 
 ---
 
@@ -73,7 +73,7 @@
   - **Design 2 抽取覆盖**:`_EXTRACT_PROMPT` few-shot + 专有名词保留 + predicate 扩 part_of/relates_to;`_vote` case-fold;e2e a2a 字面 0→4 hits
   - **Design 3 向量通电**:`store.put_fact` 下沉 embed(value)预热 L2 + `cli embed-backfill` 回填 + conftest embedding mock;e2e embed-backfill 86 value,recall a2a --vector 20 hits
 - **commit 62f795f** — INSTALL.md(6-task 接线 guide)+ SKILL.md 修过时
-- **独立 cp** — `/home/yy/projects/memory-service/`(13 .py 2831 行,networkx 唯一三方,0 agent-os-v2 依赖,47 pytest 独立绿)
+- **独立 cp** — `/home/yy/projects/memory-service/`(13 .py 2831 行,networkx 唯一三方,0 agent-os-v2 依赖;纯代码+文档 repo,tests/data 精简)
 
 ---
 
@@ -132,5 +132,5 @@
 - **schema**:`schema.sql`(entity 5 列 + fact 25 列含 source_cwd)
 - **接线**:`INSTALL.md`(6 task)+ `SKILL.md`(CC /mem 用法)
 - **hook**:`hooks/pre-compact-mem.sh`
-- **测试**:`tests/`(9 文件,47 pytest;conftest RegexMockProvider + _NoVecProvider autouse)
+- **测试**:验证在原仓 `agent-os-v2/services/memory-service/tests/`(9 文件,47 pytest,conftest RegexMockProvider + _NoVecProvider autouse);独立项目精简不含 tests/data
 - **原仓文档**:`agent-os-v2/docs/mem-service-iteration-log.md`(v1→v6 完整 12 ADR)+ `docs/mem-service-architecture.html`

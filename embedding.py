@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import urllib.error
 import urllib.request
@@ -71,8 +72,16 @@ OLLAMA = OpenAICompatEmbedding(
 
 def default_providers() -> list[EmbeddingProvider]:
     """LM Studio qwen3-embedding-4b first, Ollama qwen3 fallback(同模型容错).
+    url/model 从 env (MEM_LMSTUDIO_*/MEM_OLLAMA_*) 读, 默认取 LM_STUDIO/OLLAMA 常量。
     ponytail: 两 provider 都 local OpenAI-compat, 同 seam; unreachable 自剔除。"""
-    return [LM_STUDIO, OLLAMA]
+    return [
+        OpenAICompatEmbedding(
+            os.environ.get("MEM_LMSTUDIO_URL", LM_STUDIO.base_url),
+            os.environ.get("MEM_LMSTUDIO_MODEL", LM_STUDIO.model)),
+        OpenAICompatEmbedding(
+            os.environ.get("MEM_OLLAMA_URL", OLLAMA.base_url),
+            os.environ.get("MEM_OLLAMA_MODEL", OLLAMA.model)),
+    ]
 
 
 # Two-tier cache: L1 内存(进程内, 跨 cli 调用丢) + L2 SQLite(跨进程持久, 解 cli 短命)。

@@ -11,3 +11,6 @@ logs/
 
 # codebase-memory MCP 索引产物 (index_repository 可重建)
 .codebase-memory/
+
+# 环境变量 (含 API key, 不进 git; .env.example 是模板)
+.env

@@ -13,6 +13,8 @@ API: ``adapter.extract_facts(text, providers=None)`` → ``llm_provider.Extracti
 
 from __future__ import annotations
 
+import os
+
 from llm_provider import (
     Extraction,
     FactOut,
@@ -165,9 +167,13 @@ def _tcp_reachable(base_url: str, timeout: float = 2.0) -> bool:
 
 def default_providers() -> list[LLMProvider]:
     """LLM provider list(蝴蝶翼抽取): ZhipuAnthropicProvider 直连智谱
-    (glm-5-turbo, open.bigmodel.cn/api/anthropic)。CCR 代理已移除 — provider
-    直连少一跳。key 从 env ZHIPU_API_KEY 或 CCR config(zhipu-anthropic.api_key)读。"""
-    return [ZhipuAnthropicProvider()]
+    (glm-5-turbo, open.bigmodel.cn/api/anthropic)。base_url/model 从 env
+    (MEM_LLM_BASE_URL/MEM_LLM_MODEL) 读, 默认智谱; key 从 env ZHIPU_API_KEY
+    或 CCR config(zhipu-anthropic.api_key)读。"""
+    return [ZhipuAnthropicProvider(
+        base_url=os.environ.get("MEM_LLM_BASE_URL", "https://open.bigmodel.cn/api/anthropic"),
+        model=os.environ.get("MEM_LLM_MODEL", "glm-5-turbo"),
+    )]
 
 
 def _demo() -> None:  # ponytail self-check (mock provider, no network)

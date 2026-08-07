@@ -1,4 +1,4 @@
-"""mem-service llm_provider — LLMProvider Protocol + CCRProvider (ADR-5b).
+"""mem-service llm_provider — LLMProvider Protocol + ZhipuAnthropicProvider (ADR-5b).
 
 The adapter (``adapter.py``) drives an arbitrary ``LLMProvider`` to extract
 facts the regex layer (ADR-5) cannot reach — pure Chinese bare sentences,
@@ -10,9 +10,9 @@ Providers are *passive*: a provider that is unreachable, errors, or returns
 garbage yields an empty facts list + low confidence (0.0), never raises. The
 adapter decides whether to trust / fall back.
 
-ZhipuAnthropicProvider 直连智谱 (open.bigmodel.cn/api/anthropic, glm-5-turbo).
-CCR router proxy removed — provider 直连少一跳. claude-api / LMstudio
-providers are stubs — concrete impl deferred until a deploy target exists.
+ZhipuAnthropicProvider 直连智谱 (open.bigmodel.cn/api/anthropic, glm-5-turbo)。
+base_url/model/api_key 全从 env 读 (cli._load_env 从 .env 加载, 自包含不依赖 CCR)。
+claude-api / LMstudio providers are stubs — concrete impl deferred until a deploy target exists.
 Kept minimal: the Protocol is the seam, new providers slot in by implementing
 ``extract_facts``.
 """
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import pathlib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -82,32 +81,29 @@ predicate 从这些里选: is_a, uses, depends_on, contains, belongs_to, impleme
 {"facts": [{"subject": "native agent", "predicate": "is_a", "object": "A2A node"}, {"subject": "native agent", "predicate": "part_of", "object": "A2A mesh"}]}
 文本: """
 
-# CCRProvider removed — ZhipuAnthropicProvider 直连 open.bigmodel.cn/api/anthropic,
-# 不经 localhost:3456 ccr 路由 (provider 直连, 少一跳)。
 
-
-# ── ZhipuAnthropicProvider — 智谱直连 Anthropic 协议(glm-5-turbo, coding plan)──
+# ── ZhipuAnthropicProvider — 智谱直连 Anthropic 协议(glm-5-turbo) ────────
 
 @dataclass
 class ZhipuAnthropicProvider:
-    """智谱 Anthropic 协议直连(不经 CCR localhost:3456 中转), model glm-5-turbo。
+    """智谱 Anthropic 协议直连, model glm-5-turbo。
 
-    base_url https://open.bigmodel.cn/api/anthropic, Anthropic Messages 格式
-    (/v1/messages, x-api-key + anthropic-version)。api_key 从 env ZHIPU_API_KEY
-    或 CCR config(~/.claude-code-router/config.json Providers zhipu-anthropic)读
-    (key 不进 git)。比 CCRProvider 少一跳(直连智谱)。国内服务(open.bigmodel.cn)
+    base_url/model 从 env (MEM_LLM_BASE_URL/MEM_LLM_MODEL) 读, 默认智谱
+    (open.bigmodel.cn/api/anthropic, Anthropic Messages /v1/messages,
+    x-api-key + anthropic-version)。api_key 从 env ZHIPU_API_KEY 读
+    (cli._load_env 从同目录 .env 加载, key 不进 git)。国内服务(open.bigmodel.cn)
     → ProxyHandler({}) 禁境外代理直连(host-network-proxy 教训)。Failures → empty conf 0.0。
     """
     base_url: str = "https://open.bigmodel.cn/api/anthropic"
     model: str = "glm-5-turbo"
-    api_key: str = ""  # 空 → _load_zhipu_key 从 env/CCR config 读
+    api_key: str = ""  # 空 → _load_zhipu_key 从 env ZHIPU_API_KEY 读
     timeout: float = 60.0
 
     def extract_facts(self, text: str) -> Extraction:
         key = self.api_key or _load_zhipu_key()
         if not key:
             return Extraction(confidence=0.0, source_meta={
-                "provider": "zhipu", "error": "no api_key (set ZHIPU_API_KEY or CCR config)"})
+                "provider": "zhipu", "error": "no api_key (set ZHIPU_API_KEY in .env)"})
         body = json.dumps({
             "model": self.model, "max_tokens": 512,
             "messages": [{"role": "user", "content": _EXTRACT_PROMPT + text}],
@@ -136,19 +132,9 @@ class ZhipuAnthropicProvider:
 
 
 def _load_zhipu_key() -> str:
-    """智谱 API key: env ZHIPU_API_KEY 优先, 否则 CCR config
-    (~/.claude-code-router/config.json Providers zhipu-anthropic.api_key)。空 if 都无。"""
-    key = os.environ.get("ZHIPU_API_KEY", "")
-    if key:
-        return key
-    try:
-        cfg = pathlib.Path.home() / ".claude-code-router" / "config.json"
-        for prov in json.loads(cfg.read_text(encoding="utf-8")).get("Providers", []):
-            if prov.get("name") == "zhipu-anthropic":
-                return prov.get("api_key", "") or ""
-    except (OSError, ValueError, KeyError):
-        pass
-    return ""
+    """智谱 API key: 仅 env ZHIPU_API_KEY (cli._load_env 从同目录 .env 加载)。
+    CCR config fallback 已移除 — mem-service 与 CCR 解耦, 自包含。"""
+    return os.environ.get("ZHIPU_API_KEY", "")
 
 
 def _extract_text(raw: str) -> str | None:

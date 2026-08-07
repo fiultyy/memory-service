@@ -34,6 +34,25 @@ import store
 from llm_provider import LLMProvider
 
 
+# ── .env 加载 (stdlib, 无依赖; 早于 provider 实例化) ─────────────────
+def _load_env() -> None:
+    """从同目录 .env 加载环境变量到 os.environ (setdefault: 不覆盖已存在的)。
+    无 .env 文件则 no-op。provider (llm/embedding) 的 default_providers() 运行时
+    读 env, 故 cli 加载时跑一次即可。"""
+    p = Path(__file__).parent / ".env"
+    if not p.is_file():
+        return
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_env()
+
+
 # ── ingest ──────────────────────────────────────────────────────────
 
 def ingest(text: str, source_ref: str | None = None,

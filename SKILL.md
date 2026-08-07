@@ -89,14 +89,15 @@ $ python3 cli.py ingest "用户使用 rust 进行开发"
 ### 2. `recall` / `mem recall` — KG 导航召回 Fact(match×lif 排序)
 
 ```bash
-mem recall "<query>" [--verbose]
-# 等价: python3 cli.py recall "<query>" [--verbose]
+mem recall "<query>" [--verbose] [--vector] [--cwd <cwd>] [--session <sid>]
+# 等价: python3 cli.py recall "<query>" [--verbose] [--vector] [--cwd <cwd>] [--session <sid>]
 ```
 
 - v1 召回 = **子串/前缀匹配**(Spec Defer): `entity.name LIKE %query%` 定位 seed 实体 → 其 subject/object 的 Fact → score = match × Fact.LIF 标量(ADR-4; lif 读 `Fact.LIF` 列,非 NeuralField)
 - 无 seed 时回退到 `fact.value/predicate LIKE %query%`
 - 结果按 score 降序
 - `--verbose`: 每条 Fact 追加 `_scored`/`_subject_name`/`_object_name` 调试字段(替代被 defer 的 query cli)
+- `--session`: 可选 session id(默认 `CLAUDE_CODE_SESSION_ID` env, CC 内建注入;无 env fallback "unknown")。用于 LIF 刷新时记录 `seen_sessions`,记 access_count。
 - stdout: JSON Fact 数组
 
 **示例**:

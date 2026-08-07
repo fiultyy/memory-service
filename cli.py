@@ -243,6 +243,8 @@ def _main(argv: list[str] | None = None) -> int:
                      help="启用向量召回融合(ADR-13, 解 synonym/rewrite 字面盲区)")
     rec.add_argument("--cwd", dest="cwd", default=None,
                      help="ADR-14 过滤 source_cwd(本 cwd fact + NULL 老数据; 默认全 cwd)")
+    rec.add_argument("--session", dest="session", default=None,
+                     help="CC session id(默认 CLAUDE_CODE_SESSION_ID env)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -284,7 +286,8 @@ def _main(argv: list[str] | None = None) -> int:
             ensure_ascii=False,
         ))
     elif args.cmd == "recall":
-        print(json.dumps(recall(args.query, verbose=args.verbose, use_vec=args.vector, cwd=args.cwd), ensure_ascii=False, default=str))
+        session_id = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
+        print(json.dumps(recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd), ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":

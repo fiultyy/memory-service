@@ -244,9 +244,9 @@ def recall(
             centrality=_fact_centrality(f, centralities),
             vec_sim=vs, weights=weights, delta=delta,
         ))
-    # drop zero-score (no match) unless verbose wants them; mirrors "hit" semantics.
-    # vec_sim>0(use_vec) 的候选 score>0 不 drop — 即使字面 m=0(盲区解)。
-    scored = [s for s in scored if s["score"] > 0.0]
+    # drop low-score (噪音) 除非 verbose wants them; ADR-4v2 α=0.5 对齐: match≥0.6 达标,
+    # 总 score 门槛 0.3(保留中高质量 hit, 降噪)。vec_sim>0 的候选 score>0 不 drop — 即使字面 m=0(盲区解)。
+    scored = [s for s in scored if s["score"] >= 0.3]
     scored.sort(key=lambda s: s["score"], reverse=True)
     if top_k is not None:
         scored = scored[: max(0, top_k)]

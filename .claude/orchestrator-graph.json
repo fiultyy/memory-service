@@ -1,0 +1,108 @@
+{
+  "topic": "recall-trail-projection",
+  "adr_path": "docs/adr/recall-trail-projection.md",
+  "spec_path": "docs/specs/recall-trail-projection.md",
+  "iteration_base": "a26be97b3e06fa7bef97ebc6e396235d0fbb3e1a",
+  "revision": "2026-08-07 post group-orche grill: Node B 简化(env 取代 hook), Node C 扩容 4 task(清空重写/UNION+env/score阈值/hook透传)",
+  "nodes": [
+    {
+      "id": "A",
+      "type": "ultracode-workflow",
+      "tasks": [
+        {
+          "id": "T_A1",
+          "description": "bootstrap.init_memory 扫描时跳过 frontmatter source:mem-service 的投影 md(ADR-16f 闭环卫生)。grill-loop-leak 确认这是当前唯一真污染面。",
+          "files": ["bootstrap.py"],
+          "adr_constraints": ["ADR-16f"],
+          "verify": {
+            "skeptic": {
+              "focus": "过滤正确跳过 source:mem-service md 且不误伤 CC 原生 md;test 区分'过滤跳过'vs'幂等 UPDATE'(查 source_refs/seen_sessions 无 mem-*.md 假 session)",
+              "acceptance": ["source:mem-service md 不被 ingest", "普通 CC md 仍被 ingest", "幂等", "test 断言 source_refs/seen_sessions 无 mem-*.md"]
+            },
+            "general_test_hint": "单进程 python db.init(tmp) 隔离 → 造 native.md + mem-x.md(source:mem-service) → init_memory(providers=[Fake]) → 断言 KG 无 source_ref 含 mem-x.md",
+            "qa_test": null
+          }
+        }
+      ],
+      "parallel_within": false,
+      "depends_on": [],
+      "max_fix_rounds": 3
+    },
+    {
+      "id": "B",
+      "type": "ultracode-workflow",
+      "tasks": [
+        {
+          "id": "T_B1",
+          "description": "recall() session_id 默认 os.environ.get('CLAUDE_CODE_SESSION_ID','unknown')(ADR-16a,env 取代原 --session 强制/hook 方案)。refresh_lif_on_recall 因 session_id 现有值而激活写 seen_sessions。保留可选 --session 覆盖。SKILL.md 补 env 机制说明(无需用户带 --session)。grill 简化:不拆三,无需 hook 兜底。",
+          "files": ["cli.py", "recall.py", "SKILL.md"],
+          "adr_constraints": ["ADR-16a"],
+          "verify": {
+            "skeptic": {
+              "focus": "recall() 默认读 env fallback;env 有值时 seen_sessions 累积当前 session;无 env 时 fallback 'unknown' 不崩;--session 显式覆盖优先",
+              "acceptance": ["CLAUDE_CODE_SESSION_ID 有值时 fact.seen_sessions 含该 id", "无 env 时 fallback unknown 不崩", "--session 显式覆盖 env", "SKILL.md 更新(env 自动,无需用户带 --session)"]
+            },
+            "general_test_hint": "单进程 python db.init(tmp) → 造 fact → os.environ['CLAUDE_CODE_SESSION_ID']='test-sid' → cli.recall('rust') → 查 seen_sessions 含 test-sid;再测无 env fallback unknown",
+            "qa_test": null
+          }
+        }
+      ],
+      "parallel_within": false,
+      "depends_on": [],
+      "max_fix_rounds": 3
+    },
+    {
+      "id": "C",
+      "type": "ultracode-workflow",
+      "tasks": [
+        {
+          "id": "T_C1",
+          "description": "update_memory_md 改清空重写:正则删所有 [mem] 前缀行(当前无 # [mem] 段标题,投影是散行)→ 重写本次投影集(ADR-16c,修 ADR-15 累积 bug)。grep 确认仅 build_index 调用,改它非违背。",
+          "files": ["projection.py"],
+          "adr_constraints": ["ADR-16c"]
+        },
+        {
+          "id": "T_C2",
+          "description": "cli build_index 加 session_id(默认读 env)+ UNION 查询(轨迹 seen_sessions LIKE ∪ LIF top-K,按 id 去重)(ADR-16b/g)。",
+          "files": ["cli.py"],
+          "adr_constraints": ["ADR-16b", "ADR-16g"]
+        },
+        {
+          "id": "T_C3",
+          "description": "hooks/pre-compact-mem.sh build-index 调用透传 session_id(env 自动可用,或 hook stdin 已解析的 SESSION_ID)(ADR-16b)。",
+          "files": ["hooks/pre-compact-mem.sh"],
+          "adr_constraints": ["ADR-16b"]
+        },
+        {
+          "id": "T_C4",
+          "description": "recall.py:249 score>=0.3 噪音过滤(ADR-4v2 α=0.5 对齐);cli recall 加 --top-k(默认 None 保留兼容)。投影层自动受益(低相关尾巴不灌 CC 热层)。",
+          "files": ["recall.py", "cli.py"],
+          "adr_constraints": ["ADR-16 噪音"]
+        }
+      ],
+      "parallel_within": true,
+      "workflow_spec": {
+        "implement": "parallel([T_C1_impl, T_C2_impl, T_C3_impl, T_C4_impl])",
+        "verify_skeptic": "parallel([T_C1..T_C4_skeptic])",
+        "verify_qa": "none(qa_available=false)",
+        "fix_loop": "max 3 rounds per task"
+      },
+      "verify_node": {
+        "skeptic": {
+          "focus": "清空重写幂等(同 session 重跑 [mem] 段=本次投影,不累积)+ UNION 两源去重 + score>=0.3 噪音过滤 + NULL 严格 + env session 透传",
+          "acceptance": ["[mem] 段每次重写,旧行清除(无累积膨胀)", "轨迹 fact ∪ top-K 按 id 去重", "score<0.3 的 fact 不投影", "NULL source_cwd 不投影", "同 session 重跑幂等"]
+        },
+        "general_test_hint": "单进程 python db.init(tmp) → 造 F1(seen_sessions 含 sid, source_cwd=cwd, score 高) + F2(LIF 高, score 高) + F3(低 score 噪音) → build_index(scope=cwd, session=sid, memory_dir=tmp) → 断言 [mem] 段含 F1/F2 不含 F3;再跑一次断言行数不变(幂等,无累积)",
+        "qa_test": null
+      },
+      "depends_on": ["A", "B"],
+      "max_fix_rounds": 3
+    }
+  ],
+  "p3_config": {
+    "regression_intents": "all",
+    "full_branch_review": true,
+    "adr_compliance_check": true
+  },
+  "green_definition": "all nodes out(pass) AND p3 regression pass AND adr_compliance pass AND full_branch_review pass"
+}

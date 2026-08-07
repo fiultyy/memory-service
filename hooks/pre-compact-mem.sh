@@ -64,7 +64,8 @@ if [ -f "${CLI}" ] && [ -r "${TRANSCRIPT_PATH}" ]; then
                                     ${CWD:+--cwd "$CWD"} \
               >/dev/null 2>&1 || true
           # ADR-15 分布式 index: autodream 后硬编 build-index(投影 KG 高 LIF fact → CC memory + MEMORY.md [mem])
-          python3 cli.py build-index ${CWD:+--scope "$CWD"} \
+          # 透传 SESSION_ID 用于轨迹 UNION(ADR-16b)
+          python3 cli.py build-index ${CWD:+--scope "$CWD"} --session "${SESSION_ID}" \
               >/dev/null 2>&1 || true )
     fi
 fi

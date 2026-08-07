@@ -67,28 +67,21 @@ def mem_index_line(fact: dict, subject: str) -> str:
 
 
 def update_memory_md(facts: list[dict], ent_names: dict[str, str], memory_md: Path) -> int:
-    """MEMORY.md append/update [mem] 索引行(幂等)。
-    CC 原生 append/update 逻辑: mem-<id> 匹配 → update(LIF 变); 否则 append。
-    不动 CC 原生索引行(无 mem- prefix)。返回写入行数。"""
+    """MEMORY.md 清空重写 [mem] 索引行(幂等)。
+    删所有 `- [mem]` 开头行(散 index 标记), 重写本次 facts。
+    保留 CC 原生行(非 [mem] 开头)。返回写入行数。"""
     existing = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
     lines = existing.splitlines()
     fact_by_id = {f["id"]: f for f in facts}
     out: list[str] = []
-    seen: set[str] = set()
+    # 过滤掉所有 [mem] 索引行(前缀 `- [mem]`), 保留 CC 原生行
     for line in lines:
-        m = re.search(r"mem-([a-f0-9]+)\.md", line)
-        if m and m.group(1) in fact_by_id:
-            fid = m.group(1)
-            fact = fact_by_id[fid]
-            subj = ent_names.get(fact["subject_id"], "?")
-            out.append(mem_index_line(fact, subj))   # update(LIF/source 变)
-            seen.add(fid)
-        else:
-            out.append(line)   # CC 原生行或非 top-K mem 行, 保留
-    for f in facts:   # append 新 top-K(未 seen)
-        if f["id"] not in seen:
-            subj = ent_names.get(f["subject_id"], "?")
-            out.append(mem_index_line(f, subj))
+        if not line.startswith("- [mem] "):
+            out.append(line)
+    # 重写本次投影 facts
+    for f in facts:
+        subj = ent_names.get(f["subject_id"], "?")
+        out.append(mem_index_line(f, subj))
     memory_md.write_text("\n".join(out) + "\n", encoding="utf-8")
     return len(facts)
 

@@ -1,0 +1,173 @@
+{
+  "topic": "recall-trail-projection",
+  "phase": "P2",
+  "nodes": [
+    {
+      "id": "A",
+      "type": "ultracode-workflow",
+      "state": "out",
+      "depends_on": [],
+      "tasks": [
+        {
+          "id": "T_A1",
+          "description": "bootstrap.init_memory 扫描时跳过 frontmatter source:mem-service 的投影 md(ADR-16f 闭环卫生)。grill-loop-leak 确认这是当前唯一真污染面。",
+          "files": [
+            "bootstrap.py"
+          ],
+          "adr_constraints": [
+            "ADR-16f"
+          ],
+          "verify": {
+            "skeptic": {
+              "focus": "过滤正确跳过 source:mem-service md 且不误伤 CC 原生 md;test 区分'过滤跳过'vs'幂等 UPDATE'(查 source_refs/seen_sessions 无 mem-*.md 假 session)",
+              "acceptance": [
+                "source:mem-service md 不被 ingest",
+                "普通 CC md 仍被 ingest",
+                "幂等",
+                "test 断言 source_refs/seen_sessions 无 mem-*.md"
+              ]
+            },
+            "general_test_hint": "单进程 python db.init(tmp) 隔离 → 造 native.md + mem-x.md(source:mem-service) → init_memory(providers=[Fake]) → 断言 KG 无 source_ref 含 mem-x.md",
+            "qa_test": null
+          }
+        }
+      ],
+      "agent_id": null,
+      "signal_file": ".claude/orchestrator-node-A.done",
+      "commits": [
+        "fb3b840"
+      ],
+      "verify_results": {},
+      "fix_rounds": 0,
+      "started_at": "20:59",
+      "ended_at": "21:05"
+    },
+    {
+      "id": "B",
+      "type": "ultracode-workflow",
+      "state": "out",
+      "depends_on": [],
+      "tasks": [
+        {
+          "id": "T_B1",
+          "description": "recall() session_id 默认 os.environ.get('CLAUDE_CODE_SESSION_ID','unknown')(ADR-16a,env 取代原 --session 强制/hook 方案)。refresh_lif_on_recall 因 session_id 现有值而激活写 seen_sessions。保留可选 --session 覆盖。SKILL.md 补 env 机制说明(无需用户带 --session)。grill 简化:不拆三,无需 hook 兜底。",
+          "files": [
+            "cli.py",
+            "recall.py",
+            "SKILL.md"
+          ],
+          "adr_constraints": [
+            "ADR-16a"
+          ],
+          "verify": {
+            "skeptic": {
+              "focus": "recall() 默认读 env fallback;env 有值时 seen_sessions 累积当前 session;无 env 时 fallback 'unknown' 不崩;--session 显式覆盖优先",
+              "acceptance": [
+                "CLAUDE_CODE_SESSION_ID 有值时 fact.seen_sessions 含该 id",
+                "无 env 时 fallback unknown 不崩",
+                "--session 显式覆盖 env",
+                "SKILL.md 更新(env 自动,无需用户带 --session)"
+              ]
+            },
+            "general_test_hint": "单进程 python db.init(tmp) → 造 fact → os.environ['CLAUDE_CODE_SESSION_ID']='test-sid' → cli.recall('rust') → 查 seen_sessions 含 test-sid;再测无 env fallback unknown",
+            "qa_test": null
+          }
+        }
+      ],
+      "agent_id": null,
+      "signal_file": ".claude/orchestrator-node-B.done",
+      "commits": [
+        "9b075e3"
+      ],
+      "verify_results": {},
+      "fix_rounds": 0,
+      "started_at": "20:59",
+      "ended_at": "21:05"
+    },
+    {
+      "id": "C",
+      "type": "ultracode-workflow",
+      "state": "in",
+      "depends_on": [
+        "A",
+        "B"
+      ],
+      "tasks": [
+        {
+          "id": "T_C1",
+          "description": "update_memory_md 改清空重写:正则删所有 [mem] 前缀行(当前无 # [mem] 段标题,投影是散行)→ 重写本次投影集(ADR-16c,修 ADR-15 累积 bug)。grep 确认仅 build_index 调用,改它非违背。",
+          "files": [
+            "projection.py"
+          ],
+          "adr_constraints": [
+            "ADR-16c"
+          ]
+        },
+        {
+          "id": "T_C2",
+          "description": "cli build_index 加 session_id(默认读 env)+ UNION 查询(轨迹 seen_sessions LIKE ∪ LIF top-K,按 id 去重)(ADR-16b/g)。",
+          "files": [
+            "cli.py"
+          ],
+          "adr_constraints": [
+            "ADR-16b",
+            "ADR-16g"
+          ]
+        },
+        {
+          "id": "T_C3",
+          "description": "hooks/pre-compact-mem.sh build-index 调用透传 session_id(env 自动可用,或 hook stdin 已解析的 SESSION_ID)(ADR-16b)。",
+          "files": [
+            "hooks/pre-compact-mem.sh"
+          ],
+          "adr_constraints": [
+            "ADR-16b"
+          ]
+        },
+        {
+          "id": "T_C4",
+          "description": "recall.py:249 score>=0.3 噪音过滤(ADR-4v2 α=0.5 对齐);cli recall 加 --top-k(默认 None 保留兼容)。投影层自动受益(低相关尾巴不灌 CC 热层)。",
+          "files": [
+            "recall.py",
+            "cli.py"
+          ],
+          "adr_constraints": [
+            "ADR-16 噪音"
+          ]
+        }
+      ],
+      "agent_id": null,
+      "signal_file": ".claude/orchestrator-node-C.done",
+      "commits": [],
+      "verify_results": {},
+      "fix_rounds": 0,
+      "started_at": "21:05"
+    }
+  ],
+  "stats": {
+    "total": 3,
+    "done": 2,
+    "in_flight": 1,
+    "pending": 0
+  },
+  "adr_count": 0,
+  "qa_available": false,
+  "qa_target_url": "http://localhost:3000",
+  "qa_checked_at": "2026-08-07T20:58:18+08:00",
+  "updated": "2026-08-07T20:58:18+08:00",
+  "qa_http_code": "000",
+  "auto_decisions": [],
+  "iteration_base": "a26be97b3e06fa7bef97ebc6e396235d0fbb3e1a",
+  "recent_commits": [
+    {
+      "sha": "fb3b840",
+      "msg": "[orch:A] bootstrap 过滤 source:mem-service 投影 md (ADR-16f)",
+      "node": "A"
+    },
+    {
+      "sha": "9b075e3",
+      "msg": "[orch:B] recall session_id 自动读 CLAUDE_CODE_SESSION_ID env (ADR-16a)",
+      "node": "B"
+    }
+  ]
+}

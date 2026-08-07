@@ -1,0 +1,38 @@
+task:
+  id: recall-trail-grill-1
+  topic: recall-trail-grill
+  premise:
+    - { loc: docs/adr/recall-trail-projection.md, scope: "ADR-16 六决策(a-f) + Constrains 5 task" }
+    - { loc: docs/specs/recall-trail-projection.md, scope: "范围 / US1-3 / 验收" }
+    - { loc: .claude/orchestrator-graph.json, scope: "3 节点 A/B→C 拓扑" }
+  goal: "go P2 前群体 grill recall-trail-projection(ADR-16)设计的薄弱假设/闭环风险/盲点,产出需修订 ADR 或调整节点的具体事项清单"
+  status: in_progress
+
+rounds:
+  - round: 1
+    intent: "4 角度并行 grill ADR-16 设计"
+    confirmed_by_user: true
+    teammates:
+      - { id: grill-fragile-chain, angle: "session_id 传递链脆弱性", depth: 0, status: done, result_ref: results/r1-grill-fragile-chain.md, verdict: "Round1 判须加 hook ⚠【R2 推翻:env 取代】" }
+      - { id: grill-noise-vs-value, angle: "噪音 + 形式1 边际", depth: 0, status: done, result_ref: results/r1-grill-noise-vs-value.md, verdict: "噪音成立;须 score 阈值 0.3" }
+      - { id: grill-loop-leak, angle: "闭环未封污染面", depth: 0, status: done, result_ref: results/r1-grill-loop-leak.md, verdict: "仅 P1 真污染,Node A 覆盖;ADR-16f 够用" }
+      - { id: grill-idempotent-edge, angle: "幂等 + MEMORY 膨胀", depth: 0, status: done, result_ref: results/r1-grill-idempotent-edge.md, verdict: "无界膨胀;R2 确认清空重写" }
+
+  - round: 2
+    intent: "3 子树深挖(A 传递链/B 膨胀/C 噪音)"
+    parent: [grill-fragile-chain, grill-idempotent-edge, grill-noise-vs-value]
+    confirmed_by_user: true
+    teammates:
+      - { id: chain-hook-feasibility, parent: grill-fragile-chain, angle: "hook 恢复可行性", depth: 0, status: done, result_ref: results/r2-chain-hook-feasibility.md, verdict: "否决 UserPromptSubmit(LLM/validate 风险);env 胜出" }
+      - { id: chain-alt-mechanism, parent: grill-fragile-chain, angle: "替代传递机制", depth: 0, status: done, result_ref: results/r2-chain-alt-mechanism.md, verdict: "🎯 CLAUDE_CODE_SESSION_ID env 最可靠零侵入;cli os.environ.get;推翻 hook" }
+      - { id: chain-concurrency, parent: grill-fragile-chain, angle: "并发安全", depth: 0, status: done, result_ref: results/r2-chain-concurrency.md, verdict: "文件方案不可行;被 env 取代" }
+      - { id: bloat-strategy-compare, parent: grill-idempotent-edge, angle: "清理策略", depth: 0, status: done, result_ref: results/r2-bloat-strategy-compare.md, verdict: "清空重写(~15 行改 update_memory_md);否决 LIF 阈值/滑窗" }
+      - { id: bloat-semantic-unify, parent: grill-idempotent-edge, angle: "语义统一", depth: 0, status: done, result_ref: results/r2-bloat-semantic-unify.md, verdict: "UNION 两源 + 每次重写;ADR-16c 加 (g) build-index --session;⚠ 当前无 # [mem] 段标题(散行),P2 需正则删/聚段" }
+      - { id: bloat-adr15-impact, parent: grill-idempotent-edge, angle: "波及 ADR-15", depth: 0, status: done, result_ref: results/r2-bloat-adr15-impact.md, verdict: "波及仅 build_index;统一改=修 ADR-15 累积 bug;Node C 扩容" }
+      - { id: noise-threshold-basis, parent: grill-noise-vs-value, angle: "阈值依据+top_k", depth: 0, status: done, result_ref: results/r2-noise-threshold-basis.md, verdict: "recall.py:249 score>=0.3(α=0.5 对齐);cli 加 --top-k 默认 None" }
+      - { id: noise-marginal-value, parent: grill-noise-vs-value, angle: "边际价值量化", depth: 0, status: done, result_ref: results/r2-noise-marginal-value.md, verdict: "形式1 保留(LIF gap 17%+ 首次召回窗口);score 0.3 过滤;限定场景可 defer" }
+
+reconcile:
+  - { between: [grill-fragile-chain, chain-alt-mechanism, chain-hook-feasibility], issue: "传递链修法:hook vs env", verdict: "已确认(P5):env 胜出(CLAUDE_CODE_SESSION_ID 零侵入,3 份一致 + 主 session 实测);hook/文件方案作废。ADR-16a 改写,Node B 简化" }
+  - { between: [bloat-strategy-compare, bloat-semantic-unify], issue: "[mem] 段边界:假设 # [mem] 标题 vs 实际散行", verdict: "已确认(P5):P2 用正则删所有 [mem] 前缀行 + 重写(当前无段标题);改 update_memory_md = 修 ADR-15 累积 bug" }
+converged: true    # P5 收敛:8 份 grill 落地 ADR-16/编排图修订;修订已应用到 docs/adr + .claude/orchestrator-graph.json

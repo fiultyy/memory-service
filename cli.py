@@ -235,6 +235,19 @@ def build_index(scope: str | None = None, top_k: int = 20, memory_dir: str | Non
     return projection.build_index(facts, ent_names, mem_dir)
 
 
+# ── prune (DELETE 同步, ADR-17d) ─────────────────────────────────────
+
+def prune(scope: str | None = None, memory_dir: str | None = None,
+          dry_run: bool = False) -> dict:
+    """CC memory md 删除 → KG fact soft-delete (ADR-17d)。手动触发
+    (PostToolUse 不捕 ``rm``, 无 tool 触发删除 → 不自动)。re-ingest 的 DELETE 对称。
+    Thin wrapper over ``bootstrap.prune_deleted``。"""
+    import projection
+    cwd = scope or os.getcwd()
+    mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
+    return bootstrap.prune_deleted(mem_dir, source_cwd=cwd, dry_run=dry_run)
+
+
 # ── embed-backfill (存量 active fact value → L2 cache, ADR-13 通电) ──
 
 def embed_backfill() -> dict[str, int]:
@@ -318,6 +331,13 @@ def _main(argv: list[str] | None = None) -> int:
                     help="CC memory dir(默认 ~/.claude/projects/<encoded>/memory/)")
     bi.add_argument("--session", dest="session", default=None,
                     help="CC session id(默认 CLAUDE_CODE_SESSION_ID env, 用于轨迹 UNION)")
+    pr = sub.add_parser("prune",
+                        help="CC memory md 删除 → KG fact soft-delete (ADR-17d, re-ingest 的 DELETE 对称)")
+    pr.add_argument("--scope", default=None, help="来源 cwd(默认 os.getcwd)")
+    pr.add_argument("--memory-dir", dest="memory_dir", default=None,
+                    help="CC memory dir(默认 cc_memory_dir(scope))")
+    pr.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="只报不删(预览将 prune 的孤儿 fact)")
     sub.add_parser("embed-backfill",
                    help="回填 active fact value → L2 embedding cache (ADR-13 向量通电)")
 
@@ -341,6 +361,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(bootstrap.re_ingest_file(args.file, source_cwd=args.cwd or os.getcwd()), ensure_ascii=False))
     elif args.cmd == "build-index":
         print(json.dumps(build_index(scope=args.scope, top_k=args.top_k, memory_dir=args.memory_dir, session_id=args.session), ensure_ascii=False))
+    elif args.cmd == "prune":
+        print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir, dry_run=args.dry_run), ensure_ascii=False))
     elif args.cmd == "embed-backfill":
         print(json.dumps(embed_backfill(), ensure_ascii=False))
     return 0

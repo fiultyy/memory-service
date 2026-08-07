@@ -12,7 +12,7 @@ Decision:
 - (a) **触发(组合)**:`cli re-ingest <file>`(手动)+ PostToolUse hook(Write/Edit 后自动)。用户选组合(grill gate)。
 - (b) **增量逻辑 = 复用 autodream**(单 md → synthetic transcript → `autodream.autodream(session_id="memory:<file>", fact_type="permanent", source_cwd=cwd)`,幂等 ADD/UPDATE/DELETE)。复用 bootstrap.init_memory 单文件逻辑,不新造。
 - (c) **过滤 `source:mem-service`**:re-ingest 跳过 frontmatter `source:mem-service` 的 md(投影产物,复用 bootstrap ADR-16f 过滤)。
-- (d) **DELETE 语义 defer**:只 ADD/UPDATE。md 删除不走 PostToolUse(无 tool 触发),KG fact 不自动删(fact 经 `source_refs=session:memory:<file>` 可反查手动清理)。本次不做删除同步。
+- (d) **DELETE 语义 (2026-08-07 续, 已实现)**:手动 `cli prune [--dry-run]`。扫 `source_cwd` 的 active fact, 按 `source_refs` 里 `memory:<file>#` 反查源 md; 源 md 全不在 `memory_dir` → `status='deleted'` (可逆)。投影 `mem-<32hex>.md` + `MEMORY.md` 不算源(产物; native `mem-service-*.md` 用 32-hex 形态区分, 非前缀 — 否则误删)。**不自动**: PostToolUse 不捕 `rm` (无 tool 触发); SessionStart 自动 prune 仍 defer (删除低频, 手动够用)。实现 `bootstrap.prune_deleted` + `cli prune`, 见 `test_prune.py`。
 - (e) **PostToolUse hook 后台执行**:re-ingest 走 LLM(慢),hook 用 `nohup ... &` 后台 + `exit 0` 立即返回,不阻塞 tool。timeout 兜底。
 - (f) **PostToolUse 并存**:settings.json PostToolUse 已注册 orchestrator-state-callback;mem re-ingest hook 并存(数组加项或 if-else 链),不替换。
 

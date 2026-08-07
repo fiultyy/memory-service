@@ -159,6 +159,71 @@ def init_memory(
     return totals
 
 
+# ── ADR-17d DELETE 同步: CC memory md 删 → KG fact soft-delete ────────
+def prune_deleted(
+    memory_dir: str | Path,
+    source_cwd: str,
+    dry_run: bool = False,
+) -> dict:
+    """CC memory md 删除 → KG fact soft-delete 同步 (ADR-17d)。
+
+    扫 ``source_cwd`` 的 active fact, 按 ``source_refs`` 里 ``memory:<filename>#``
+    反查源 md; 源 md 全部已不在 ``memory_dir`` → ``status='deleted'`` (可逆)。
+    ``dry_run`` 只报不删。投影 ``mem-*.md`` 与 ``MEMORY.md`` 不算源 (它们是产物,
+    非用户记忆)。re_ingest_file 的逆: re-ingest 加, prune 删孤儿。
+
+    返回 ``{checked, pruned, pruned_ids, native_md_present, dry_run}``。
+    """
+    import db
+    import json
+    import re
+
+    mem_dir = Path(memory_dir)
+    # 现存 native md: 排除投影 mem-<32hex>.md (projection._mem_filename) + MEMORY.md 索引。
+    # 陷阱: native 文件常叫 mem-service-*.md, 也 startswith "mem-" → 不能用前缀区分,
+    # 必须按投影的 32-hex fact_id 形态精确匹配, 否则误把 mem-service-* 当投影排除。
+    proj_re = re.compile(r"^mem-[0-9a-f]{32}\.md$")
+    if mem_dir.is_dir():
+        existing = {p.name for p in mem_dir.glob("*.md")
+                    if not proj_re.match(p.name) and p.name != "MEMORY.md"}
+    else:
+        existing = set()  # ponytail: dir 都没了 → 所有 memory 源 fact 视为孤儿
+
+    mem_ref = re.compile(r"memory:([^#\]]+)#")
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT id, source_refs FROM fact WHERE status='active' AND source_cwd=?",
+        (source_cwd,)).fetchall()
+
+    to_prune: list[str] = []
+    for r in rows:
+        try:
+            refs = json.loads(r["source_refs"])
+        except (ValueError, TypeError):
+            continue
+        files: set[str] = set()
+        for s in refs:
+            if not isinstance(s, str):
+                continue
+            m = mem_ref.search(s)
+            if m:
+                files.add(m.group(1))
+        if not files:
+            continue  # 非 memory md 来源 (session 轨迹等), 跳过
+        # 所有源 md 都不在现存集 → 删; 任一仍在则保留 (fact 可能多源)
+        if files.isdisjoint(existing):
+            to_prune.append(r["id"])
+
+    if not dry_run and to_prune:
+        conn.executemany(
+            "UPDATE fact SET status='deleted' WHERE id=?",
+            [(fid,) for fid in to_prune])
+        conn.commit()
+    return {"checked": len(rows), "pruned": len(to_prune),
+            "pruned_ids": to_prune, "native_md_present": sorted(existing),
+            "dry_run": dry_run}
+
+
 def _demo() -> None:  # ponytail self-check (mock provider, no network)
     import os
     import tempfile as _t

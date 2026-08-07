@@ -303,6 +303,13 @@ def _main(argv: list[str] | None = None) -> int:
         help="ADR-14 记 source_cwd(来源 cwd, 默认 NULL)",
     )
 
+    reing = sub.add_parser("re-ingest", help="单 md → KG 增量 (ADR-17 b/c)")
+    reing.add_argument("file", help="markdown 文件路径")
+    reing.add_argument(
+        "--cwd", dest="cwd", default=None,
+        help="ADR-14 记 source_cwd(默认 os.getcwd)",
+    )
+
     bi = sub.add_parser("build-index",
                         help="投影 KG 高 LIF fact → CC memory + MEMORY.md (ADR-15 分布式 index)")
     bi.add_argument("--scope", default=None, help="来源 cwd(默认 os.getcwd)")
@@ -330,6 +337,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(autodream(args.session, args.transcript, cwd=args.cwd), ensure_ascii=False))
     elif args.cmd == "init-memory":
         print(json.dumps(init_memory(args.memory_dir, source_cwd=args.cwd), ensure_ascii=False))
+    elif args.cmd == "re-ingest":
+        print(json.dumps(bootstrap.re_ingest_file(args.file, source_cwd=args.cwd or os.getcwd()), ensure_ascii=False))
     elif args.cmd == "build-index":
         print(json.dumps(build_index(scope=args.scope, top_k=args.top_k, memory_dir=args.memory_dir, session_id=args.session), ensure_ascii=False))
     elif args.cmd == "embed-backfill":

@@ -91,18 +91,38 @@ def _find_active_fact(subject_id: str, predicate: str, value: str) -> dict[str, 
     return None
 
 
-# ponytail: predicate 基数 — functional(单值, 不同 value 才算矛盾) vs multivalue(多值共存)。
-# 与 extractor 7 谓词对应。升级路径: LLM 自由谓词时改读 fact schema cardinality 字段。
-_FUNCTIONAL_PREDICATES = frozenset({"is_a", "belongs_to"})
+# ponytail: ADR-1 R1 — 已知多值谓词集 short-circuit(不走 LLM), 省 token + 防 LLM
+# 误判共存。单值/开放谓词走 provider.judge_contradiction 纯 LLM 裁判(Graphiti 式)。
+# 升级路径: LLM 自由谓词时改读 fact schema cardinality 字段。
+_MULTIVALUE_PREDICATES = frozenset({
+    "uses", "depends_on", "contains", "implements",
+    "connected_to", "part_of", "relates_to",
+})
 
 
-def _is_contradiction(predicate: str, new_value: str, old_value: str) -> bool:
-    """True only for functional (single-valued) predicates with a different value.
+def _judge_contradiction(providers: list, subject_type: str, subject_name: str,
+                         predicate: str, new_value: str, old_value: str) -> bool:
+    """Whether ``new_value`` contradicts ``old_value`` for the same subject+
+    predicate (ADR-1 R1).
 
-    Multivalue predicates (uses/depends_on/contains/implements/connected_to) coexist:
-    "项目 uses rust AND docker" 非矛盾, 是并存。
+    Two fast paths skip the LLM: (1) multivalue predicates always coexist → False;
+    (2) identical values → False (same fact, not contradiction). Otherwise ask the
+    first reachable provider's ``judge_contradiction``. Provider unreachable /
+    raises / returns non-bool → fallback ``contradiction=False`` (do NOT supersede,
+    do NOT block ingest — matches A1 fallback contract). NEVER raises.
     """
-    return predicate in _FUNCTIONAL_PREDICATES and new_value != old_value
+    if predicate in _MULTIVALUE_PREDICATES:
+        return False
+    if new_value == old_value:
+        return False
+    if not providers:
+        return False
+    try:
+        verdict = providers[0].judge_contradiction(
+            subject_type, subject_name, predicate, new_value, old_value)
+    except Exception:
+        return False
+    return bool(verdict and verdict.get("contradiction") is True)
 
 
 def _has_active_for_predicate(subject_id: str, predicate: str) -> list[dict[str, Any]]:
@@ -215,13 +235,18 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
             updated += 1
             continue
 
-        # Same (subject, predicate), different value: supersede ONLY if the
-        # predicate is functional (single-valued: is_a/belongs_to) — a real
-        # contradiction. Multivalue predicates (uses/depends_on/contains/...)
-        # coexist (项目 uses rust AND docker 非矛盾) ⇒ fall through to ADD.
+        # Same (subject, predicate), different value: supersede ONLY on a real
+        # contradiction (ADR-1 R1). Multivalue predicates (uses/depends_on/...)
+        # short-circuit to no-contradiction (coexist); single-valued/open
+        # predicates ask the LLM judge. Provider unreachable → no-contradiction
+        # fallback (do NOT supersede, do NOT block ingest). 一致性:
+        # contradiction ⇒ supersede 设 valid_to (与 bi-temporal supersede 一致).
+        subject_type = name_to_type.get(subject, "concept")
         siblings = _has_active_for_predicate(subject_id, predicate)
         contradicting = [s for s in siblings
-                         if _is_contradiction(predicate, value, s.get("value") or "")]
+                         if _judge_contradiction(
+                             active_providers, subject_type, subject, predicate,
+                             value, s.get("value") or "")]
         if contradicting:
             new_id = store.put_fact(
                 subject_id=subject_id,

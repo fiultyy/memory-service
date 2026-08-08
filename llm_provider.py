@@ -84,6 +84,10 @@ class LLMProvider(Protocol):
     def dedupe_entity(self, new_name: str, new_type: str,
                       candidates: list) -> dict: ...
 
+    def judge_contradiction(self, subject_type: str, subject_name: str,
+                            predicate: str, new_value: str,
+                            old_value: str) -> dict: ...
+
 
 # Fixed two-step prompt: declare entities first, then edges between declared
 # entities (R1 §A3). object is ALWAYS another declared entity, never a free
@@ -162,6 +166,45 @@ _DEDUPE_PROMPT = """你是知识图谱实体去重裁判。判断"待判实体"�
 现在判断:
 待判: name="{new_name}" type="{new_type}"
 候选: {candidates}
+"""
+
+
+# ── Contradiction judge prompt (ADR-1 R1 纯 LLM 裁判, Graphiti 式) ──────
+# 判"同 subject+predicate 的旧 fact 是否被新 fact 矛盾(应 supersede)"。多值谓词
+# (uses/depends_on/...)新旧值共存 ≠ 矛盾; 单值属性(is_a/located_in/...)新旧值不同 =
+# 矛盾。Few-shot 防两类误判: (1) 多值共存被误判矛盾; (2) related-but-distinct 被误判
+# 矛盾(Java 语言 ≠ Java 岛是不同实体, 不进同一 subject-predicate 对, 但同义不同写值的
+# 边界要稳)。调用方(autodream)已对已知多值集 short-circuit, 此处主要判单值属性。
+_CONTRADICTION_PROMPT = """你是知识图谱矛盾裁判。判断"新值"是否与"旧值"矛盾(用于双时态 supersede 旧 fact)。
+
+核心规则:
+- 多值谓词(uses/depends_on/contains/implements/connected_to/part_of/relates_to): 新旧值【共存】, 不矛盾。例: 项目 uses rust 与 uses docker 同时成立。
+- 单值属性(is_a/located_in/belongs_to/国籍/位置/身份): 新旧值【不同】即矛盾。例: 人 国籍=中国 与 国籍=美国 不能同时成立。
+- 同义异写(值不同但指同一对象, 如"美国"vs"美利坚合众国"): 不矛盾(是同一值的不同写法)。
+- 相关但不同的实体作为值: 不矛盾(它们各自成立)。例: 某组件 located_in=Java岛 与某语言 is_a=Java语言, 不同 subject 不进同一裁判。
+
+返回 JSON, 只含 contradiction (bool) 和 reason (str):
+- 矛盾: {{"contradiction": true, "reason": "<一句话原因>"}}
+- 不矛盾: {{"contradiction": false, "reason": "<一句话原因>"}}
+
+示例:
+subject_type="person" subject_name="张三" predicate="国籍" new_value="美国" old_value="中国"
+{{"contradiction": true, "reason": "国籍是单值属性, 中国与美国不同, 互斥矛盾"}}  ← 单值不同=矛盾
+
+subject_type="project" subject_name="Alpha" predicate="uses" new_value="docker" old_value="rust"
+{{"contradiction": false, "reason": "uses 是多值谓词, rust 与 docker 共存, 不矛盾"}}  ← 多值共存
+
+subject_type="person" subject_name="张三" predicate="国籍" new_value="美利坚合众国" old_value="美国"
+{{"contradiction": false, "reason": "美国与美利坚合众国同义异写, 同一值, 不矛盾"}}  ← 同义异写
+
+subject_type="country" subject_name="X" predicate="located_in" new_value="亚洲" old_value="欧洲"
+{{"contradiction": true, "reason": "located_in 是单值位置属性, 亚洲与欧洲互斥矛盾"}}  ← 单值不同=矛盾
+
+subject_type="concept" subject_name="A" predicate="relates_to" new_value="B" old_value="C"
+{{"contradiction": false, "reason": "relates_to 是多值谓词, B 与 C 共存"}}  ← 多值共存
+
+现在判断:
+subject_type="{subject_type}" subject_name="{subject_name}" predicate="{predicate}" new_value="{new_value}" old_value="{old_value}"
 """
 
 # ── ZhipuAnthropicProvider — 智谱直连 Anthropic 协议(glm-5-turbo) ────────
@@ -255,6 +298,60 @@ class ZhipuAnthropicProvider:
             except json.JSONDecodeError:
                 pass
         return {"duplicate_id": None}
+
+    def judge_contradiction(self, subject_type: str, subject_name: str,
+                            predicate: str, new_value: str,
+                            old_value: str) -> dict:
+        """Judge whether ``new_value`` contradicts ``old_value`` for the same
+        subject+predicate (ADR-1 R1 纯 LLM 裁判, Graphiti 式).
+
+        Few-shot hardens two traps: (1) multivalue predicate coexistence
+        (uses/depends_on/... 新旧共存 ≠ 矛盾); (2) related-but-distinct /
+        synonym-rewrite values. Returns ``{"contradiction": bool, "reason": str}``.
+        调用方(autodream)已对已知多值集 short-circuit, 故此处主要判单值属性。
+
+        Offline / no key / network error / parse failure → fallback
+        ``{"contradiction": False, "reason": "provider-unavailable"}`` (不阻断
+        ingest; 调用方记 source_meta.error)。NEVER raises.
+        """
+        key = self.api_key or _load_zhipu_key()
+        if not key:
+            return {"contradiction": False, "reason": "provider-unavailable"}
+        body = json.dumps({
+            "model": self.model, "max_tokens": 256,
+            "messages": [{"role": "user", "content": _CONTRADICTION_PROMPT.format(
+                subject_type=subject_type, subject_name=subject_name,
+                predicate=predicate, new_value=new_value, old_value=old_value)}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/messages", data=body,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": key, "anthropic-version": "2023-06-01"},
+            method="POST")
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=self.timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            return {"contradiction": False, "reason": "provider-unavailable"}
+        content = _extract_text(raw)
+        if content is None:
+            return {"contradiction": False, "reason": "provider-unavailable"}
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end > start:
+            try:
+                doc = json.loads(content[start:end + 1])
+                con = doc.get("contradiction")
+                reason = doc.get("reason")
+                if isinstance(con, bool) and (
+                        reason is None or isinstance(reason, str)):
+                    return {"contradiction": con,
+                            "reason": reason if isinstance(reason, str) else ""}
+            except json.JSONDecodeError:
+                pass
+        # 模型回了非 JSON / 字段缺失 → 不抛, 默认不矛盾(不阻断 ingest)。
+        return {"contradiction": False, "reason": "parse-failure"}
 
 
 def _load_zhipu_key() -> str:
@@ -351,6 +448,11 @@ class ClaudeAPIProvider:
                       candidates: list) -> dict:
         raise NotImplementedError("stub, not implemented")
 
+    def judge_contradiction(self, subject_type: str, subject_name: str,
+                            predicate: str, new_value: str,
+                            old_value: str) -> dict:
+        raise NotImplementedError("stub, not implemented")
+
 
 @dataclass
 class LMStudioProvider:
@@ -365,4 +467,9 @@ class LMStudioProvider:
 
     def dedupe_entity(self, new_name: str, new_type: str,
                       candidates: list) -> dict:
+        raise NotImplementedError("stub, not implemented")
+
+    def judge_contradiction(self, subject_type: str, subject_name: str,
+                            predicate: str, new_value: str,
+                            old_value: str) -> dict:
         raise NotImplementedError("stub, not implemented")

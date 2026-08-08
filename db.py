@@ -47,6 +47,12 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE entity ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'")
     if "name_embedding" not in ent_cols:
         conn.execute("ALTER TABLE entity ADD COLUMN name_embedding TEXT")
+    # ADR-2 ① migration: 老 db entity 表无 UNIQUE(name, entity_type) 约束。
+    # SQLite 不支持 ALTER ADD CONSTRAINT → 用 unique index 达成同等强制(老库空, 无冲突
+    # 负担; 生产有冲突行会 CREATE UNIQUE INDEX 失败 → 记 P4: 先跑 consolidate dedup)。
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_name_type ON entity(name, entity_type)"
+    )
     conn.commit()
     _conn = conn
     _conn_path = str(path)

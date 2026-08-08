@@ -36,6 +36,8 @@ import store
 # ADR-13 向量层(use_vec): 候选扩展 + vec_sim 阈值/top-N。
 VEC_MIN = 0.30   # cosine ≥ 此的 active fact 入向量候选(避免全 noise 污染 top-k)
 VEC_TOP_N = 20   # 向量候选上限(扩展 entity/value 候选集)
+# ADR-4 bfs hint: direct-match 薄(候选 < 阈值)且 use_bfs=False 时 suggest_bfs。
+SUGGEST_BFS_THRESHOLD = 3
 
 
 def _cosine(a: list[float] | None, b: list[float] | None) -> float:
@@ -71,20 +73,34 @@ def _temporal_clause(as_of: str | None = None) -> tuple[str, list]:
     )
 
 
-def _build_entity_graph(as_of: str | None = None) -> tuple[nx.Graph, dict[str, float]]:
+def _build_entity_graph(
+    as_of: str | None = None, source_cwd: str | None = None,
+) -> tuple[nx.Graph, dict[str, float]]:
     """Build entity graph from active facts + pagerank centrality (ADR-2v2).
 
     Returns ``(graph, centrality_dict)``.  The graph is an undirected
     ``nx.Graph`` where each active fact links ``subject_id ↔ object_id``.
     ``centrality_dict`` is pagerank normalised to ``[0,1]``.  Single-source
     build shared by centrality scoring and BFS expansion.
+
+    ``source_cwd`` (ADR-4 scoped opt-in, default None = global graph per ADR-14
+    单体 KG 跨 cwd 共享): when set, only facts whose ``source_cwd`` matches or
+    is NULL contribute edges — graph more precise but smaller, for cross-cwd
+    noise reduction. NULL 兼容老数据(无 source_cwd 的 fact 视为全局)。
     """
     conn = db.get_conn()
     tc, tp = _temporal_clause(as_of)
-    rows = conn.execute(
-        f"SELECT subject_id, object_id FROM fact WHERE {tc}",
-        tp,
-    ).fetchall()
+    if source_cwd is None:
+        rows = conn.execute(
+            f"SELECT subject_id, object_id FROM fact WHERE {tc}",
+            tp,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT subject_id, object_id FROM fact WHERE {tc} "
+            f"AND (source_cwd = ? OR source_cwd IS NULL)",
+            (*tp, source_cwd),
+        ).fetchall()
     g = nx.Graph()
     seen: set[str] = set()
     for r in rows:
@@ -216,6 +232,7 @@ def recall(
     use_bfs: bool = False,
     bfs_hops: int = 2,
     as_of: str | None = None,
+    use_bfs_scoped: bool = False,
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
@@ -313,7 +330,9 @@ def recall(
     # (one build per recall, no persistence). Each fact's centrality = the
     # pagerank of its most-central connected entity.
     # BFS 扩展(use_bfs): 同一次图构建复用于 centrality + BFS, 不重复 build。
-    entity_graph, centralities = _build_entity_graph(as_of=as_of)
+    entity_graph, centralities = _build_entity_graph(
+        as_of=as_of, source_cwd=(cwd if use_bfs_scoped else None),
+    )
     # BFS 图遍历扩展(use_bfs): 从 seed entity BFS 扩展邻居, 补充字面/向量未命中的 fact。
     bfs_fact_min_hop: dict[str, int] = {}
     bfs_expanded_ids: set[str] = set()
@@ -432,6 +451,14 @@ def recall(
         f["_snaptag"] = tag  # 默认 list[dict] shape 嵌此字段(向后兼容, 调用方可忽略)
         s["tag"] = tag
 
+    # ADR-4 bfs hint: direct-match 薄(候选 < 阈值)且 use_bfs=False → suggest_bfs。
+    # hint 不改 default recall 行为(排序/过滤不变); 字段附在 envelope(verbose/
+    # with_tag), 默认 list 路径不动(零回归)。cli 单独从结果数自行判断(不依赖此字段)。
+    suggest_bfs = (
+        not use_bfs
+        and len(candidates) < SUGGEST_BFS_THRESHOLD
+    )
+
     if verbose:
         ent_ids = {e["id"] for e in entities}
         for s in scored:
@@ -444,6 +471,7 @@ def recall(
         return {
             "query": query,
             "session_id": session_id,
+            "suggest_bfs": suggest_bfs,
             "results": [{"fact": s["fact"], "score": s["score"], "tag": s["tag"]} for s in scored],
         }
     return [s["fact"] for s in scored]

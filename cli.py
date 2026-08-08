@@ -167,7 +167,8 @@ def recall(query: str, verbose: bool = False,
            cwd: str | None = None, top_k: int | None = None,
            with_tag: bool = False,
            use_bfs: bool = False, bfs_hops: int = 2,
-           as_of: str | None = None) -> list[dict[str, Any]] | dict[str, Any]:
+           as_of: str | None = None,
+           use_bfs_scoped: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
     Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
@@ -176,11 +177,13 @@ def recall(query: str, verbose: bool = False,
     ``use_bfs=True`` 启用 BFS 图遍历召回(D5, 召回图近但字面/向量远的 fact)。
     ``as_of`` 点时召回(bi-temporal): 只返回 as_of 时刻有效的 fact。输入端归一
     为 UTC +00:00(ADR-3 ②, 杜绝非 UTC 字典序错序; naive 按 UTC 解释)。
+    ``use_bfs_scoped=True`` (ADR-4) 限 BFS 图构建为本 cwd(source_cwd 过滤, 图更精确
+    更小); default off 保持全局图(ADR-14 单体 KG 跨 cwd 共享)。
     """
     return recall_mod.recall(query, verbose=verbose, session_id=session_id,
                              boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
                              with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops,
-                             as_of=_normalize_as_of(as_of))
+                             as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped)
 
 
 # ── consolidate ────────────────────────────────────────────────────
@@ -320,6 +323,8 @@ def _main(argv: list[str] | None = None) -> int:
                      help="点时召回(bi-temporal): 只返回 as_of 时刻有效的 fact (valid_from<=t<valid_to)")
     rec.add_argument("--bfs-hops", dest="bfs_hops", type=int, default=2,
                      help="BFS 遍历跳数(默认 2)")
+    rec.add_argument("--bfs-scoped", dest="bfs_scoped", action="store_true",
+                     help="限 BFS 图构建为本 cwd(source_cwd 过滤; 默认 off 全局图 ADR-14)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -379,7 +384,15 @@ def _main(argv: list[str] | None = None) -> int:
         ))
     elif args.cmd == "recall":
         session_id = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
-        print(json.dumps(recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of), ensure_ascii=False, default=str))
+        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped)
+        # ADR-4 bfs hint: direct-match 薄且未开 --bfs → stderr 提示(不污染 stdout 机器输出)。
+        # 结果数 < 阈值代理 direct-match 薄(候选少 → 命中少); suggest_bfs 字段在 envelope
+        # (with_tag) 里有, 但 cli 走结果数自判覆盖 list/verbose 全 path。
+        if not args.bfs:
+            n = len(result.get("results", [])) if isinstance(result, dict) and "results" in result else len(result)
+            if n < recall_mod.SUGGEST_BFS_THRESHOLD:
+                sys.stderr.write("💡 direct-match 薄,可加 --bfs 扩展图近召回\n")
+        print(json.dumps(result, ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":

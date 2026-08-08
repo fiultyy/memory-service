@@ -131,6 +131,15 @@ commit: `ded4deb`
 - **踩坑**: ① OMP 终端歧义 —— 两个 "OMP ready" 都在 agent-os-v2 cwd, 主 session 误猜 omp2(劫持自其 agent-os-v2 ao-tui 任务); 但 **OMP 框架按消息目标路径绝对路径编辑**, BFS 改动正确落 /home/yy/projects/memory-service(agent-os-v2 副本 git 干净未碰)。下次分派前先实时确认唯一 OMP 身份, 不靠排除法猜。② omp2 做完回 agent-os-v2, 上下文混了(BFS diff 无污染, 可接受)。
 - **defer(本迭代治 D5+D6)**: D4 双时态 valid_at/invalid_at(Graphiti bi-temporal 边失效, 下一迭代)。BFS auto-suggest hint(direct-match 薄时提示 rerun --bfs)/ 跨 cwd BFS 门控 / BFS_WEIGHT baseline 调参 / BFS+use_vec 组合深测。
 
+### bi-temporal-validity (D4 双时态有效性) — 2026-08-08 [OMP 实施 + ultracode review + F1 修]
+- **关键认知:列已存在, D4=通电非新增**。fact 表早有 `valid_from`/`valid_to`(schema.sql:27-28, put_fact 已接参数),但没通电:① ingest 不填 valid_from(多 NULL);② supersede 只翻 status 不设 valid_to;③ recall 只过滤 status='active'。研究 R2 L163:这是 T'(事件时态),缺 T(有效时态区间)。D4 = 通电既有列 + `--as-of` 点时召回,**不改 schema、老库免迁移**。
+- **实现**: `store.put_fact` valid_from 未传默认 `_now()`(NULL 视为 -∞);`store.update_fact_status` 加 `valid_to` 参数(COALESCE 不覆盖已设);`autodream.py:239` supersede 传 `valid_to=now`;`recall.py` 抽 `_temporal_clause(as_of)` —— default `status='active' AND valid_to IS NULL`(**逐字零回归**),as_of 给定时丢 status 用 `(valid_from IS NULL OR valid_from<=t) AND (valid_to IS NULL OR valid_to>t)`(NULL valid_from=-∞);cli `--as-of <iso>`;图构建 + BFS 路径都透 as_of。复用既有 supersede,**不新增 LLM 矛盾检测**(Graphiti 式 defer)。
+- **验证**: OMP(workflowz)实施 → ultracode review(6 维度 agent **5 个 API 过载 fail** "Connection closed mid-response", 仅 synthesis agent 存活独立查 + 主 session 核实补偿)→ 找出 **F1**。主 session 新鲜跑 **13/13**(test_bi_temporal 12 项), data/memory.db 零污染。P0+projection+entity-dedupe+bfs 契约未触(只加可选过滤 + 通电既有列)。
+- **F1 [medium, 修]**: `consolidate.py:236`(deprecated)+ `:301`(superseded)调 `update_fact_status` **漏传 valid_to**(只有 autodream.py:239 接了)。后果:as_of 丢 status 过滤 → consolidate 失效的 fact(valid_to 永久 NULL)被当开放区间在 `--as-of` 下**重新浮现**,破坏双时态不变量(default recall 不受影响, status 兜住)。修法 2 行(对齐 autodream 传 `valid_to=store._now()`)+ test_bi_temporal #11 锁回归。
+- **踩坑**: ① review agent 并发(6 高 effort + verify fan-out)打爆 glm API(Connection closed mid-response);synthesis 兜底但方法学盲区 = 6 维组只盯 spec 点名的 autodream.py:239,**没 grep 全部 update_fact_status 调用点**,故 consolidate 两处漏(F1)。下次 review 提示词加"穷举 grep 同类调用点"。② lifecycle 转换(supersede/deprecate)的 bi-temporal 对齐要覆盖全调用点,不能只改 spec 点名的一处。
+- **defer(D4 完, P0+projection+dedupe+bfs+bi-temporal 五迭代齐, 对齐 D4 spec 后续)**: Graphiti 式 LLM 矛盾检测(新 fact → LLM 比同实体对已存边 → 自动失效, R2 L148)/ bi-temporal churn 监控(supersede rate / active ratio, R2 L149/159)/ as_of + BFS 组合深测 / valid_from 从 source_meta/会话时间推导(非 ingest now)。**p0-entities-edges-schema 分支现攒 5 迭代, 未 merge main**。
+- **审查盲区(已知 minor, 非 defer)**: ISO 时戳跨时区字典序(非 UTC `--as-of` 输入会错序, 内部全 `_now()` 统一 +00:00 不触发)/ valid_to=now 与新 fact valid_from=now 各调一次 `_now()` 有微秒级半开区间竞态(影响极小)/ 老数据 valid_from NULL=-∞ 需运维文档化(生产 db 当前空)。
+
 ---
 
 ## ADR 清单 (12 活跃)

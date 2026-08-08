@@ -236,7 +236,7 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 topic=topic,
             )
             for old in contradicting:
-                store.update_fact_status(old["id"], "superseded", supersedes_id=new_id)
+                store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now())
             deleted += len(contradicting)
             added += 1
             continue

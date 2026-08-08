@@ -47,8 +47,25 @@ def _cosine(a: list[float] | None, b: list[float] | None) -> float:
     nb = math.sqrt(sum(y * y for y in b))
     return dot / (na * nb) if na and nb else 0.0
 
+def _temporal_clause(as_of: str | None = None) -> tuple[str, list]:
+    """Fact validity WHERE fragment + bind params (status + temporal).
 
-def _build_entity_graph() -> tuple[nx.Graph, dict[str, float]]:
+    Default (as_of=None): ``status='active' AND valid_to IS NULL`` — only
+    currently-valid facts (zero-regression with pre-D4 status='active' filter).
+    as_of given: point-in-time bi-temporal query — ``(valid_from IS NULL OR
+    valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)``.  The status
+    filter is dropped: a superseded fact was valid at a historical moment.
+    NULL valid_from = -inf (always <= as_of).  Returns ``(sql, params)``.
+    """
+    if as_of is None:
+        return ("status='active' AND valid_to IS NULL", [])
+    return (
+        "(valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)",
+        [as_of, as_of],
+    )
+
+
+def _build_entity_graph(as_of: str | None = None) -> tuple[nx.Graph, dict[str, float]]:
     """Build entity graph from active facts + pagerank centrality (ADR-2v2).
 
     Returns ``(graph, centrality_dict)``.  The graph is an undirected
@@ -57,8 +74,10 @@ def _build_entity_graph() -> tuple[nx.Graph, dict[str, float]]:
     build shared by centrality scoring and BFS expansion.
     """
     conn = db.get_conn()
+    tc, tp = _temporal_clause(as_of)
     rows = conn.execute(
-        "SELECT subject_id, object_id FROM fact WHERE status='active'"
+        f"SELECT subject_id, object_id FROM fact WHERE {tc}",
+        tp,
     ).fetchall()
     g = nx.Graph()
     seen: set[str] = set()
@@ -81,9 +100,9 @@ def _build_entity_graph() -> tuple[nx.Graph, dict[str, float]]:
     return (g, {eid: pr.get(eid, 0.0) / mx for eid in seen})
 
 
-def _build_centralities() -> dict[str, float]:
+def _build_centralities(as_of: str | None = None) -> dict[str, float]:
     """Thin wrapper: returns centrality dict only (backward compatible)."""
-    return _build_entity_graph()[1]
+    return _build_entity_graph(as_of=as_of)[1]
 
 
 def _fact_centrality(fact: dict[str, Any], centrality: dict[str, float]) -> float:
@@ -157,16 +176,17 @@ def search_entities(tokens: list[str]) -> list[dict[str, Any]]:
     return out
 
 
-def _facts_for_entities(entity_ids: list[str]) -> list[dict[str, Any]]:
+def _facts_for_entities(entity_ids: list[str], as_of: str | None = None) -> list[dict[str, Any]]:
     """Facts where any entity is subject_id OR object_id (status='active')."""
     if not entity_ids:
         return []
     conn = db.get_conn()
+    tc, tp = _temporal_clause(as_of)
     placeholders = ",".join("?" * len(entity_ids))
     rows = conn.execute(
-        f"SELECT * FROM fact WHERE status='active' AND "
+        f"SELECT * FROM fact WHERE {tc} AND "
         f"(subject_id IN ({placeholders}) OR object_id IN ({placeholders}))",
-        (*entity_ids, *entity_ids),
+        (*tp, *entity_ids, *entity_ids),
     ).fetchall()
     facts: list[dict[str, Any]] = []
     for r in rows:
@@ -189,6 +209,7 @@ def recall(
     mem_dir: str | Path | None = None,
     use_bfs: bool = False,
     bfs_hops: int = 2,
+    as_of: str | None = None,
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
@@ -228,17 +249,20 @@ def recall(
     # subject name does not echo the query (e.g. "用户" subject, "rust" in value).
     # Ceiling: linear scan of all active facts; fine for single-machine MVP.
     conn = db.get_conn()
-    # ADR-14 cwd 隔离(b 方案): cwd 给定时只扫该 cwd 的 fact(+ NULL 老数据兼容)。
+    tc, tp = _temporal_clause(as_of)
     if cwd:
         value_rows = conn.execute(
-            "SELECT * FROM fact WHERE status='active' AND (source_cwd = ? OR source_cwd IS NULL)",
-            (cwd,),
+            f"SELECT * FROM fact WHERE {tc} AND (source_cwd = ? OR source_cwd IS NULL)",
+            (*tp, cwd),
         ).fetchall()
     else:
-        value_rows = conn.execute("SELECT * FROM fact WHERE status='active'").fetchall()
+        value_rows = conn.execute(
+            f"SELECT * FROM fact WHERE {tc}",
+            tp,
+        ).fetchall()
     seen_ids: set[str] = set()
     candidates: list[dict[str, Any]] = []
-    for r in _facts_for_entities([e["id"] for e in entities]):
+    for r in _facts_for_entities([e["id"] for e in entities], as_of=as_of):
         if r["id"] not in seen_ids:
             seen_ids.add(r["id"])
             candidates.append(r)
@@ -283,7 +307,7 @@ def recall(
     # (one build per recall, no persistence). Each fact's centrality = the
     # pagerank of its most-central connected entity.
     # BFS 扩展(use_bfs): 同一次图构建复用于 centrality + BFS, 不重复 build。
-    entity_graph, centralities = _build_entity_graph()
+    entity_graph, centralities = _build_entity_graph(as_of=as_of)
     # BFS 图遍历扩展(use_bfs): 从 seed entity BFS 扩展邻居, 补充字面/向量未命中的 fact。
     bfs_fact_min_hop: dict[str, int] = {}
     bfs_expanded_ids: set[str] = set()
@@ -293,7 +317,7 @@ def recall(
         # 邻居实体(非 seed) → 取回 fact 扩展候选集
         neighbor_eids = [eid for eid in bfs_result if eid not in seed_ids]
         if neighbor_eids:
-            for f in _facts_for_entities(neighbor_eids):
+            for f in _facts_for_entities(neighbor_eids, as_of=as_of):
                 fid = f["id"]
                 if fid not in seen_ids:
                     seen_ids.add(fid)

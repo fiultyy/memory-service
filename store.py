@@ -200,6 +200,8 @@ def put_fact(
     conn = db.get_conn()
     fid = fact_id or _uid()
     frozen_lif = float(LIF) if original_lif is None else float(original_lif)
+    if valid_from is None:
+        valid_from = _now()
     if lif_source is None:
         from consolidate import SOURCE_WEIGHT
         lif_source = SOURCE_WEIGHT.get(extractor, 0.4)
@@ -251,13 +253,12 @@ def get_facts_by_subject(subject_id: str, status: str | None = "active") -> list
         ).fetchall()
     return [_decode_fact(r) for r in rows]
 
-
-def update_fact_status(fact_id: str, status: str, supersedes_id: str | None = None) -> None:
+def update_fact_status(fact_id: str, status: str, supersedes_id: str | None = None, valid_to: str | None = None) -> None:
     """Lifecycle transition (active→deprecated/superseded). No-op if missing."""
     conn = db.get_conn()
     conn.execute(
-        "UPDATE fact SET status = ?, supersedes_id = COALESCE(?, supersedes_id) WHERE id = ?",
-        (status, supersedes_id, fact_id),
+        "UPDATE fact SET status = ?, supersedes_id = COALESCE(?, supersedes_id), valid_to = COALESCE(?, valid_to) WHERE id = ?",
+        (status, supersedes_id, valid_to, fact_id),
     )
     conn.commit()
 

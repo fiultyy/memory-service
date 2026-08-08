@@ -56,6 +56,12 @@ def _temporal_clause(as_of: str | None = None) -> tuple[str, list]:
     valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)``.  The status
     filter is dropped: a superseded fact was valid at a historical moment.
     NULL valid_from = -inf (always <= as_of).  Returns ``(sql, params)``.
+
+    隐式假设(ADR-3 ③): SQLite TEXT 字典序 = 时间序。成立前提是所有 valid_from/
+    valid_to/as_of 均为同一归一格式 —— store._now() 统一 +00:00 秒级 ISO-8601
+    (ms-floor), cli 把 --as-of 归一为 UTC +00:00 再下传。任一处混入非 UTC 后缀
+    (如 +08:00) 或不同精度即字典序错序, 故归一只在 cli 输入端做(store 不再二次
+    归一, 避免覆盖显式 valid_from 参数)。
     """
     if as_of is None:
         return ("status='active' AND valid_to IS NULL", [])

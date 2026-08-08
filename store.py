@@ -17,7 +17,10 @@ import db
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    # ms-floor 对齐 scoring.py/consolidate.py/recall.py 的 .replace(microsecond=0)
+    # 惯例(三处 _now 语义统一, ADR-3 ①)。秒级 ISO-8601 + 固定 +00:00 → TEXT
+    # 字典序 = 时间序(recall._temporal_clause 依赖此隐式假设)。
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _uid() -> str:

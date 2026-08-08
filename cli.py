@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +144,23 @@ def ingest(text: str, source_ref: str | None = None,
 
 # ── recall ──────────────────────────────────────────────────────────
 
+def _normalize_as_of(as_of: str | None) -> str | None:
+    """归一 --as-of 为 UTC +00:00 秒级 ISO-8601 (ADR-3 ②)。
+
+    接受任意 ISO-8601(含 ``Z`` / ``+HH:MM`` / 无后缀 naive)。naive 输入按 UTC
+    解释(文档化)。输出统一 ``+00:00`` 后缀 → recall._temporal_clause 依赖
+    SQLite TEXT 字典序 = 时间序, 非 UTC 后缀会字典序错序。microsecond 截断到秒,
+    与 store._now() 的 ms-floor 惯例一致(同精度同格式比较)。None 透传(None =
+    default recall, 不走点时查询)。
+    """
+    if as_of is None:
+        return None
+    dt = datetime.fromisoformat(as_of)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)  # naive → UTC (文档化)
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
 def recall(query: str, verbose: bool = False,
            session_id: str | None = None, boost: bool = True,
            weights=None, use_vec: bool = False, delta: float | None = None,
@@ -156,12 +174,13 @@ def recall(query: str, verbose: bool = False,
     (ADR-13); ``cwd`` ADR-14 b 方案: 过滤 source_cwd(含 NULL 老数据兼容)。
     ``top_k`` 限制返回数量(默认 None 无截断)。
     ``use_bfs=True`` 启用 BFS 图遍历召回(D5, 召回图近但字面/向量远的 fact)。
-    ``as_of`` 点时召回(bi-temporal): 只返回 as_of 时刻有效的 fact。
+    ``as_of`` 点时召回(bi-temporal): 只返回 as_of 时刻有效的 fact。输入端归一
+    为 UTC +00:00(ADR-3 ②, 杜绝非 UTC 字典序错序; naive 按 UTC 解释)。
     """
     return recall_mod.recall(query, verbose=verbose, session_id=session_id,
                              boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
                              with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops,
-                             as_of=as_of)
+                             as_of=_normalize_as_of(as_of))
 
 
 # ── consolidate ────────────────────────────────────────────────────

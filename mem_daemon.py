@@ -104,11 +104,10 @@ def _extract_new_lines(path: Path, last_offset: int) -> tuple[str, int]:
     re-poll after a partial write picks up the remainder.
     """
     size = path.stat().st_size
-    if size <= last_offset:
-        return "", last_offset
-    # File shrank (rotation/truncation) → reset to start.
     if size < last_offset:
         return "", 0
+    if size <= last_offset:
+        return "", last_offset
     with path.open("rb") as f:
         f.seek(last_offset)
         chunk = f.read(size - last_offset)
@@ -146,17 +145,24 @@ def _sweep(tdir: Path, cwd: str, state: dict) -> dict:
         rec = state.get(key, {})
         offset = rec.get("offset", 0)
         # session_id = filename stem (CC convention: <session-uuid>.jsonl).
-        session_id = rec.get("session_id") or jf.stem
-
         new_text, new_offset = _extract_new_lines(jf, offset)
         growth = new_offset - offset
         if growth < GROWTH_THRESHOLD:
+            # File may have shrunk (_extract_new_lines reset offset to 0) —
+            # persist so next sweep starts from 0 instead of stalling on a
+            # stale offset larger than the new file size.
+            if new_offset < offset:
+                state[key] = {
+                    "offset": new_offset, "session_id": session_id,
+                    "mtime": st.st_mtime,
+                }
             continue    # not enough new content yet
 
         # Write new lines to a temp JSONL → feed to autodream (expects a path).
         # autodream._read_transcript parses each line as JSON, filters user/
         # assistant text blocks → partial transcript is safe (extracts whatever
         # text is in the new records).
+        tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
@@ -176,10 +182,11 @@ def _sweep(tdir: Path, cwd: str, state: dict) -> dict:
             _log(f"ERROR dreaming {jf.name}: {exc} (offset not advanced, retry next cycle)")
             continue
         finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
         state[key] = {
             "offset": new_offset, "session_id": session_id,

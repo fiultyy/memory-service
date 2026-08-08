@@ -309,14 +309,10 @@ def test_cosine_topk_reembed_persists_to_db():
     conn.commit()
     vec3 = [1.0, 0.0, 0.0]
 
-    class _FakeEmb:
-        model = "fake"
-        def embed(self, text): return list(vec3)
-
     orig = embedding.embed
     embedding.embed = lambda text, providers=None: list(vec3)
     try:
-        resolver._cosine_topk(vec3, 5, embedding_providers=[_FakeEmb()])
+        resolver._cosine_topk(vec3, 5, embedding_providers=["fake"])
     finally:
         embedding.embed = orig
 
@@ -329,11 +325,11 @@ def test_cosine_topk_reembed_persists_to_db():
     assert "v" in doc and doc["v"] == [1.0, 0.0, 0.0], (
         f"B2: re-embed 落盘应为新结构 v={vec3}, got raw={raw}"
     )
-    # 二次调用不 re-embed(已落盘新结构 dim 匹配)
-    embedding.embed = lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应 re-embed: 已落盘新结构"))
+    # 二次调用不 re-embed(已落盘新结构 dim 匹配): 如果 _cosine_topk 仍调
+    # embedding.embed → AssertionError 传播 → 测试 fail(不再静吞)。
+    embedding.embed = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("不应 re-embed: 已落盘新结构 dim 匹配"))
     try:
-        resolver._cosine_topk(vec3, 5, embedding_providers=[_FakeEmb()])
-    except AssertionError:
-        pass  # 不应触发 — 已捕获即可
+        resolver._cosine_topk(vec3, 5, embedding_providers=["fake"])
     finally:
         embedding.embed = orig

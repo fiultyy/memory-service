@@ -195,5 +195,78 @@ if production_db.exists():
 else:
     print("✓ 12. db isolation: no production db to check")
 
+# ── 13. as_of + BFS 组合 (ADR-3/4 深测): _build_entity_graph + bfs_neighbors 透 as_of ──
+# 场景对齐 spec: 某 fact 在 t1 valid, t2 superseded(valid_to=t2),
+#   as_of=区间内 → BFS 召回应含该 fact; as_of=区间外(t3>valid_to) → 不含。
+# 链: E0(seed,query 命中) --fid_link--> E1 --fid_hop2--> E2
+#   fid_link: e0↔e1 边, valid_from=t0, valid_to=t_link_end (区间内有效, t_late 后失效)
+#   fid_hop2: subject=E1 (BFS-only 可达, use_bfs=False 不召回), valid_from=t0, 无 valid_to
+e0 = store.put_entity("NodeZero", "concept")
+e1 = store.put_entity("NodeOne", "concept")
+e2 = store.put_entity("NodeTwo", "concept")
+fid_link = store.put_fact(e0, "connects", "NodeZero connects NodeOne", valid_from=t0,
+                          extractor="llm", fact_type="permanent", LIF=0.5,
+                          confidence=0.8, source_refs=["s"], topic="e0 connects e1",
+                          object_id=e1)
+fid_hop2 = store.put_fact(e1, "links", "NodeOne links NodeTwo", valid_from=t0,
+                          extractor="llm", fact_type="permanent", LIF=0.5,
+                          confidence=0.8, source_refs=["s"], topic="e1 links e2",
+                          object_id=e2)
+t_link_end = "2026-07-15T00:00:00+00:00"     # fid_link valid_to (区间 [t0, t_link_end))
+conn.execute("UPDATE fact SET valid_to=? WHERE id=?", (t_link_end, fid_link))
+conn.commit()
+t_link_mid = "2026-06-15T00:00:00+00:00"     # 区间内 (== t_mid)
+t_link_out = t_late                           # > t_link_end, 区间外
+
+# (a) as_of=区间内: 图含 e0↔e1↔e2 链, BFS 从 NodeZero 达 NodeOne(1) + NodeTwo(2)
+g_tmp, _ = recall_mod._build_entity_graph(as_of=t_link_mid)
+assert g_tmp.has_edge(e0, e1) and g_tmp.has_edge(e1, e2), (
+    f"as_of={t_link_mid}: 图应含 e0↔e1↔e2 链, got edges={list(g_tmp.edges())}"
+)
+nbrs = recall_mod.bfs_neighbors([e0], g_tmp, hops=2)
+assert e1 in nbrs and e2 in nbrs, (
+    f"as_of={t_link_mid}: BFS 应达 e1(1-hop) + e2(2-hop), got neighbors={nbrs}"
+)
+res_in = recall_mod.recall("NodeZero", use_bfs=True, bfs_hops=2,
+                           as_of=t_link_mid, boost=False)
+ids_in = {f["id"] for f in res_in}
+assert fid_link in ids_in, (
+    f"as_of={t_link_mid} 区间内: fid_link 应召回, got ids={ids_in}"
+)
+assert fid_hop2 in ids_in, (
+    f"as_of={t_link_mid} 区间内: fid_hop2 (BFS-only, e1 是 subject) 应被 BFS 召回, got ids={ids_in}"
+)
+print(f"✓ 13a. as_of+BFS 区间内: fid_link & fid_hop2 recalled, ids={ids_in}")
+
+# (b) as_of=区间外(t_late > valid_to): 图丢 e0↔e1 边(fid_link 失效, e0 脱离图),
+# BFS 从 e0 不达 e1/e2 (e0 只经 fid_link 连图, 该边失效后 e0 变孤立)
+g_out, _ = recall_mod._build_entity_graph(as_of=t_link_out)
+assert not g_out.has_edge(e0, e1), (
+    f"as_of={t_link_out}: 图应丢 e0↔e1 边(fid_link 已失效), got edges={list(g_out.edges())}"
+)
+nbrs_out = recall_mod.bfs_neighbors([e0], g_out, hops=2)
+assert e1 not in nbrs_out and e2 not in nbrs_out, (
+    f"as_of={t_link_out}: BFS 不应达 e1/e2 (e0↔e1 边被时间过滤), got neighbors={nbrs_out}"
+)
+res_out = recall_mod.recall("NodeZero", use_bfs=True, bfs_hops=2,
+                            as_of=t_link_out, boost=False)
+ids_out = {f["id"] for f in res_out}
+assert fid_link not in ids_out, (
+    f"as_of={t_link_out} 区间外: fid_link 不应召回(valid_to < as_of), got ids={ids_out}"
+)
+assert fid_hop2 not in ids_out, (
+    f"as_of={t_link_out}: fid_hop2 不应召回(e1 不可达, BFS 不到), got ids={ids_out}"
+)
+print(f"✓ 13b. as_of+BFS 区间外: fid_link & fid_hop2 excluded, ids={ids_out}")
+
+# (c) BFS 门控: use_bfs=False → fid_hop2 (BFS-only, e1 非 query 命中) 不召回
+res_nobfs = recall_mod.recall("NodeZero", use_bfs=False,
+                              as_of=t_link_mid, boost=False)
+nobfs_ids = {f["id"] for f in res_nobfs}
+assert fid_hop2 not in nobfs_ids, (
+    f"use_bfs=False (as_of 区间内): fid_hop2 (图近 fact) 不应召回(BFS 门控), got ids={nobfs_ids}"
+)
+print(f"✓ 13c. as_of+BFS=False 门控: fid_hop2 not recalled without BFS path, ids={nobfs_ids}")
+
 shutil.rmtree(tmp)
 print("\n✅ All bi-temporal validity tests passed.")

@@ -127,5 +127,99 @@ if production_db.exists():
     assert before == after, f"production db entity count changed: {before} → {after}"
     print(f"✓ db isolation: production entity count stable ({before})")
 
+# ── 9. as_of + BFS 组合深测 (ADR-3/4): _build_entity_graph + bfs_neighbors 都透 as_of ──
+# 场景: fid_ab 在 t1 valid, t2 superseded(valid_to=t2)。
+#   as_of=t1.5 (区间内) → 图含 A↔B 边 → BFS 达 B → fid_ab/fid_bc 召回。
+#   as_of=t3  (已失效)  → 图丢 A↔B 边 → BFS 不达 B → fid_ab/fid_bc 不召回。
+# 双路径断言:
+#   (1) _build_entity_graph(as_of) — 边按时间过滤(决定 BFS 能否走到 B);
+#   (2) _facts_for_entities(as_of) — fact 按 valid_from/valid_to 过滤(决定召回集)。
+t1 = "2026-07-01T00:00:00+00:00"
+t1_5 = "2026-07-15T00:00:00+00:00"
+t2 = "2026-08-01T00:00:00+00:00"
+t3 = "2026-09-01T00:00:00+00:00"
+
+db.init(Path(tmp) / "asof_bfs.db")
+ea2 = store.put_entity("Alpha2", "concept")
+eb2 = store.put_entity("Bravo2", "concept")
+ec2 = store.put_entity("Charlie2", "concept")
+# fid_ab2: valid_from=t1, 后续手动 set valid_to=t2 (区间内有效,t3 后失效)
+fid_ab2 = store.put_fact(ea2, "uses", "Alpha2 uses Bravo2", valid_from=t1,
+                         extractor="llm", fact_type="permanent", LIF=0.5,
+                         confidence=0.8, source_refs=["s"], topic="A2 uses B2",
+                         object_id=eb2)
+fid_bc2 = store.put_fact(eb2, "runs_on", "Bravo2 runs on Charlie2", valid_from=t1,
+                         extractor="llm", fact_type="permanent", LIF=0.5,
+                         confidence=0.8, source_refs=["s"], topic="B2 runs on C2",
+                         object_id=ec2)
+conn_test = db.get_conn()
+conn_test.execute("UPDATE fact SET valid_to=? WHERE id=?", (t2, fid_ab2))
+conn_test.commit()
+
+# (a) as_of=t1.5 区间内: A↔B 边在图里,BFS hops=2 从 Alpha2 达 Bravo2(1)+Charlie2(2)
+g_in, _ = recall_mod._build_entity_graph(as_of=t1_5)
+assert eb2 in g_in and ea2 in g_in and ec2 in g_in, (
+    f"as_of={t1_5}: 图应含 A2/B2/C2 边(fid_ab2 区间内), got nodes={set(g_in.nodes())}"
+)
+neighbors_in = recall_mod.bfs_neighbors([ea2], g_in, hops=2)
+assert eb2 in neighbors_in, (
+    f"as_of={t1_5}: BFS 应达 Bravo2 (1-hop), got neighbors={neighbors_in}"
+)
+assert ec2 in neighbors_in, (
+    f"as_of={t1_5}: BFS 应达 Charlie2 (2-hop), got neighbors={neighbors_in}"
+)
+res_in = recall_mod.recall("Alpha2", use_bfs=True, bfs_hops=2, as_of=t1_5, boost=False)
+ids_in = {f["id"] for f in res_in}
+assert fid_ab2 in ids_in, (
+    f"as_of={t1_5} (区间内): fid_ab2 应被 BFS 召回, got ids={ids_in}"
+)
+assert fid_bc2 in ids_in, (
+    f"as_of={t1_5} (区间内): fid_bc2 应被 BFS 召回(Bravo2 1-hop/Charlie2 2-hop), got ids={ids_in}"
+)
+print(f"✓ 9a. as_of+use_bfs 区间内: fid_ab2 & fid_bc2 recalled, ids={ids_in}")
+
+# (b) as_of=t3 已失效: A↔B 边被时间过滤掉,A2 变孤立,BFS 从 Alpha2 不达 Bravo2/Charlie2
+# (fid_bc2 无 valid_to 仍有效 → B2/C2 留在图中, 但 Alpha2 只有一条 A↔B 边, 该边失效
+#  后 Alpha2 脱离图 → bfs_neighbors 从 Alpha2 返回 {})
+g_out, _ = recall_mod._build_entity_graph(as_of=t3)
+assert not g_out.has_edge(ea2, eb2), (
+    f"as_of={t3}: 图应丢 A2↔B2 边(fid_ab2 已失效), got edges={list(g_out.edges())}"
+)
+neighbors_out = recall_mod.bfs_neighbors([ea2], g_out, hops=2)
+assert eb2 not in neighbors_out and ec2 not in neighbors_out, (
+    f"as_of={t3}: BFS 不应达 Bravo2/Charlie2 (A↔B 边被时间过滤), got neighbors={neighbors_out}"
+)
+res_out = recall_mod.recall("Alpha2", use_bfs=True, bfs_hops=2, as_of=t3, boost=False)
+ids_out = {f["id"] for f in res_out}
+assert fid_ab2 not in ids_out, (
+    f"as_of={t3} (已失效): fid_ab2 不应召回(valid_to < as_of), got ids={ids_out}"
+)
+assert fid_bc2 not in ids_out, (
+    f"as_of={t3} (已失效): fid_bc2 不应召回(Bravo2 不可达), got ids={ids_out}"
+)
+print(f"✓ 9b. as_of+use_bfs 已失效: fid_ab2 & fid_bc2 excluded, ids={ids_out}")
+
+# (c) 对称验证: use_bfs=False + as_of=t1.5 → fid_bc2 不召回(门控,断言 BFS 路径是召回来源)
+res_nobfs_in = recall_mod.recall("Alpha2", use_bfs=False, as_of=t1_5, boost=False)
+ids_nobfs_in = {f["id"] for f in res_nobfs_in}
+assert fid_bc2 not in ids_nobfs_in, (
+    f"use_bfs=False: fid_bc2 (图近 fact) 不应被召回(BFS 门控), got ids={ids_nobfs_in}"
+)
+print(f"✓ 9c. as_of+use_bfs=False 门控: fid_bc2 not recalled (BFS path is the source), ids={ids_nobfs_in}")
+
+# (d) _temporal_clause 透传一致性: as_of 与 None 语义不同(契约对齐)
+sql_none, params_none = recall_mod._temporal_clause(as_of=None)
+sql_in, params_in = recall_mod._temporal_clause(as_of=t1_5)
+assert params_none == [] and params_in == [t1_5, t1_5], (
+    f"_temporal_clause 参数透传: None→[], as_of→[as_of,as_of]; got none={params_none} in={params_in}"
+)
+assert "valid_from" in sql_in and "valid_to" in sql_in, (
+    f"_temporal_clause(as_of) SQL 应含 valid_from/valid_to 区间判定, got sql={sql_in!r}"
+)
+assert "status='active'" in sql_none, (
+    f"_temporal_clause(None) SQL 应含 status='active' (default 零回归), got sql={sql_none!r}"
+)
+print(f"✓ 9d. _temporal_clause as_of 透传契约: None→status filter, as_of→valid_from/valid_to 区间")
+
 shutil.rmtree(tmp)
 print("\n✅ All BFS recall + gating tests passed.")

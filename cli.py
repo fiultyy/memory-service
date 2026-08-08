@@ -174,11 +174,13 @@ def autodream(session_id: str, transcript_path: str,
 
 def init_memory(memory_dir: str | None = None,
                 source_cwd: str | None = None) -> dict[str, int]:
-    """Seed KG from CC memory .md files (ADR-12). ``source_cwd`` ADR-14 记来源 cwd。
-    Thin wrapper over ``bootstrap.init_memory`` (LLM 蝴蝶翼 直连, 无 regex 降级)。"""
-    if memory_dir is None:
-        memory_dir = str(Path.home() / ".claude" / "projects" / "-home-yy--claude" / "memory")
-    return bootstrap.init_memory(memory_dir, source_cwd=source_cwd)
+    """Seed KG from CC memory .md files (ADR-12)。``memory_dir`` 默认
+    ``cc_memory_dir(cwd)``(与 build-index 一致; 旧默认硬编码 ``~/.claude`` 全局目录 → 读错),
+    ``source_cwd`` 默认 ``cwd``(ADR-14 记来源, 不再 NULL → 否则 build-index 严格匹配不投影)。"""
+    import projection
+    cwd = source_cwd or os.getcwd()
+    mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
+    return bootstrap.init_memory(mem_dir, source_cwd=source_cwd or cwd)
 
 
 # ── build-index (投影 → CC memory, ADR-15 分布式 index) ─────────────

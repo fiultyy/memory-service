@@ -2,9 +2,9 @@
 # SessionStart hook: 开局投影 KG → CC memory [mem].
 #
 # CC fires this at session start (stdin JSON: {session_id, cwd}). We project
-# existing KG facts into CC memory via `build-index` so recall-trail updates
+# existing KG facts into CC memory via `synthesis-index` so recall-trail updates
 # immediately, not only after PreCompact. **Always exit 0** — the hook never
-# blocks session start; build-index is best-effort side-effect.
+# blocks session start; synthesis-index is best-effort side-effect.
 #
 # Tolerates everything: missing jq, missing python3, missing cli.py. Any failure
 # path just returns 0 and lets the session proceed.
@@ -39,12 +39,12 @@ fi
 # ponytail: default session id when CC omits it.
 [ -z "${SESSION_ID}" ] && SESSION_ID="unknown"
 
-# Run build-index only if cli.py exists. Project KG → CC memory [mem].
+# Run synthesis-index only if cli.py exists. Project KG → CC memory [mem].
 # Output discarded; hook's contract is side-effect on CC memory, not stdout.
 if [ -f "${CLI}" ]; then
     if command -v python3 >/dev/null 2>&1; then
         ( cd "${SVC_DIR}" && \
-          python3 cli.py build-index ${CWD:+--scope "$CWD"} --session "${SESSION_ID}" \
+          python3 cli.py synthesis-index ${CWD:+--scope "$CWD"} --session "${SESSION_ID}" \
               >/dev/null 2>&1 || true )
     fi
 fi

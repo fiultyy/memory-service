@@ -239,6 +239,21 @@ def build_index(scope: str | None = None, top_k: int = 20, memory_dir: str | Non
     return projection.build_index(facts, ent_names, mem_dir)
 
 
+# ── synthesis-index (ADR-15 P2: 散 index 对账 → MEMORY [mem] 唯一写入口) ──
+
+def synthesis_index(scope: str | None = None, memory_dir: str | None = None,
+                    session: str | None = None) -> dict:
+    """对账散 mem-<id>.md → 回 KG → 重写 MEMORY.md [mem] 索引(ADR-15 P2, 唯一写入口)。
+
+    Thin wrapper over ``projection.synthesis_index``。recall/autodream 建 mem-<id>.md,
+    synthesis 集中收口写 MEMORY。冷启动空跳过不兜底; orphan [mem] 行永远删(orphan 文件删默认关)。
+    """
+    import projection
+    cwd = scope or os.getcwd()
+    mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
+    return projection.synthesis_index(cwd, mem_dir, session_id=session)
+
+
 # ── prune (DELETE 同步, ADR-17d) ─────────────────────────────────────
 
 def prune(scope: str | None = None, memory_dir: str | None = None,
@@ -337,6 +352,13 @@ def _main(argv: list[str] | None = None) -> int:
                     help="CC memory dir(默认 ~/.claude/projects/<encoded>/memory/)")
     bi.add_argument("--session", dest="session", default=None,
                     help="CC session id(默认 CLAUDE_CODE_SESSION_ID env, 用于轨迹 UNION)")
+    si = sub.add_parser("synthesis-index",
+                        help="散 index 对账 → 重写 MEMORY.md [mem] (ADR-15 P2, MEMORY [mem] 唯一写入口)")
+    si.add_argument("--scope", default=None, help="来源 cwd(默认 os.getcwd)")
+    si.add_argument("--memory-dir", dest="memory_dir", default=None,
+                    help="CC memory dir(默认 cc_memory_dir(scope))")
+    si.add_argument("--session", dest="session", default=None,
+                    help="CC session id(P2 占位, 暂仅日志用)")
     pr = sub.add_parser("prune",
                         help="CC memory md 删除 → KG fact soft-delete (ADR-17d, re-ingest 的 DELETE 对称)")
     pr.add_argument("--scope", default=None, help="来源 cwd(默认 os.getcwd)")
@@ -367,6 +389,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(bootstrap.re_ingest_file(args.file, source_cwd=args.cwd or os.getcwd()), ensure_ascii=False))
     elif args.cmd == "build-index":
         print(json.dumps(build_index(scope=args.scope, top_k=args.top_k, memory_dir=args.memory_dir, session_id=args.session), ensure_ascii=False))
+    elif args.cmd == "synthesis-index":
+        print(json.dumps(synthesis_index(scope=args.scope, memory_dir=args.memory_dir, session=args.session), ensure_ascii=False))
     elif args.cmd == "prune":
         print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir, dry_run=args.dry_run), ensure_ascii=False))
     elif args.cmd == "embed-backfill":

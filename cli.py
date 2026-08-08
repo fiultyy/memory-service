@@ -147,16 +147,18 @@ def recall(query: str, verbose: bool = False,
            session_id: str | None = None, boost: bool = True,
            weights=None, use_vec: bool = False, delta: float | None = None,
            cwd: str | None = None, top_k: int | None = None,
-           with_tag: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
+           with_tag: bool = False,
+           use_bfs: bool = False, bfs_hops: int = 2) -> list[dict[str, Any]] | dict[str, Any]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
     Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
     (ADR-13); ``cwd`` ADR-14 b 方案: 过滤 source_cwd(含 NULL 老数据兼容)。
     ``top_k`` 限制返回数量(默认 None 无截断)。
+    ``use_bfs=True`` 启用 BFS 图遍历召回(D5, 召回图近但字面/向量远的 fact)。
     """
     return recall_mod.recall(query, verbose=verbose, session_id=session_id,
                              boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
-                             with_tag=with_tag)
+                             with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops)
 
 
 # ── consolidate ────────────────────────────────────────────────────
@@ -271,6 +273,10 @@ def _main(argv: list[str] | None = None) -> int:
                      help="限制返回数量(默认无截断)")
     rec.add_argument("--with-tag", dest="with_tag", action="store_true",
                      help="返回 nested {results:[{fact,score,tag}]} shape(默认 list[dict]+_snaptag)")
+    rec.add_argument("--bfs", action="store_true",
+                     help="启用 BFS 图遍历召回(D5, 召回图近但字面/向量远的 fact)")
+    rec.add_argument("--bfs-hops", dest="bfs_hops", type=int, default=2,
+                     help="BFS 遍历跳数(默认 2)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -328,7 +334,7 @@ def _main(argv: list[str] | None = None) -> int:
         ))
     elif args.cmd == "recall":
         session_id = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
-        print(json.dumps(recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag), ensure_ascii=False, default=str))
+        print(json.dumps(recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops), ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":

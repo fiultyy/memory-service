@@ -123,6 +123,14 @@ commit: `ded4deb`
 - **踩坑**: ① 老 db `ALTER ADD COLUMN name_embedding TEXT` 无 DEFAULT → 既存行 NULL(非 '[]'), 回填 WHERE 必须双认, blast radius=全部历史 entity(当前库空=前向风险);② `object_id nullable + FK` 不挡 NULL → 删 object resolver 突变静默落地坏数据, 集成测试须断言 object_id IS NOT NULL;③ 测试假绿: 单测 resolve_entity 不覆盖接线(fact→resolved id), 要集成测试;④ OMP 实施但未留 P3 自评(信主 session 独立 review, 不信未验证完成声明)。
 - **defer(本迭代治 D3+D7)**: D5 BFS 召回(KG 唯一独占价值, 下一迭代)/ D6 gating(避单 session -17.7%)/ D4 双时态。盲区: embedding 模型升级维度变→全库 name_embedding 失效无迁移; aliases 只加不删无 GC; 并发 re-ingest 无 UNIQUE(name,type) 竞态。
 
+### bfs-recall-gating (D5 BFS 召回 + D6 门控) — 2026-08-08 [OMP 实施 + 主 session 验证]
+- **D5 BFS 召回**: KG 相对纯向量 RAG 唯一独占价值(φ_bfs 抓「语义远但图近」, R2 实证 +18.5% LongMemEval)。recall.py 抽 `_build_entity_graph() -> (nx.Graph, centrality)`(图复用单一源, centrality + BFS 共用, 不建两次);新增 `bfs_neighbors(seeds, graph, hops=2, max_nodes=50)`(nx 单源最短路取 min hop, lowest-hop-first 截 max_nodes)+ `_hop_decay`(0→1.0/1→0.5/2→0.25)。recall() 加 `use_bfs=False, bfs_hops=2`: seed entity → BFS → 邻域 fact 并入候选, BFS-found fact(hop>0)**绕过 score≥0.3 硬滤**(显式图召回非噪音)仍参与排序。
+- **D6 门控 = opt-in `--bfs`**(default off): 契合项目"agent 自主召回"哲学; -17.7% 单 session 退化源于 BFS 总 fire, opt-in 天然规避; **default off 逐字零回归**(score_fact 加 bfs_proximity=0 → 同分; 过滤线 `>=0.3 or fid in bfs_expanded_ids`, use_bfs=False 时空集 → 同 `>=0.3`)。cli `--bfs` / `--bfs-hops` flag。
+- **scoring**: score_fact 加 `bfs_proximity` 形参 + `BFS_WEIGHT=0.1`(ε), `score += BFS_WEIGHT·bfs_proximity`(镜像 `DELTA_VEC·vec_sim`);**weights (α,β,γ) 三元组不动**(eval_recall grid 依赖)。
+- **验证**: OMP(workflowz)实施; 主 session 新鲜跑 **12/12**(含 test_bfs_recall 9 断言: BFS 召回 2-hop fact / 门控 off 不召回 / hop cap hops=1 vs 2 / max_nodes≤50 / hop_decay / zero-regression bfs=0.668≥without=0.618 / db 隔离)。data/memory.db 零污染。P0+projection+entity-dedupe 契约未触(只加可选路径, default off 不改原 recall)。
+- **踩坑**: ① OMP 终端歧义 —— 两个 "OMP ready" 都在 agent-os-v2 cwd, 主 session 误猜 omp2(劫持自其 agent-os-v2 ao-tui 任务); 但 **OMP 框架按消息目标路径绝对路径编辑**, BFS 改动正确落 /home/yy/projects/memory-service(agent-os-v2 副本 git 干净未碰)。下次分派前先实时确认唯一 OMP 身份, 不靠排除法猜。② omp2 做完回 agent-os-v2, 上下文混了(BFS diff 无污染, 可接受)。
+- **defer(本迭代治 D5+D6)**: D4 双时态 valid_at/invalid_at(Graphiti bi-temporal 边失效, 下一迭代)。BFS auto-suggest hint(direct-match 薄时提示 rerun --bfs)/ 跨 cwd BFS 门控 / BFS_WEIGHT baseline 调参 / BFS+use_vec 组合深测。
+
 ---
 
 ## ADR 清单 (12 活跃)

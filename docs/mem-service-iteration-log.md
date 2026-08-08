@@ -182,20 +182,38 @@ commit: `ded4deb`
 
 ---
 
-## defer 队列 (10)
+## defer 总览(全迭代汇总, 2026-08-08 五迭代后)
 
-1. autoDream daemon (CC server-side flag `tengu_onyx_plover` 未开)
-2. 中文 embedding 调优 (BGE-M3, qwen3-4b 已强 57.1%)
-3. fact on-ingest 预计算 embedding (避免 on-recall)
-4. 跨 scope memory 向量联邦 (多 CC project)
-5. memory 变更增量检测 (mtime, 全量幂等重跑够)
-6. 新 LLM/embedding provider (claude-api/LMStudio extract, 当前够)
-7. 冷层归档 (依赖向量, KG 小不需)
-8. CC→KG 反向 re-ingest (用户编辑 memory/*.md → KG)
-9. SessionStart build-index hook (new 触发投影)
-10. daemon (进程常驻 L1 累积/pagerank 持久, 边际延迟优化非功能缺口)
+### ✅ 已清零 — projection 那轮 D3-D7 全做完了
+- [x] **D3** 实体合并(共指消解) — entity-dedupe
+- [x] **D4** 双时态 — bi-temporal-validity
+- [x] **D5** BFS 召回 — bfs-recall-gating
+- [x] **D6** 门控(opt-in `--bfs`) — bfs-recall-gating
+- [x] **D7** aliases 持久化 — entity-dedupe
 
-**已否定** (用户决策): UserPromptSubmit 自动注入 / SessionStart(compact) 自动注入 — agent 自主召回 (recall 结果在 context, 非主动注入)。
+### 🟡 研究机制剩余(R2 Graphiti 抄的, 五迭代后还没做)
+- [ ] **Graphiti 式 LLM 矛盾检测** — 新 fact → LLM 比同实体对已存边 → 自动失效(R2 L148; 当前只复用 autodream `_is_contradiction` 功能性谓词判断)
+- [ ] **bi-temporal churn 监控** — supersede rate / active ratio, 降阈值触发刷新(R2 L149/159)
+
+### 🟡 五迭代 minor 尾巴(非阻断, 详各迭代条目)
+- **bfs 留**: BFS auto-suggest hint(direct-match 薄时提示 rerun --bfs)/ 跨 cwd BFS 门控 / BFS_WEIGHT baseline 调参 / BFS+use_vec 组合深测
+- **bi-temporal 留**: as_of + BFS 组合深测 / valid_from 从 source_meta/会话时间推导(非 ingest now)
+- **entity-dedupe 审查盲区**: embedding 模型升级维度变 → 全库 name_embedding 失效无迁移 / aliases add_aliases 只加不删无 GC / 并发 re-ingest 无 UNIQUE(name,type)竞态
+- **bi-temporal 审查盲区**: ISO 时戳跨时区字典序(非 UTC --as-of) / valid_to=now 与新 fact valid_from=now 各调一次 _now() 微秒级半开区间竞态 / 老数据 valid_from NULL=-∞ 运维文档化
+
+### ⚪ 全局 operational(迭代无关, 五轮未动)
+1. autoDream daemon(CC server-side flag `tengu_onyx_plover` 未开)
+2. 中文 embedding 调优(BGE-M3, qwen3-4b 已强 57.1%)
+3. fact on-ingest 预计算 embedding(避免 on-recall)
+4. 跨 scope memory 向量联邦(多 CC project)
+5. memory 变更增量检测(mtime, 全量幂等重跑够)
+6. 新 LLM/embedding provider(claude-api/LMStudio extract, 当前够)
+7. 冷层归档(依赖向量, KG 小不需)
+8. CC→KG 反向 re-ingest(用户编辑 memory/*.md → KG)
+9. SessionStart build-index hook(new 触发投影)
+10. daemon(进程常驻 L1 累积/pagerank 持久, 边际延迟优化非功能缺口)
+
+**已否定**(用户决策, 不做): UserPromptSubmit 自动注入 / SessionStart(compact)自动注入 — agent 自主召回(recall 结果在 context, 非主动注入)。
 
 ---
 

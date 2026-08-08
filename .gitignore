@@ -18,3 +18,12 @@ logs/
 # orchestrator 运行时编排 state (不版本化)
 .claude/orchestrator-state.json
 .claude/orchestrator-state.lock
+
+# orchestrator P2/P3 过程产物 (workflow 脚本/p3 json/tickets, 可重建不版本化)
+.claude/orchestrator-workflow-*.js
+.claude/orchestrator-p3-*.json
+.claude/orchestrator-graph-reingest.json
+.scratch/
+
+# 研究笔记 (本地草稿, 不版本化)
+docs/research/

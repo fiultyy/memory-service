@@ -17,11 +17,14 @@ centrality/lif/score) as a debug surface in lieu of a dedicated ``query`` cli.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import db
 import embedding
 import networkx as nx
+import projection
 import scoring
 import store
 
@@ -138,7 +141,9 @@ def recall(
     use_vec: bool = False,
     delta: float | None = None,
     cwd: str | None = None,
-) -> list[dict[str, Any]]:
+    with_tag: bool = False,
+    mem_dir: str | Path | None = None,
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
     KG navigation: ``entity.name LIKE`` per query token anchors entities; their
@@ -277,6 +282,44 @@ def recall(
                 if authoritative is not None:
                     s["fact"].update(authoritative)
 
+    # ADR-15 Ch2: 命中 fact → 建/刷 mem-<id>.md (snaptag 物化) + 算 tag 嵌 _snaptag。
+    # 绝不碰 MEMORY.md(撞 autoMemory cache)。mem_dir 优先显式, 否则 cwd 推导;
+    # 都无则只算 tag 不建文件(测试/无 cwd 场景)。
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    ent_names: dict[str, str] = {}
+    if scored:
+        eids = {s["fact"].get("subject_id") for s in scored}
+        eids |= {s["fact"].get("object_id") for s in scored}
+        eids.discard(None)
+        if eids:
+            erows = conn.execute(
+                f"SELECT id, name FROM entity WHERE id IN ({','.join('?' * len(eids))})",
+                tuple(eids),
+            ).fetchall()
+            ent_names = {r["id"]: r["name"] for r in erows}
+    mem_dir_obj = Path(mem_dir) if mem_dir else (projection.cc_memory_dir(cwd) if cwd else None)
+    for s in scored:
+        f = s["fact"]
+        fid = f["id"]
+        subj = ent_names.get(f.get("subject_id"), "?")
+        display = f"{subj} {f.get('predicate') or ''} {f.get('value') or ''}".strip()
+        ms = scoring.mem_score(f)
+        mem_path = None
+        if mem_dir_obj is not None:
+            projection.project_fact_md(f, subj, mem_dir_obj, recalled_at=now_iso)
+            mem_path = f"memory/{projection._mem_filename(fid)}"
+        tag = {
+            "fact_id": fid,
+            "mem_path": mem_path,
+            "kg_uri": f"kg://fact/{fid}",
+            "display": display,
+            "mem_score": ms,
+            "recalled_at": now_iso,
+            "session_id": session_id,
+        }
+        f["_snaptag"] = tag  # 默认 list[dict] shape 嵌此字段(向后兼容, 调用方可忽略)
+        s["tag"] = tag
+
     if verbose:
         ent_ids = {e["id"] for e in entities}
         for s in scored:
@@ -285,6 +328,12 @@ def recall(
                 eid for eid in (f.get("subject_id"), f.get("object_id")) if eid in ent_ids
             ]
         return scored
+    if with_tag:
+        return {
+            "query": query,
+            "session_id": session_id,
+            "results": [{"fact": s["fact"], "score": s["score"], "tag": s["tag"]} for s in scored],
+        }
     return [s["fact"] for s in scored]
 
 

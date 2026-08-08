@@ -10,6 +10,7 @@ KG 高 LIF fact → CC memory/mem-<id>.md(实体文件, CC Read/description 召�
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -26,23 +27,26 @@ def _mem_filename(fact_id: str) -> str:
     return f"mem-{fact_id}.md"
 
 
-def project_fact_md(fact: dict, subject: str, mem_dir: Path) -> Path:
-    """投影单 fact → mem-<id>.md(CC Read 可读, frontmatter description 召回)。
-    标记 source: mem-service + fact_id(区分 CC 原生)。幂等(同 fact_id 重写)。"""
+def project_fact_md(fact: dict, subject: str, mem_dir: Path,
+                    recalled_at: str | None = None) -> Path:
+    """投影单 fact → mem-<id>.md(snaptag 物化载体, ADR-15)。
+
+    瘦 frontmatter: 只 ``source``/``fact_id``/``recalled_at``/``description``
+    (synthesis 经 ``fact_id`` 回 KG 取 confidence/LIF 现值, 不存原始重算)。
+    **原子写** ``.tmp`` + ``os.replace``(防 synthesis 扫读半写 TOCTOU)。幂等(同 fact_id 重写)。"""
     fid = fact["id"]
     p = mem_dir / _mem_filename(fid)
     pred = fact.get("predicate") or ""
     val = fact.get("value") or ""
     lif = float(fact.get("LIF") or 0)
+    display = f"{subject} {pred} {val}".strip()
     content = f"""---
-description: {subject} {pred} {val}(mem-service KG fact, LIF {lif:.2f})
+description: {display}(mem-service KG fact, LIF {lif:.2f})
 source: mem-service
 fact_id: {fid}
-source_cwd: {fact.get('source_cwd') or ''}
-extractor: {fact.get('extractor') or ''}
-LIF: {lif:.2f}
+recalled_at: {recalled_at or ''}
 ---
-# {subject} {pred} {val}
+# {display}
 
 - subject: {subject}
 - predicate: {pred}
@@ -52,8 +56,22 @@ LIF: {lif:.2f}
 
 召回扩展: cli recall "{subject}" 或 recall kg://fact/{fid}
 """
-    p.write_text(content, encoding="utf-8")
+    tmp = p.with_suffix(".md.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, p)  # 原子: 防 synthesis 扫读到半写
     return p
+
+
+def read_fact_id(md_path: Path) -> str | None:
+    """从 ``mem-*.md`` frontmatter 读 ``fact_id``(synthesis 扫描用)。
+
+    容错: 文件缺/损坏/frontmatter 无 fact_id → None(synthesis 跳过, 不崩)。"""
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.search(r"^fact_id:\s*(\S+)\s*$", text, re.MULTILINE)
+    return m.group(1) if m else None
 
 
 def mem_index_line(fact: dict, subject: str) -> str:

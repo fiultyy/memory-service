@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -118,6 +119,36 @@ GAMMA_LIF = 0.2
 DELTA_VEC = 0.3  # ADR-13 向量层(vec_sim)默认权重; use_vec 时融合, 默认 off 不改 ADR-4v2 score
 
 
+# ── mem_score: 记忆质量标量 (LIF + confidence 关联, ADR-15 投影排序用) ──
+# synthesis-index 投影排序 + recall _snaptag 用. confidence 落 KG 后静态
+# (不随 consolidate 更新) → v1 LIF 主导 + confidence 小权重. TODO 债务:
+# consolidation 刷新 confidence 后 weighted/harmonic 才完全自洽.
+def _memscore_config() -> tuple[float, float, str]:
+    """读 .env: MEM_MEMSCORE_MODE (weighted|harmonic|lif) + W_LIF/W_CONF。cli._load_env 已加载。"""
+    mode = (os.environ.get("MEM_MEMSCORE_MODE") or "weighted").strip().lower()
+    w_lif = float(os.environ.get("MEM_MEMSCORE_W_LIF") or "0.7")
+    w_conf = float(os.environ.get("MEM_MEMSCORE_W_CONF") or "0.3")
+    return w_lif, w_conf, mode
+
+
+def mem_score(fact: dict[str, Any]) -> float:
+    """记忆质量标量 ∈ [0,1] = LIF + confidence 关联。
+    - weighted (默认 ``MEM_MEMSCORE_MODE=weighted``): w_lif·LIF + w_conf·confidence
+    - harmonic: ``2·c·LIF/(c+LIF)`` (两低其一即拉低)
+    - lif: 纯 LIF (忽略 confidence)
+    纯函数(读 .env mode/权重), 不加列; synthesis 经 fact_id 回 KG 取现值算。"""
+    lif = float(fact.get("LIF") or 0.0)
+    conf = float(fact.get("confidence") or 0.0)
+    _w_lif, _w_conf, mode = _memscore_config()
+    if mode == "lif":
+        ms = lif
+    elif mode == "harmonic":
+        ms = 2 * conf * lif / (conf + lif) if (conf + lif) > 0 else 0.0
+    else:  # weighted (default)
+        ms = _w_lif * lif + _w_conf * conf
+    return float(max(0.0, min(1.0, ms)))
+
+
 def score_fact(
     fact: dict[str, Any],
     query: str,
@@ -159,12 +190,13 @@ def score_fact(
     # not AO2 NeuralField rank-based percentile — that is a runtime field
     # ranking, wrong for a static trust scalar.
     lif = float(fact.get("LIF") or 0.0)
+    ms = mem_score(fact)  # ADR-15: γ 项改用 mem_score(LIF+confidence 关联), 非裸 LIF
     c = float(centrality or 0.0)
     alpha, beta, gamma = weights if weights is not None else (ALPHA_MATCH, BETA_CENTRALITY, GAMMA_LIF)
     d = DELTA_VEC if delta is None else delta
     vs = float(vec_sim or 0.0)
-    score = alpha * m + beta * c + gamma * lif + d * vs
-    return {"fact": fact, "match": m, "centrality": c, "lif": lif, "vec_sim": vs, "score": float(score)}
+    score = alpha * m + beta * c + gamma * ms + d * vs
+    return {"fact": fact, "match": m, "centrality": c, "lif": lif, "mem_score": ms, "vec_sim": vs, "score": float(score)}
 
 
 # ── ADR-8v2 LIF five-dim composite ──────────────────────────────────
@@ -415,7 +447,7 @@ def refresh_lif_on_recall(
 
 
 __all__ = [
-    "query_tokens", "match_item", "score_fact",
+    "query_tokens", "match_item", "score_fact", "mem_score",
     "ALPHA_MATCH", "BETA_CENTRALITY", "GAMMA_LIF",
     "compute_lif", "refresh_lif_on_recall",
     "SOURCE_WEIGHT", "LIF_WEIGHTS", "LIF_HALF_LIFE_DAYS",

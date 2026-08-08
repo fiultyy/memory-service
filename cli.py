@@ -134,7 +134,8 @@ def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
 def recall(query: str, verbose: bool = False,
            session_id: str | None = None, boost: bool = True,
            weights=None, use_vec: bool = False, delta: float | None = None,
-           cwd: str | None = None, top_k: int | None = None) -> list[dict[str, Any]]:
+           cwd: str | None = None, top_k: int | None = None,
+           with_tag: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
     Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
@@ -142,7 +143,8 @@ def recall(query: str, verbose: bool = False,
     ``top_k`` 限制返回数量(默认 None 无截断)。
     """
     return recall_mod.recall(query, verbose=verbose, session_id=session_id,
-                             boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k)
+                             boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
+                             with_tag=with_tag)
 
 
 # ── consolidate ────────────────────────────────────────────────────
@@ -294,6 +296,8 @@ def _main(argv: list[str] | None = None) -> int:
                      help="CC session id(默认 CLAUDE_CODE_SESSION_ID env)")
     rec.add_argument("--top-k", dest="top_k", type=int, default=None,
                      help="限制返回数量(默认无截断)")
+    rec.add_argument("--with-tag", dest="with_tag", action="store_true",
+                     help="返回 nested {results:[{fact,score,tag}]} shape(默认 list[dict]+_snaptag)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -352,7 +356,7 @@ def _main(argv: list[str] | None = None) -> int:
         ))
     elif args.cmd == "recall":
         session_id = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
-        print(json.dumps(recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k), ensure_ascii=False, default=str))
+        print(json.dumps(recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag), ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":

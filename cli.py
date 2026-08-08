@@ -31,6 +31,7 @@ import bootstrap
 import consolidate as consolidate_mod
 import recall as recall_mod
 import store
+import resolver
 from llm_provider import LLMProvider
 
 
@@ -65,8 +66,9 @@ def ingest(text: str, source_ref: str | None = None,
     the regex extractor (ADR-5) when no provider is reachable or confidence is
     low. ``fact.extractor`` reflects which path won: "llm" or "regex".
     ``fact_type`` is ADR-8 (default stable; ingest ``--fact-type`` overrides).
-    Entities are lazily created from each fact's subject/object via
-    ``_ensure_entity`` (re-extraction of a known name reuses its id).
+    Entities are resolved via ``resolver.resolve_entity`` (ADR-D3 two-step
+    merge: cheap exact/alias gate → vector top-k + LLM dedupe → create).
+    Re-extraction of a known name reuses its id (name_to_id cache per ingest).
 
     ``providers`` defaults to ``[CCRProvider()]`` (the deployed ccr router).
     Pass ``[]`` to force the regex fallback path (Spec §4 story 5).
@@ -86,14 +88,17 @@ def ingest(text: str, source_ref: str | None = None,
     # name → type map (entities carry their declared type; edges fall back to
     # the cache or a default — R1 档 1: no more hardcoded "inferred").
     name_to_type: dict[str, str] = {}
-
     # Phase 1: persist declared entities (R1 档 1 — entities first, edges after).
-    # TODO Tier 2: persist aliases (put_entity properties.alias) + lookup by alias.
+    # resolver.resolve_entity: cheap exact/alias gate, else create (ADR-D3).
     for ent in extracted.entities:
         if not ent.name:
             continue
-        eid = _ensure_entity(ent.name, ent.type, name_to_id)
+        eid = resolver.resolve_entity(
+            ent.name, ent.type,
+            aliases=getattr(ent, 'aliases', None) or None,
+            providers=providers)
         if eid is not None:
+            name_to_id[ent.name] = eid
             name_to_type[ent.name] = ent.type
 
     # Phase 2: edges. subject AND object both resolve to entities (R1 §A2 hard
@@ -101,14 +106,24 @@ def ingest(text: str, source_ref: str | None = None,
     # object_id 必非空 → entity↔entity edges emerge.
     fact_ids: list[str] = []
     for edge in extracted.edges:
-        subj_id = _ensure_entity(edge.subject, name_to_type.get(edge.subject, "concept"),
-                                 name_to_id)
+        subj_id = name_to_id.get(edge.subject)
+        if subj_id is None:
+            subj_id = resolver.resolve_entity(
+                edge.subject, name_to_type.get(edge.subject, "concept"),
+                providers=providers)
+            if subj_id is not None:
+                name_to_id[edge.subject] = subj_id
         if subj_id is None:
             continue
         # object is guaranteed declared (adapter drops dangling refs); still
-        # _ensure_entity both sides so it lands as an entity.
-        obj_id = _ensure_entity(edge.object, name_to_type.get(edge.object, "concept"),
-                                name_to_id)
+        # resolve both sides so it lands as an entity (R1 §A2).
+        obj_id = name_to_id.get(edge.object)
+        if obj_id is None:
+            obj_id = resolver.resolve_entity(
+                edge.object, name_to_type.get(edge.object, "concept"),
+                providers=providers)
+            if obj_id is not None:
+                name_to_id[edge.object] = obj_id
         fid = store.put_fact(
             subject_id=subj_id,
             predicate=edge.predicate,
@@ -124,27 +139,6 @@ def ingest(text: str, source_ref: str | None = None,
 
     return {"entities": len(name_to_id), "facts": fact_ids}
 
-
-def _ensure_entity(name: str, entity_type: str, cache: dict[str, str]) -> str | None:
-    """Resolve a name to an entity id, creating it if needed.
-
-    ``entity_type`` is the LLM-declared type (component/protocol/tool/...);
-    for an edge endpoint whose name wasn't in entities[] the caller passes a
-    default. Existing entities are reused (exact-name match) regardless of the
-    requested type — type is set at creation, not overwritten. None only on
-    empty name. (R1 档 1: deleted the hardcoded "inferred" — type now flows in.)
-    """
-    if not name:
-        return None
-    if name in cache:
-        return cache[name]
-    existing = store.find_entities_by_name(name)
-    if existing:
-        eid = existing[0]["id"]
-    else:
-        eid = store.put_entity(name, entity_type)
-    cache[name] = eid
-    return eid
 
 
 # ── recall ──────────────────────────────────────────────────────────

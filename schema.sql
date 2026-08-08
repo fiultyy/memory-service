@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS entity (
     name        TEXT NOT NULL,
     entity_type TEXT NOT NULL,
     properties  TEXT NOT NULL DEFAULT '{}',   -- JSON object
+    aliases        TEXT NOT NULL DEFAULT '[]',   -- JSON array (ADR-D7: 同实体异写别名)
+    name_embedding TEXT,                          -- JSON array float (ADR-D7: 名称向量, 离线='[]'/NULL)
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_entity_name ON entity(name);

@@ -27,14 +27,32 @@ def _uid() -> str:
 # ── Entity ──────────────────────────────────────────────────────────
 
 def put_entity(name: str, entity_type: str, properties: dict[str, Any] | None = None,
-               entity_id: str | None = None) -> str:
-    """Insert an entity, return its id. Caller dedups upstream if desired."""
+               entity_id: str | None = None,
+               aliases: list[str] | None = None,
+               name_embedding: list[float] | None = None) -> str:
+    """Insert an entity, return its id. Caller dedups upstream if desired.
+
+    ``aliases`` (ADR-D7): 同实体异写别名, None → []. ``name_embedding`` (ADR-D7):
+    名称向量(JSON list); None → [](空)。**put_entity 不做网络 I/O** — embedding 计算
+    属 resolver(Node B step 2 算一次, 显式传入); store 是纯存储原语。这样 entity 创建
+    不耦合 embedding provider(离线/防火墙不 block, 测试不污染 embeddings.db)。
+    """
     conn = db.get_conn()
     eid = entity_id or _uid()
+    if aliases is None:
+        aliases = []
+    if name_embedding is None:
+        name_embedding = []  # resolver owns embedding; store stays network-free
     conn.execute(
-        "INSERT INTO entity (id, name, entity_type, properties, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (eid, name, entity_type, json.dumps(properties or {}, ensure_ascii=False), _now()),
+        "INSERT INTO entity (id, name, entity_type, properties, aliases, name_embedding, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            eid, name, entity_type,
+            json.dumps(properties or {}, ensure_ascii=False),
+            json.dumps(aliases, ensure_ascii=False),
+            json.dumps(name_embedding, ensure_ascii=False),
+            _now(),
+        ),
     )
     conn.commit()
     return eid
@@ -67,14 +85,72 @@ def find_entities_by_name(name: str, entity_type: str | None = None) -> list[dic
 
 
 def _decode_entity(row: Any) -> dict[str, Any]:
+    _r = dict(row)  # sqlite3.Row → dict (防御老 row 无键)
     return {
-        "id": row["id"],
-        "name": row["name"],
-        "entity_type": row["entity_type"],
-        "properties": json.loads(row["properties"]) if row["properties"] else {},
-        "created_at": row["created_at"],
+        "id": _r["id"],
+        "name": _r["name"],
+        "entity_type": _r["entity_type"],
+        "properties": json.loads(_r["properties"]) if _r["properties"] else {},
+        "aliases": json.loads(_r.get("aliases") or "[]"),
+        "name_embedding": json.loads(_r.get("name_embedding") or "[]"),
+        "created_at": _r["created_at"],
     }
 
+
+def find_entity_exact(name: str) -> dict[str, Any] | None:
+    """大小写不敏感精确匹配 (合并廉价闸专用, ADR-D7)。
+
+    命中当 entity.name.lower() == name.lower() 或 name.lower() 在 aliases(大小写
+    不敏感)中。**区别于** find_entities_by_name(大小写敏感、不查 alias、返回 list)。
+    rows 量小 → Python 侧比对。命中返回第一个 _decode_entity, 否则 None。
+    """
+    conn = db.get_conn()
+    target = name.lower()
+    for row in conn.execute("SELECT * FROM entity ORDER BY created_at").fetchall():
+        ent = _decode_entity(row)
+        if ent["name"].lower() == target:
+            return ent
+        if target in [a.lower() for a in ent.get("aliases") or []]:
+            return ent
+    return None
+
+
+def backfill_entity_embedding(entity_id: str, name_embedding: list[float] | None) -> int:
+    """幂等回填 entity.name_embedding (供 resolver 合并时填空, ADR-D1 must-fix)。
+
+    空向量不回填(离线 emb=[] 不覆盖既有向量)。只填"空"行 — 空同时认 ``NULL``
+    (老库 ALTER ADD name_embedding 无 DEFAULT → 迁移行 = NULL)和 ``'[]'``(离线
+    INSERT 行)。两者都得认: 只写 ``'[]'`` 会漏老库 NULL 行(两轮核查逼出的关键点)。
+    Returns 影响行数(0 = 空向量 / 行已非空 / entity 不存在)。
+    """
+    if not name_embedding:
+        return 0
+    conn = db.get_conn()
+    cur = conn.execute(
+        "UPDATE entity SET name_embedding = ? WHERE id = ? "
+        "AND (name_embedding IS NULL OR name_embedding = '[]')",
+        (json.dumps(name_embedding, ensure_ascii=False), entity_id),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def add_aliases(entity_id: str, new_aliases: list[str]) -> None:
+    """并入别名到 entity.aliases (去重保序, 供 resolver 合并用, ADR-D7)。"""
+    conn = db.get_conn()
+    row = conn.execute("SELECT aliases FROM entity WHERE id = ?", (entity_id,)).fetchone()
+    if row is None:
+        return
+    existing = json.loads(row["aliases"]) if row["aliases"] else []
+    merged: list[str] = list(existing)
+    for a in new_aliases:
+        if a not in merged:
+            merged.append(a)
+    conn.execute(
+        "UPDATE entity SET aliases = ? WHERE id = ?",
+        (json.dumps(merged, ensure_ascii=False), entity_id),
+    )
+    conn.commit()
 
 # ── Fact ────────────────────────────────────────────────────────────
 

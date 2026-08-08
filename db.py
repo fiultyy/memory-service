@@ -41,6 +41,12 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     # ADR-C migration: 老 db fact 表无 topic 列 → ALTER ADD。
     if "topic" not in cols:
         conn.execute("ALTER TABLE fact ADD COLUMN topic TEXT")
+    # ADR-D7 migration: 老 db entity 表无 aliases/name_embedding 列 → ALTER ADD。
+    ent_cols = {r[1] for r in conn.execute("PRAGMA table_info(entity)")}
+    if "aliases" not in ent_cols:
+        conn.execute("ALTER TABLE entity ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'")
+    if "name_embedding" not in ent_cols:
+        conn.execute("ALTER TABLE entity ADD COLUMN name_embedding TEXT")
     conn.commit()
     _conn = conn
     _conn_path = str(path)

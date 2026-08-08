@@ -39,7 +39,7 @@ from typing import Any, Protocol, runtime_checkable
 class EntityOut:
     """One declared entity. ``name`` is the verbatim surface form an edge
     references (case preserved). ``type`` from the closed enum; aliases are
-    alternative spellings (P0 not yet persisted — Tier 2)."""
+    alternative spellings, persisted to entity.aliases (ADR-D7)."""
     name: str
     type: str = "concept"
     aliases: list[str] = field(default_factory=list)
@@ -81,6 +81,9 @@ class LLMProvider(Protocol):
 
     def extract_facts(self, text: str) -> Extraction: ...
 
+    def dedupe_entity(self, new_name: str, new_type: str,
+                      candidates: list) -> dict: ...
+
 
 # Fixed two-step prompt: declare entities first, then edges between declared
 # entities (R1 §A3). object is ALWAYS another declared entity, never a free
@@ -118,6 +121,48 @@ _EXTRACT_PROMPT = """你是知识图谱抽取器。分两步,只返回 JSON。
  "edges":    [{"subject":"native agent","predicate":"is_a","object":"A2A","topic":"native agent 是 A2A 协议节点"},{"subject":"native agent","predicate":"part_of","object":"mesh","topic":"native agent 组成内部 mesh"}]}
 文本: """
 
+
+# ── Entity dedupe prompt (ADR-D3 two-step merge, Graphiti dedupe_nodes style) ─
+# Synonymy judge: same real-world referent (异写/缩写/译名) → merge; merely
+# related or homonymous → never merge. Few-shot hardens the homonym trap.
+_DEDUPE_PROMPT = """你是知识图谱实体去重裁判。判断"待判实体"是否与候选列表里的某个实体是【同一实体的不同写法】(同义异写)。
+只有真正同义(指代真实世界同一对象)才算重复; 仅"相关"或"同名不同义"绝不算重复。
+
+规则:
+- 同义异写 → 合: 指向真实世界同一对象的不同名称/缩写/大小写/译名。
+- 相关但不同义 → 不合: 同名/近名但指向不同对象(同名异物)。
+- 不确定 → 不合(宁可新建, 不误合)。
+
+候选字段: id(实体的内部 id), name(实体名), type(类型), score(向量余弦相似度, 越高越像)。
+返回 JSON, 只含 duplicate_id:
+- 命中候选: {{"duplicate_id": "<候选 id>"}}
+- 不命中: {{"duplicate_id": null}}
+
+示例:
+待判: name="New York City" type="concept"
+候选: [{{"id":"e1","name":"NYC","type":"concept","score":0.92}}]
+{{"duplicate_id": "e1"}}  ← NYC 是 New York City 的缩写, 同义异写, 合
+
+待判: name="Java" type="location"
+候选: [{{"id":"e2","name":"Java编程语言","type":"tool","score":0.86}}]
+{{"duplicate_id": null}}  ← Java(印尼爪哇岛)≠ Java 编程语言, 同名不同义, 不合
+
+待判: name="Java编程语言" type="tool"
+候选: [{{"id":"e3","name":"Java","type":"tool","score":0.88}}]
+{{"duplicate_id": "e3"}}  ← 都指 Java 编程语言, 同义, 合
+
+待判: name="Python" type="tool"
+候选: [{{"id":"e4","name":"Python蟒蛇","type":"concept","score":0.81}}]
+{{"duplicate_id": null}}  ← Python 语言 ≠ 蟒蛇, 同名不同义, 不合
+
+待判: name="中国" type="location"
+候选: [{{"id":"e5","name":"中华人民共和国","type":"location","score":0.85}}]
+{{"duplicate_id": "e5"}}  ← 中国 是中华人民共和国的简称, 同义, 合
+
+现在判断:
+待判: name="{new_name}" type="{new_type}"
+候选: {candidates}
+"""
 
 # ── ZhipuAnthropicProvider — 智谱直连 Anthropic 协议(glm-5-turbo) ────────
 
@@ -166,6 +211,50 @@ class ZhipuAnthropicProvider:
         conf = 0.7 if edges else 0.0
         return Extraction(entities=entities, edges=edges, confidence=conf,
                           source_meta={"provider": "zhipu", "model": self.model})
+
+    def dedupe_entity(self, new_name: str, new_type: str,
+                      candidates: list) -> dict:
+        """Decide whether ``new_name`` duplicates an existing entity (ADR-D3).
+
+        Graphiti dedupe_nodes style: few-shot LLM judges synonymy vs mere
+        relatedness/homonymy. Returns ``{"duplicate_id": str | None}``.
+        Offline / no key / network error / parse failure → ``{"duplicate_id": None}``
+        (降级为新建, 不 crash)。
+        """
+        key = self.api_key or _load_zhipu_key()
+        if not key:
+            return {"duplicate_id": None}
+        body = json.dumps({
+            "model": self.model, "max_tokens": 256,
+            "messages": [{"role": "user", "content": _DEDUPE_PROMPT.format(
+                new_name=new_name, new_type=new_type,
+                candidates=json.dumps(candidates, ensure_ascii=False))}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/messages", data=body,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": key, "anthropic-version": "2023-06-01"},
+            method="POST")
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=self.timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            return {"duplicate_id": None}
+        content = _extract_text(raw)
+        if content is None:
+            return {"duplicate_id": None}
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end > start:
+            try:
+                doc = json.loads(content[start:end + 1])
+                did = doc.get("duplicate_id")
+                if did is None or isinstance(did, str):
+                    return {"duplicate_id": did}
+            except json.JSONDecodeError:
+                pass
+        return {"duplicate_id": None}
 
 
 def _load_zhipu_key() -> str:
@@ -258,6 +347,10 @@ class ClaudeAPIProvider:
         return Extraction(confidence=0.0, source_meta={
             "provider": "claude-api", "error": "stub, not implemented"})
 
+    def dedupe_entity(self, new_name: str, new_type: str,
+                      candidates: list) -> dict:
+        raise NotImplementedError("stub, not implemented")
+
 
 @dataclass
 class LMStudioProvider:
@@ -269,3 +362,7 @@ class LMStudioProvider:
     def extract_facts(self, text: str) -> Extraction:
         return Extraction(confidence=0.0, source_meta={
             "provider": "lmstudio", "error": "stub, not implemented"})
+
+    def dedupe_entity(self, new_name: str, new_type: str,
+                      candidates: list) -> dict:
+        raise NotImplementedError("stub, not implemented")

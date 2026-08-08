@@ -32,6 +32,7 @@ import adapter
 import consolidate as consolidate_mod
 import db
 import store
+import resolver
 
 
 def _read_transcript(transcript_path: str | Path) -> str:
@@ -73,19 +74,6 @@ def _read_transcript(transcript_path: str | Path) -> str:
     return "\n".join(parts)
 
 
-def _resolve_subject(name: str, entity_type: str = "concept") -> str | None:
-    """Resolve a name to an entity id, creating it if absent.
-
-    Mirrors ``cli._ensure_entity``. ``entity_type`` is the LLM-declared type
-    (R1 档 1: deleted hardcoded "inferred" — type flows in from entities[]).
-    Existing entities reused by exact-name match. None only on empty.
-    """
-    if not name:
-        return None
-    existing = store.find_entities_by_name(name)
-    if existing:
-        return existing[0]["id"]
-    return store.put_entity(name, entity_type)
 
 
 def _find_active_fact(subject_id: str, predicate: str, value: str) -> dict[str, Any] | None:
@@ -173,7 +161,10 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     for ent in result.entities:
         if not ent.name:
             continue
-        sid = _resolve_subject(ent.name, ent.type)
+        sid = resolver.resolve_entity(
+            ent.name, ent.type,
+            aliases=getattr(ent, 'aliases', None) or None,
+            providers=active_providers)
         if sid is not None:
             name_to_id[ent.name] = sid
             name_to_type[ent.name] = ent.type
@@ -187,7 +178,8 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
         topic = (edge.topic or "").strip() or None  # ADR-C: 投影 slug/title/desc 源
 
         if subject not in name_to_id:
-            sid = _resolve_subject(subject, name_to_type.get(subject, "concept"))
+            sid = resolver.resolve_entity(subject, name_to_type.get(subject, "concept"),
+                                          providers=active_providers)
             if sid is None:
                 continue
             name_to_id[subject] = sid
@@ -195,7 +187,8 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
 
         # object is a declared entity reference (R1 §A2) — resolve + link.
         if value not in name_to_id:
-            oid = _resolve_subject(value, name_to_type.get(value, "concept"))
+            oid = resolver.resolve_entity(value, name_to_type.get(value, "concept"),
+                                          providers=active_providers)
             if oid is None:
                 continue
             name_to_id[value] = oid

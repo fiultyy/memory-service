@@ -140,6 +140,12 @@ commit: `ded4deb`
 - **defer(D4 完, P0+projection+dedupe+bfs+bi-temporal 五迭代齐, 对齐 D4 spec 后续)**: Graphiti 式 LLM 矛盾检测(新 fact → LLM 比同实体对已存边 → 自动失效, R2 L148)/ bi-temporal churn 监控(supersede rate / active ratio, R2 L149/159)/ as_of + BFS 组合深测 / valid_from 从 source_meta/会话时间推导(非 ingest now)。**p0-entities-edges-schema 分支现攒 5 迭代, 未 merge main**。
 - **审查盲区(已知 minor, 非 defer)**: ISO 时戳跨时区字典序(非 UTC `--as-of` 输入会错序, 内部全 `_now()` 统一 +00:00 不触发)/ valid_to=now 与新 fact valid_from=now 各调一次 `_now()` 有微秒级半开区间竞态(影响极小)/ 老数据 valid_from NULL=-∞ 需运维文档化(生产 db 当前空)。
 
+### defer-cleanup C2 (bi-temporal 探索 + NULL 运维文档) — 2026-08-08
+- **范围**: ADR-3 ②(valid_from 推导探索)+ ④(NULL=-∞ 运维文档)。①(_now ms-floor)/③(--as-of 归一)为同迭代 C1 节点。
+- **② 探索结论 → defer**: `Extraction.source_meta` 仅 `{provider, model, error}` **无时间字段**; `_read_transcript` 只拼 `message.content` 文本,丢弃 record `timestamp`(那是会话事件时间 = 摄入近邻,非事实发生时间)。**两处都无可信事实发生时间源** → 按 ADR-3 Decision 不造时间源,本轮 defer,`put_fact` valid_from 保持默认 `_now()`。
+- **④ 文档**: 新建 `docs/operations-bi-temporal.md`(NULL=-∞ 语义 / `_now()` UTC 秒级 / `--as-of` 归一 / defer 理由 + 升级路径)。
+- **验证**: `python -m pytest -q` 全绿(本节点纯 docs + defer,零代码改动,零回归)。
+
 ---
 
 ## ADR 清单 (12 活跃)
@@ -197,9 +203,9 @@ commit: `ded4deb`
 
 ### 🟡 五迭代 minor 尾巴(非阻断, 详各迭代条目)
 - **bfs 留**: BFS auto-suggest hint(direct-match 薄时提示 rerun --bfs)/ 跨 cwd BFS 门控 / BFS_WEIGHT baseline 调参 / BFS+use_vec 组合深测
-- **bi-temporal 留**: as_of + BFS 组合深测 / valid_from 从 source_meta/会话时间推导(非 ingest now)
+- **bi-temporal 留**: as_of + BFS 组合深测 / **valid_from 推导(defer-cleanup C2 探索后 defer: source_meta 无时间字段 + transcript timestamp 是会话事件时间非事实发生时间, 不造时间源; 详 `docs/operations-bi-temporal.md` §4)**
 - **entity-dedupe 审查盲区**: embedding 模型升级维度变 → 全库 name_embedding 失效无迁移 / aliases add_aliases 只加不删无 GC / 并发 re-ingest 无 UNIQUE(name,type)竞态
-- **bi-temporal 审查盲区**: ISO 时戳跨时区字典序(非 UTC --as-of) / valid_to=now 与新 fact valid_from=now 各调一次 _now() 微秒级半开区间竞态 / 老数据 valid_from NULL=-∞ 运维文档化
+- **bi-temporal 审查盲区**: ISO 时戳跨时区字典序(非 UTC --as-of, defer-cleanup C1 归一) / valid_to=now 与新 fact valid_from=now 各调一次 _now() 微秒级半开区间竞态 / **老数据 valid_from NULL=-∞ 运维文档化(✅ defer-cleanup C2, `docs/operations-bi-temporal.md` §1)**
 
 ### ⚪ 全局 operational(迭代无关, 五轮未动)
 1. autoDream daemon(CC server-side flag `tengu_onyx_plover` 未开)

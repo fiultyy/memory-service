@@ -32,7 +32,7 @@ mem-service 是一个独立 Python CLI（无 daemon / 无端口），为 Claude 
 ```
 Claude Code
   MEMORY.md  (热层 · 开局自动入 context)
-      ↑  projection: KG → CC  (build-index, 单向)
+      ↑  projection: KG → CC  (synthesis-index, recall 驱动散 index 对账)
       │
 mem-service (KG 叠加层)
       │
@@ -41,7 +41,7 @@ mem-service (KG 叠加层)
        ├─ consolidate           (LIF decay + dedup)
        ├─ autodream ──────────┐ (session → KG 增量)
        ├─ init-memory ────────┤ (CC memory → KG permanent 种子)
-       └─ build-index ────────┘ (KG → CC 投影)
+       └─ synthesis-index ─────┘ (KG → CC 散 index 对账)
                                ↓
                             store → db (SQLite)
                                │
@@ -55,7 +55,7 @@ mem-service (KG 叠加层)
 - **写入**：`ingest` / `autodream` → `adapter`（蝴蝶翼 N-wing 抽取 + 投票）→ `store.put_fact`（on-ingest 预计算向量入 L2 cache）→ SQLite KG
 - **读取**：`recall` → 字面 match + pagerank centrality + LIF + 向量 sim 加权排序 → Fact 列表
 - **巩固**：`consolidate` → LIF decay（half_life）+ 精确重复 supersede
-- **投影**：`build-index` → KG 高 LIF top-K → CC memory `.md` + MEMORY.md 索引
+- **投影**：`synthesis-index` → 扫散 `mem-*.md` → 回 KG 取 mem_score → 对账重写 MEMORY `[mem]`(recall 驱动, MEMORY [mem] 唯一写入口, ADR-15 P2)
 
 ### 模块
 

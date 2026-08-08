@@ -97,7 +97,7 @@ sqlite3 data/embeddings.db  "SELECT COUNT(*) FROM embed_cache"
 | `recall "<q>" [--vector] [--cwd <cwd>]` | 召回(字面 / 向量融合) |
 | `autodream --session <id> --transcript <jsonl> [--cwd]` | session transcript → KG 增量 |
 | `init-memory --memory-dir <dir> [--cwd]` | CC memory .md → KG permanent 种子 |
-| `build-index [--scope <cwd>] [--top-k N]` | KG 高 LIF fact → CC memory 投影(ADR-15) |
+| `synthesis-index [--scope <cwd>] [--memory-dir <dir>]` | 散 mem-*.md 对账 → MEMORY [mem] 投影(ADR-15 P2, 唯一写入口) |
 | `embed-backfill` | active fact value → L2 向量 cache |
 | `consolidate` | decay + dedup |
 

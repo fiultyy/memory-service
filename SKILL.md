@@ -152,6 +152,6 @@ $ python3 cli.py consolidate             # → {"superseded": 0, "active": 1}
 
 ## 实现边界(v1 defer 项, 见 Spec §3/§9)
 
-**已实现(非 defer)**:LLM 蝴蝶翼抽取(ADR-5b)+ `α·match+β·centrality+γ·LIF+δ·vec` 召回(ADR-4v2)+ 向量召回 `--vector`(ADR-13)+ PreCompact autoDream hook(ADR-10/11)+ type-aware decay(ADR-8v2)+ 多值谓词共存 + KG→CC 投影 `build-index`(ADR-15)。
+**已实现(非 defer)**:LLM 蝴蝶翼抽取(ADR-5b)+ `α·match+β·centrality+γ·mem_score+δ·vec` 召回(ADR-4v2)+ 向量召回 `--vector`(ADR-13)+ PreCompact autoDream hook(ADR-10/11)+ type-aware decay(ADR-8v2)+ 多值谓词共存 + KG→CC 投影 `synthesis-index`(ADR-15 P2, recall 驱动散 index 对账, MEMORY [mem] 唯一写入口)。
 
 仍 defer:autoDream daemon(常驻)/ 冷层类聚 / query 独立 cli / 跨 scope 向量联邦。

@@ -6,7 +6,7 @@ KG 高 LIF fact → CC memory/mem-<id>.md(实体文件, CC Read/description 召�
 散 index 标记: 投影 md frontmatter `source: mem-service` + MEMORY.md 索引行 [mem]
 区分 CC 原生 memory(用户/agent 手写)。指向双混: 文件 link(CC Read)+ kg://fact/<id>(mem 召回)。
 
-触发: PreCompact hook(autodream 后硬编)/ new / cli build-index。
+触发: PreCompact(autodream 后)+ SessionStart hook / cli synthesis-index(P3 已清退 build-index)。
 
 ADR-15 P2: ``synthesis_index`` 是 MEMORY [mem] 的**唯一写入口**——扫散落
 mem-<id>.md(各路径建/刷的 snaptag 载体)→ 回 KG 取现值 → 对账重写 MEMORY [mem] 段。
@@ -85,56 +85,14 @@ def read_fact_id(md_path: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def mem_index_line(fact: dict, subject: str) -> str:
-    """MEMORY.md [mem] 索引行(文件主指向 + kg:// 标注, 散 index 标记 [mem])。"""
-    fid = fact["id"]
-    val = (fact.get("value") or "")[:30]
-    pred = fact.get("predicate") or ""
-    lif = float(fact.get("LIF") or 0)
-    return (f"- [mem] {subject} {pred} {val}(memory/{_mem_filename(fid)}) — "
-            f"LIF {lif:.2f} · kg://fact/{fid}")
-
-
-def update_memory_md(facts: list[dict], ent_names: dict[str, str], memory_md: Path) -> int:
-    """MEMORY.md 清空重写 [mem] 索引行(幂等)。
-    删所有 `- [mem]` 开头行(散 index 标记), 重写本次 facts。
-    保留 CC 原生行(非 [mem] 开头)。返回写入行数。"""
-    existing = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
-    lines = existing.splitlines()
-    fact_by_id = {f["id"]: f for f in facts}
-    out: list[str] = []
-    # 过滤掉所有 [mem] 索引行(新格式 `- {display} · [mem](memory/mem-...)` + 旧格式
-    # `- [mem] ...`), 保留 CC 原生行。用 _MEM_LINE_MARKER 子串覆盖新旧两格式,
-    # 与 synthesis_index 对齐(防 build_index/synthesis 交替写产生重复行)。
-    for line in lines:
-        if _MEM_LINE_MARKER not in line:
-            out.append(line)
-    # 重写本次投影 facts
-    for f in facts:
-        subj = ent_names.get(f["subject_id"], "?")
-        out.append(mem_index_line(f, subj))
-    memory_md.write_text("\n".join(out) + "\n", encoding="utf-8")
-    return len(facts)
-
-
-def build_index(facts: list[dict], ent_names: dict[str, str], mem_dir: Path) -> dict:
-    """投影 facts → CC memory(mds + MEMORY.md [mem] 索引)。返回 {projected, memory_dir}。"""
-    mem_dir.mkdir(parents=True, exist_ok=True)
-    for f in facts:
-        subj = ent_names.get(f["subject_id"], "?")
-        project_fact_md(f, subj, mem_dir)
-    n = update_memory_md(facts, ent_names, mem_dir / "MEMORY.md")
-    return {"projected": n, "memory_dir": str(mem_dir)}
-
-
 # ── ADR-15 P2: synthesis_index (MEMORY [mem] 唯一写入口) ────────────
 # 散 index 对账: 扫 mem-<id>.md(各路径建/刷)→ 回 KG 取现值 → 对账重写 MEMORY [mem]。
 # recall/autodream 只建 mem-<id>.md(散 index 实体文件), synthesis 集中收口写 MEMORY。
-# 绝不调 build_index(P3 才清退 build-index, synthesis 不依赖它)。
+# build_index 已 P3 清退; synthesis 是 MEMORY [mem] 唯一写入口。
 
 # orphan [mem] 索引行匹配: 新格式(``- {display} · [mem](memory/mem-<id>.md) — ...``)
-# + 旧 build_index 格式(``- [mem] {display}(memory/mem-<id>.md) — ...``)。两者都
-# (memory/mem- 前缀, 用此子串过滤覆盖新旧两格式, 保 index 干净(orphan 行永远删)。
+# + 历史 build_index 残留格式(``- [mem] {display}(memory/mem-<id>.md) — ...``)。两者都
+# 含 (memory/mem- 前缀, 用此子串过滤覆盖两格式, 保 index 干净(orphan 行永远删)。
 _MEM_LINE_MARKER = "(memory/mem-"
 
 

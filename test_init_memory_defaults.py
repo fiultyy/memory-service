@@ -1,5 +1,5 @@
 """init-memory 默认 memory_dir/source_cwd 推导回归 (bug fix).
-旧默认硬编码 ~/.claude 全局目录 → 读错; 改为 cc_memory_dir(cwd) (与 build-index 一致).
+旧默认硬编码 ~/.claude 全局目录 → 读错; 改为 cc_memory_dir(cwd) (与 synthesis-index 一致).
 mock bootstrap.init_memory 捕获参数, 不触 LLM/不读真目录。"""
 import os
 import pathlib

@@ -177,66 +177,12 @@ def autodream(session_id: str, transcript_path: str,
 def init_memory(memory_dir: str | None = None,
                 source_cwd: str | None = None) -> dict[str, int]:
     """Seed KG from CC memory .md files (ADR-12)。``memory_dir`` 默认
-    ``cc_memory_dir(cwd)``(与 build-index 一致; 旧默认硬编码 ``~/.claude`` 全局目录 → 读错),
-    ``source_cwd`` 默认 ``cwd``(ADR-14 记来源, 不再 NULL → 否则 build-index 严格匹配不投影)。"""
+    ``cc_memory_dir(cwd)``(与 synthesis-index 一致; 旧默认硬编码 ``~/.claude`` 全局目录 → 读错),
+    ``source_cwd`` 默认 ``cwd``(ADR-14 记来源, 不再 NULL)。"""
     import projection
     cwd = source_cwd or os.getcwd()
     mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
     return bootstrap.init_memory(mem_dir, source_cwd=source_cwd or cwd)
-
-
-# ── build-index (投影 → CC memory, ADR-15 分布式 index) ─────────────
-
-def build_index(scope: str | None = None, top_k: int = 20, memory_dir: str | None = None,
-                session_id: str | None = None) -> dict:
-    """投影 KG 高 LIF top-K fact → CC memory/mem-<id>.md + MEMORY.md [mem] 索引行(真嵌入 CC)。
-    UNION 两源: 轨迹(seen_sessions 包含 session_id) ∪ LIF top-K。
-    PreCompact(autodream 后硬编)/ new / cli 触发。"""
-    import db
-    import projection
-    import store
-    cwd = scope or os.getcwd()
-    mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
-    session = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
-    conn = db.get_conn()
-    # 严格 source_cwd = cwd(不 OR NULL): MEMORY 投影不能混 cwd, NULL 老数据不归属任何
-    # cwd 不投影(避免同一 NULL fact 被所有 cwd MEMORY.md 重复投影 =混)。
-    # 对比 recall --cwd 用 OR NULL(召回兼容老数据不丢), 投影严格(不混)。
-
-    # 源1: 轨迹(seen_sessions LIKE %session_id%)
-    trail_rows = conn.execute(
-        "SELECT * FROM fact WHERE status='active' AND source_cwd=? "
-        "AND seen_sessions LIKE ? "
-        "ORDER BY LIF DESC",
-        (cwd, f"%{session}%")).fetchall()
-    trail_ids = {r["id"] for r in trail_rows}
-
-    # 源2: LIF top-K
-    topk_rows = conn.execute(
-        "SELECT * FROM fact WHERE status='active' AND source_cwd=? "
-        "ORDER BY LIF DESC LIMIT ?",
-        (cwd, top_k * 2)).fetchall()  # 多取一些用于去重后仍有 top-k
-
-    # UNION 按 id 去重(轨迹优先), 保留 top_k 限制
-    seen: set[str] = set()
-    facts: list[dict] = []
-    # 先加轨迹
-    for r in trail_rows:
-        fid = r["id"]
-        if fid not in seen:
-            seen.add(fid)
-            facts.append(store._decode_fact(r))
-    # 再加 top-K(去重)
-    for r in topk_rows:
-        fid = r["id"]
-        if fid not in seen:
-            seen.add(fid)
-            facts.append(store._decode_fact(r))
-            if len(facts) >= top_k:
-                break
-
-    ent_names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM entity").fetchall()}
-    return projection.build_index(facts, ent_names, mem_dir)
 
 
 # ── synthesis-index (ADR-15 P2: 散 index 对账 → MEMORY [mem] 唯一写入口) ──
@@ -344,14 +290,6 @@ def _main(argv: list[str] | None = None) -> int:
         help="ADR-14 记 source_cwd(默认 os.getcwd)",
     )
 
-    bi = sub.add_parser("build-index",
-                        help="投影 KG 高 LIF fact → CC memory + MEMORY.md (ADR-15 分布式 index)")
-    bi.add_argument("--scope", default=None, help="来源 cwd(默认 os.getcwd)")
-    bi.add_argument("--top-k", dest="top_k", type=int, default=20)
-    bi.add_argument("--memory-dir", dest="memory_dir", default=None,
-                    help="CC memory dir(默认 ~/.claude/projects/<encoded>/memory/)")
-    bi.add_argument("--session", dest="session", default=None,
-                    help="CC session id(默认 CLAUDE_CODE_SESSION_ID env, 用于轨迹 UNION)")
     si = sub.add_parser("synthesis-index",
                         help="散 index 对账 → 重写 MEMORY.md [mem] (ADR-15 P2, MEMORY [mem] 唯一写入口)")
     si.add_argument("--scope", default=None, help="来源 cwd(默认 os.getcwd)")
@@ -387,8 +325,6 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(init_memory(args.memory_dir, source_cwd=args.cwd), ensure_ascii=False))
     elif args.cmd == "re-ingest":
         print(json.dumps(bootstrap.re_ingest_file(args.file, source_cwd=args.cwd or os.getcwd()), ensure_ascii=False))
-    elif args.cmd == "build-index":
-        print(json.dumps(build_index(scope=args.scope, top_k=args.top_k, memory_dir=args.memory_dir, session_id=args.session), ensure_ascii=False))
     elif args.cmd == "synthesis-index":
         print(json.dumps(synthesis_index(scope=args.scope, memory_dir=args.memory_dir, session=args.session), ensure_ascii=False))
     elif args.cmd == "prune":

@@ -265,6 +265,25 @@ def embed_backfill() -> dict[str, int]:
     return {"active_facts": len(rows), "distinct_values": len(distinct), "embedded": embedded}
 
 
+# ── stats (churn 监控, ADR-5) ────────────────────────────────────────
+
+def stats() -> dict[str, Any]:
+    """只读 churn 快照 (ADR-5): churn_stats + entity/fact 计数。
+
+    聚合 ``store.churn_stats`` (status 分布 + supersede_rate/active_ratio) 与
+    ``store.count_entities``; fact 总数复用 churn_stats 内部已聚合的 status 求和。
+    非时间序列(降阈值自动刷新本轮 defer, 见 ADR-5 Consequences)。
+    """
+    import db
+    cs = store.churn_stats()
+    total_facts = int(cs["active"] + cs["deprecated"] + cs["superseded"])
+    return {
+        "entities": store.count_entities(),
+        "facts": total_facts,
+        "churn": cs,
+    }
+
+
 # ── argv entry ──────────────────────────────────────────────────────
 
 def _main(argv: list[str] | None = None) -> int:
@@ -348,6 +367,8 @@ def _main(argv: list[str] | None = None) -> int:
                     help="只报不删(预览将 prune 的孤儿 fact)")
     sub.add_parser("embed-backfill",
                    help="回填 active fact value → L2 embedding cache (ADR-13 向量通电)")
+    sub.add_parser("stats",
+                   help="只读 churn 快照 (ADR-5): entity/fact 计数 + supersede_rate/active_ratio")
 
     args = p.parse_args(argv)
     if args.cmd == "ingest":
@@ -373,6 +394,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir, dry_run=args.dry_run), ensure_ascii=False))
     elif args.cmd == "embed-backfill":
         print(json.dumps(embed_backfill(), ensure_ascii=False))
+    elif args.cmd == "stats":
+        print(json.dumps(stats(), ensure_ascii=False))
     return 0
 
 

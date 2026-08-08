@@ -94,6 +94,35 @@ def count_entities() -> int:
     return conn.execute("SELECT COUNT(*) FROM entity").fetchone()[0]
 
 
+def churn_stats() -> dict[str, float]:
+    """只读 churn 快照 (ADR-5): 纯 SQL 聚合现有 fact 列 status, 无新列/写入。
+
+    Returns ``{active, deprecated, superseded, supersede_rate, active_ratio}``:
+    - supersede_rate = superseded / (active + superseded) (dups 折叠比, 排除自然 decay)
+    - active_ratio = active / total (KG 健康度; total 含 deprecated/superseded)
+    分母为 0 时比率返回 0.0(空库 / 全 deprecated)。非时间序列(历史 churn 需日志)。
+    """
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM fact GROUP BY status"
+    ).fetchall()
+    by_status = {r["status"]: r["n"] for r in rows}
+    active = by_status.get("active", 0)
+    deprecated = by_status.get("deprecated", 0)
+    superseded = by_status.get("superseded", 0)
+    total = active + deprecated + superseded + sum(
+        n for s, n in by_status.items() if s not in ("active", "deprecated", "superseded")
+    )
+    pool = active + superseded
+    return {
+        "active": float(active),
+        "deprecated": float(deprecated),
+        "superseded": float(superseded),
+        "supersede_rate": (superseded / pool) if pool else 0.0,
+        "active_ratio": (active / total) if total else 0.0,
+    }
+
+
 def find_entities_by_name(name: str, entity_type: str | None = None) -> list[dict[str, Any]]:
     """Exact-name lookup (dedup helper; v1 recall uses LIKE, not this)."""
     conn = db.get_conn()

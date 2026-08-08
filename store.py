@@ -223,6 +223,26 @@ def backfill_entity_embedding(entity_id: str, name_embedding: list[float] | None
     conn.commit()
     return cur.rowcount
 
+def upsert_entity_embedding(entity_id: str, name_embedding: list[float] | None) -> int:
+    """无条件写 entity.name_embedding 新结构 (ADR-2③ B2 fix)。
+
+    与 ``backfill_entity_embedding`` 不同: 不检查行是否为空, 无条件 UPDATE 写
+    ``{"v":[...],"model":"...","dim":N}``。用于 ``_cosine_topk`` dim-mismatch
+    惰性 re-embed 后落盘 — backfill 的 ``WHERE ... IS NULL OR = '[]'`` 漏老裸 list
+    行(非空, 非新结构), 导致 re-embed 仅内存生效不落盘。
+    空向量不写(re-embed 失败 / emb=[] 不落盘空标记)。
+    Returns 影响行数(0 = 空向量 / entity 不存在)。
+    """
+    if not name_embedding:
+        return 0
+    conn = db.get_conn()
+    cur = conn.execute(
+        "UPDATE entity SET name_embedding = ? WHERE id = ?",
+        (_encode_embedding(name_embedding), entity_id),
+    )
+    conn.commit()
+    return cur.rowcount
+
 
 def add_aliases(entity_id: str, new_aliases: list[str]) -> None:
     """并入别名到 entity.aliases (去重保序, 供 resolver 合并用, ADR-D7)。"""

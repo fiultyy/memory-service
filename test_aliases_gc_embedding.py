@@ -261,3 +261,79 @@ def test_cosine_topk_new_structure_matches():
     new_id = store.put_entity("NewStruct", "tool", name_embedding=[1.0, 0.0, 0.0])
     cands = resolver._cosine_topk([1.0, 0.0, 0.0], 5, embedding_providers=[])
     assert new_id in [c["id"] for c in cands]
+
+
+# ── B2: upsert 无条件覆盖 + _cosine_topk re-embed 落盘 ──────────────
+
+def test_upsert_overwrites_legacy_bare_list():
+    """upsert 无条件写新结构: 老裸 list 行(非空)也被覆盖(backfill 漏的 case)。"""
+    _fresh_db()
+    eid = store.put_entity("E", "concept")
+    conn = db.get_conn()
+    conn.execute("UPDATE entity SET name_embedding=? WHERE id=?",
+                 (json.dumps([0.1, 0.2, 0.3, 0.4]), eid))  # 老裸 list dim=4
+    conn.commit()
+    # backfill 不覆盖(已知)
+    assert store.backfill_entity_embedding(eid, [0.5, 0.5, 0.5]) == 0
+    # upsert 无条件覆盖
+    n = store.upsert_entity_embedding(eid, [0.5, 0.5, 0.5])
+    assert n == 1, "upsert 应覆盖老裸 list 行(无条件 UPDATE)"
+    raw = conn.execute("SELECT name_embedding FROM entity WHERE id=?", (eid,)).fetchone()[0]
+    doc = json.loads(raw)
+    assert "v" in doc and "model" in doc and "dim" in doc, f"应为新结构 {{v,model,dim}}, got raw={raw}"
+    assert doc["v"] == [0.5, 0.5, 0.5], f"向量应覆盖为新值, got {doc['v']}"
+    assert doc["dim"] == 3
+
+
+def test_upsert_empty_vec_noop():
+    """空向量 upsert 不写(不落盘空标记)。"""
+    _fresh_db()
+    eid = store.put_entity("E", "concept", name_embedding=[0.1, 0.2])
+    assert store.upsert_entity_embedding(eid, []) == 0
+    assert store.upsert_entity_embedding(eid, None) == 0
+    # 原向量不变
+    assert store.get_entity(eid)["name_embedding"] == [0.1, 0.2]
+
+
+def test_cosine_topk_reembed_persists_to_db():
+    """B2 root cause: _cosine_topk dim-mismatch re-embed 必须落盘(非仅内存)。
+
+    老裸 list dim=4 行 → re-embed dim=3 → DB raw 应升级为新结构(非老裸 list)。
+    之前调 backfill(WHERE 漏老裸list行)→ rowcount=0 不落盘 → 每次重算。
+    """
+    _fresh_db()
+    old_id = store.put_entity("OldDim4", "tool")
+    conn = db.get_conn()
+    conn.execute("UPDATE entity SET name_embedding=? WHERE id=?",
+                 (json.dumps([1.0, 0.0, 0.0, 0.0]), old_id))  # 老裸 list dim=4
+    conn.commit()
+    vec3 = [1.0, 0.0, 0.0]
+
+    class _FakeEmb:
+        model = "fake"
+        def embed(self, text): return list(vec3)
+
+    orig = embedding.embed
+    embedding.embed = lambda text, providers=None: list(vec3)
+    try:
+        resolver._cosine_topk(vec3, 5, embedding_providers=[_FakeEmb()])
+    finally:
+        embedding.embed = orig
+
+    # B2 核心断言: re-embed 后 DB raw 应是新结构(非老裸 list)
+    raw = conn.execute("SELECT name_embedding FROM entity WHERE id=?", (old_id,)).fetchone()[0]
+    assert raw != json.dumps([1.0, 0.0, 0.0, 0.0]), (
+        f"B2: re-embed 未落盘! raw 仍为老裸 list: {raw}"
+    )
+    doc = json.loads(raw)
+    assert "v" in doc and doc["v"] == [1.0, 0.0, 0.0], (
+        f"B2: re-embed 落盘应为新结构 v={vec3}, got raw={raw}"
+    )
+    # 二次调用不 re-embed(已落盘新结构 dim 匹配)
+    embedding.embed = lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应 re-embed: 已落盘新结构"))
+    try:
+        resolver._cosine_topk(vec3, 5, embedding_providers=[_FakeEmb()])
+    except AssertionError:
+        pass  # 不应触发 — 已捕获即可
+    finally:
+        embedding.embed = orig

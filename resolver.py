@@ -119,7 +119,7 @@ def _cosine_topk(emb, k=_TOP_K, embedding_providers=None):
                 re_vec = []
             if not re_vec or len(re_vec) != len(emb):
                 continue  # re-embed 仍离线 / 维度不一致 → 跳过(不并入, 不崩)
-            store.backfill_entity_embedding(ent["id"], re_vec)  # 幂等回填(写新结构)
+            store.upsert_entity_embedding(ent["id"], re_vec)  # 无条件落盘新结构(B2: backfill WHERE 漏老裸list行)
             vec = re_vec
         n_b = math.sqrt(sum(x * x for x in vec)) or 1e-12
         dot = sum(a * b for a, b in zip(emb, vec))

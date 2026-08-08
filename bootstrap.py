@@ -179,13 +179,26 @@ def prune_deleted(
     import re
 
     mem_dir = Path(memory_dir)
-    # 现存 native md: 排除投影 mem-<32hex>.md (projection._mem_filename) + MEMORY.md 索引。
+    # 现存 native md: 排除投影文件(ADR-B ``MEM_FILE_RE`` 单一源) + MEMORY.md 索引。
     # 陷阱: native 文件常叫 mem-service-*.md, 也 startswith "mem-" → 不能用前缀区分,
-    # 必须按投影的 32-hex fact_id 形态精确匹配, 否则误把 mem-service-* 当投影排除。
-    proj_re = re.compile(r"^mem-[0-9a-f]{32}\.md$")
+    # ADR-B ``mem-`` + 4hex + ``-`` 前缀天然区分(mem-service-* 的 serv 非 4-hex, 不匹配)。
+    from projection import MEM_FILE_RE
     if mem_dir.is_dir():
-        existing = {p.name for p in mem_dir.glob("*.md")
-                    if not proj_re.match(p.name) and p.name != "MEMORY.md"}
+        existing = set()
+        for p in mem_dir.glob("*.md"):
+            if p.name == "MEMORY.md":
+                continue
+            if MEM_FILE_RE.match(p.name):
+                # 撞正则: frontmatter 确认是否真投影(source:mem-service)
+                # 真投影 → 排除(产物非源); 无 frontmatter → native 撞名, 留 existing
+                # 防 native(如 mem-dead-notes.md, dead=合法 4-hex)被误判孤儿删(F1)
+                try:
+                    txt = p.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    txt = ""
+                if _is_mem_service_projection(txt):
+                    continue
+            existing.add(p.name)
     else:
         existing = set()  # ponytail: dir 都没了 → 所有 memory 源 fact 视为孤儿
 
@@ -227,13 +240,15 @@ def prune_deleted(
 def _demo() -> None:  # ponytail self-check (mock provider, no network)
     import os
     import tempfile as _t
-    from llm_provider import Extraction, FactOut
+    from llm_provider import EdgeOut, EntityOut, Extraction
 
     class _Fake:
         base_url = None
         def extract_facts(self, text: str):
-            return Extraction(facts=[FactOut("用户", "uses", "rust")],
-                              confidence=0.7, source_meta={"provider": "fake"})
+            return Extraction(
+                entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
+                edges=[EdgeOut("用户", "uses", "rust", topic="用户使用 rust")],
+                confidence=0.7, source_meta={"provider": "fake"})
 
     d = _t.mkdtemp()
     open(os.path.join(d, "x.md"), "w").write("用户使用 rust")

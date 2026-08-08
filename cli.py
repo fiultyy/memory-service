@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ import bootstrap
 import consolidate as consolidate_mod
 import recall as recall_mod
 import store
+import resolver
 from llm_provider import LLMProvider
 
 
@@ -65,8 +67,9 @@ def ingest(text: str, source_ref: str | None = None,
     the regex extractor (ADR-5) when no provider is reachable or confidence is
     low. ``fact.extractor`` reflects which path won: "llm" or "regex".
     ``fact_type`` is ADR-8 (default stable; ingest ``--fact-type`` overrides).
-    Entities are lazily created from each fact's subject/object via
-    ``_ensure_entity`` (re-extraction of a known name reuses its id).
+    Entities are resolved via ``resolver.resolve_entity`` (ADR-D3 two-step
+    merge: cheap exact/alias gate → vector top-k + LLM dedupe → create).
+    Re-extraction of a known name reuses its id (name_to_id cache per ingest).
 
     ``providers`` defaults to ``[CCRProvider()]`` (the deployed ccr router).
     Pass ``[]`` to force the regex fallback path (Spec §4 story 5).
@@ -83,68 +86,104 @@ def ingest(text: str, source_ref: str | None = None,
 
     # name → entity_id cache (this ingest's working set).
     name_to_id: dict[str, str] = {}
+    # name → type map (entities carry their declared type; edges fall back to
+    # the cache or a default — R1 档 1: no more hardcoded "inferred").
+    name_to_type: dict[str, str] = {}
+    # Phase 1: persist declared entities (R1 档 1 — entities first, edges after).
+    # resolver.resolve_entity: cheap exact/alias gate, else create (ADR-D3).
+    for ent in extracted.entities:
+        if not ent.name:
+            continue
+        eid = resolver.resolve_entity(
+            ent.name, ent.type,
+            aliases=getattr(ent, 'aliases', None) or None,
+            providers=providers)
+        if eid is not None:
+            name_to_id[ent.name] = eid
+            name_to_type[ent.name] = ent.type
 
+    # Phase 2: edges. subject AND object both resolve to entities (R1 §A2 hard
+    # rule: object is a declared entity reference, never a free string) →
+    # object_id 必非空 → entity↔entity edges emerge.
     fact_ids: list[str] = []
-    for fact in extracted.facts:
-        subj_id = _ensure_entity(fact.subject, name_to_id)
+    for edge in extracted.edges:
+        subj_id = name_to_id.get(edge.subject)
+        if subj_id is None:
+            subj_id = resolver.resolve_entity(
+                edge.subject, name_to_type.get(edge.subject, "concept"),
+                providers=providers)
+            if subj_id is not None:
+                name_to_id[edge.subject] = subj_id
         if subj_id is None:
             continue
-        # Object may be a multi-word phrase; store as literal value AND try to
-        # link an object entity if the object name was seen this ingest. ADR-3:
-        # object is value-carrier; object_id optional. Prefer linking when known.
-        obj_name = fact.object
-        obj_id = name_to_id.get(obj_name)
+        # object is guaranteed declared (adapter drops dangling refs); still
+        # resolve both sides so it lands as an entity (R1 §A2).
+        obj_id = name_to_id.get(edge.object)
+        if obj_id is None:
+            obj_id = resolver.resolve_entity(
+                edge.object, name_to_type.get(edge.object, "concept"),
+                providers=providers)
+            if obj_id is not None:
+                name_to_id[edge.object] = obj_id
         fid = store.put_fact(
             subject_id=subj_id,
-            predicate=fact.predicate,
-            value=obj_name,
+            predicate=edge.predicate,
+            value=edge.object,  # backward-compat display value
             object_id=obj_id,
             extractor=ext_label,
             fact_type=fact_type,
             source_cwd=source_cwd,
             source_refs=source_refs,
+            topic=(edge.topic or "").strip() or None,  # ADR-C: LLM 可读一句话
         )
         fact_ids.append(fid)
 
     return {"entities": len(name_to_id), "facts": fact_ids}
 
 
-def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
-    """Resolve a fact subject/object to an entity id, creating it if needed.
-
-    Subjects/objects from relation patterns may be phrases not caught by the
-    entity patterns (e.g. "用户", "笔记工具"); we still persist them as entities
-    so the KG is navigable. None only on empty.
-    """
-    if not name:
-        return None
-    if name in cache:
-        return cache[name]
-    existing = store.find_entities_by_name(name)
-    if existing:
-        eid = existing[0]["id"]
-    else:
-        eid = store.put_entity(name, "inferred")
-    cache[name] = eid
-    return eid
-
 
 # ── recall ──────────────────────────────────────────────────────────
+
+def _normalize_as_of(as_of: str | None) -> str | None:
+    """归一 --as-of 为 UTC +00:00 秒级 ISO-8601 (ADR-3 ②)。
+
+    接受任意 ISO-8601(含 ``Z`` / ``+HH:MM`` / 无后缀 naive)。naive 输入按 UTC
+    解释(文档化)。输出统一 ``+00:00`` 后缀 → recall._temporal_clause 依赖
+    SQLite TEXT 字典序 = 时间序, 非 UTC 后缀会字典序错序。microsecond 截断到秒,
+    与 store._now() 的 ms-floor 惯例一致(同精度同格式比较)。None 透传(None =
+    default recall, 不走点时查询)。
+    """
+    if as_of is None:
+        return None
+    dt = datetime.fromisoformat(as_of)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)  # naive → UTC (文档化)
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
 
 def recall(query: str, verbose: bool = False,
            session_id: str | None = None, boost: bool = True,
            weights=None, use_vec: bool = False, delta: float | None = None,
            cwd: str | None = None, top_k: int | None = None,
-           with_tag: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
+           with_tag: bool = False,
+           use_bfs: bool = False, bfs_hops: int = 2,
+           as_of: str | None = None,
+           use_bfs_scoped: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
     Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
     (ADR-13); ``cwd`` ADR-14 b 方案: 过滤 source_cwd(含 NULL 老数据兼容)。
     ``top_k`` 限制返回数量(默认 None 无截断)。
+    ``use_bfs=True`` 启用 BFS 图遍历召回(D5, 召回图近但字面/向量远的 fact)。
+    ``as_of`` 点时召回(bi-temporal): 只返回 as_of 时刻有效的 fact。输入端归一
+    为 UTC +00:00(ADR-3 ②, 杜绝非 UTC 字典序错序; naive 按 UTC 解释)。
+    ``use_bfs_scoped=True`` (ADR-4) 限 BFS 图构建为本 cwd(source_cwd 过滤, 图更精确
+    更小); default off 保持全局图(ADR-14 单体 KG 跨 cwd 共享)。
     """
     return recall_mod.recall(query, verbose=verbose, session_id=session_id,
                              boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
-                             with_tag=with_tag)
+                             with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops,
+                             as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped)
 
 
 # ── consolidate ────────────────────────────────────────────────────
@@ -229,6 +268,37 @@ def embed_backfill() -> dict[str, int]:
     return {"active_facts": len(rows), "distinct_values": len(distinct), "embedded": embedded}
 
 
+# ── stats (churn 监控, ADR-5) ────────────────────────────────────────
+
+def stats() -> dict[str, Any]:
+    """只读 churn 快照 (ADR-5): churn_stats + entity/fact 计数。
+
+    聚合 ``store.churn_stats`` (status 分布 + supersede_rate/active_ratio) 与
+    ``store.count_entities``; fact 总数复用 churn_stats 内部已聚合的 status 求和。
+    非时间序列(降阈值自动刷新本轮 defer, 见 ADR-5 Consequences)。
+    """
+    import db
+    cs = store.churn_stats()
+    total_facts = int(cs["active"] + cs["deprecated"] + cs["superseded"])
+    return {
+        "entities": store.count_entities(),
+        "facts": total_facts,
+        "churn": cs,
+    }
+
+
+# ── dream-daemon (operational #1: 常驻 autodream loop) ──────────────
+
+def dream_daemon(cwd: str | None = None, interval: int = 30, once: bool = False) -> int:
+    """启动 autoDream daemon: 常驻进程 watch CC transcript 增长 → 增量 dream。
+
+    详见 ``mem_daemon.run``。CC flag ``tengu_onyx_plover`` 未开时走文件 watch
+    (有 idle/延迟风险); flag 开后 CC 主动 push trigger.json 触发即时 dream。
+    """
+    import mem_daemon
+    return mem_daemon.run(cwd=cwd, interval=interval, once=once)
+
+
 # ── argv entry ──────────────────────────────────────────────────────
 
 def _main(argv: list[str] | None = None) -> int:
@@ -259,6 +329,14 @@ def _main(argv: list[str] | None = None) -> int:
                      help="限制返回数量(默认无截断)")
     rec.add_argument("--with-tag", dest="with_tag", action="store_true",
                      help="返回 nested {results:[{fact,score,tag}]} shape(默认 list[dict]+_snaptag)")
+    rec.add_argument("--bfs", action="store_true",
+                     help="启用 BFS 图遍历召回(D5, 召回图近但字面/向量远的 fact)")
+    rec.add_argument("--as-of", dest="as_of", default=None,
+                     help="点时召回(bi-temporal): 只返回 as_of 时刻有效的 fact (valid_from<=t<valid_to)")
+    rec.add_argument("--bfs-hops", dest="bfs_hops", type=int, default=2,
+                     help="BFS 遍历跳数(默认 2)")
+    rec.add_argument("--bfs-scoped", dest="bfs_scoped", action="store_true",
+                     help="限 BFS 图构建为本 cwd(source_cwd 过滤; 默认 off 全局图 ADR-14)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -306,6 +384,15 @@ def _main(argv: list[str] | None = None) -> int:
                     help="只报不删(预览将 prune 的孤儿 fact)")
     sub.add_parser("embed-backfill",
                    help="回填 active fact value → L2 embedding cache (ADR-13 向量通电)")
+    sub.add_parser("stats",
+                   help="只读 churn 快照 (ADR-5): entity/fact 计数 + supersede_rate/active_ratio")
+    dd = sub.add_parser("dream-daemon",
+                        help="启动 autoDream daemon(常驻 autodream loop, operational #1)")
+    dd.add_argument("--cwd", default=None, help="project cwd to watch(默认 $PWD)")
+    dd.add_argument("--interval", type=int, default=30,
+                    help="poll interval seconds(默认 30)")
+    dd.add_argument("--once", action="store_true",
+                    help="single sweep, no loop(smoke test / cron mode)")
 
     args = p.parse_args(argv)
     if args.cmd == "ingest":
@@ -316,7 +403,15 @@ def _main(argv: list[str] | None = None) -> int:
         ))
     elif args.cmd == "recall":
         session_id = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
-        print(json.dumps(recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag), ensure_ascii=False, default=str))
+        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped)
+        # ADR-4 bfs hint: direct-match 薄且未开 --bfs → stderr 提示(不污染 stdout 机器输出)。
+        # 结果数 < 阈值代理 direct-match 薄(候选少 → 命中少); suggest_bfs 字段在 envelope
+        # (with_tag) 里有, 但 cli 走结果数自判覆盖 list/verbose 全 path。
+        if not args.bfs:
+            n = len(result.get("results", [])) if isinstance(result, dict) and "results" in result else len(result)
+            if n < recall_mod.SUGGEST_BFS_THRESHOLD:
+                sys.stderr.write("💡 direct-match 薄,可加 --bfs 扩展图近召回\n")
+        print(json.dumps(result, ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":
@@ -331,6 +426,11 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir, dry_run=args.dry_run), ensure_ascii=False))
     elif args.cmd == "embed-backfill":
         print(json.dumps(embed_backfill(), ensure_ascii=False))
+    elif args.cmd == "stats":
+        print(json.dumps(stats(), ensure_ascii=False))
+    elif args.cmd == "dream-daemon":
+        # daemon runs its own loop (blocking); returns exit code, not JSON.
+        return dream_daemon(cwd=args.cwd, interval=args.interval, once=args.once)
     return 0
 
 

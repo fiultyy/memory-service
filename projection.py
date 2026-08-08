@@ -1,17 +1,23 @@
-"""mem-service → CC memory 投影(ADR-15 分布式 index, 真嵌入 CC)。
+"""mem-service → CC memory 投影(ADR-15 分布式 index, 真嵌入 CC; ADR-A/B/C 原生格式)。
 
-KG 高 LIF fact → CC memory/mem-<id>.md(实体文件, CC Read/description 召回工作)
-+ MEMORY.md append/update [mem] 索引行(幂等, mem-<id> 匹配)。
+KG 高 LIF fact → CC memory/mem-{4hex}-{slug}.md(原生 .md 文件, CC Read/description 召回工作)
++ MEMORY.md append/update 原生索引行(``- [Title](mem-...md) — hook``, 幂等)。
 
-散 index 标记: 投影 md frontmatter `source: mem-service` + MEMORY.md 索引行 [mem]
-区分 CC 原生 memory(用户/agent 手写)。指向双混: 文件 link(CC Read)+ kg://fact/<id>(mem 召回)。
+ADR-A (原生格式): 投影索引行/文件让 CC 原生召回机制能消费 —— 索引行严格遵循原生
+``- [Title](file.md) — hook``(无 [mem] 标记/无 score/kg://), 投影 .md frontmatter
+``description`` = 干净明文(= topic), 正文自包含完整 fact(保留 kg://fact/<id> 作可选溯源)。
+ADR-B (文件名严格契约): ``MEM_FILE_RE = ^mem-[0-9a-f]{4}-.+\\.md$`` 全仓唯一, 创建/识别/
+MEMORY 重写三处共用 + frontmatter ``source: mem-service`` 双闸。``mem-`` + 4hex 前缀天然区分
+native(``mem-service-*`` 的 ``serv`` 非 4-hex, 不匹配)。
+ADR-C (topic): LLM 抽取时每条 edge 附一句话可读 topic, 流经 adapter._vote 透传 →
+cli/autodream 消费 → 投影用作 slug 源 + 索引标题 + description。
 
 触发: PreCompact(autodream 后)+ SessionStart hook / cli synthesis-index(P3 已清退 build-index)。
 
-ADR-15 P2: ``synthesis_index`` 是 MEMORY [mem] 的**唯一写入口**——扫散落
-mem-<id>.md(各路径建/刷的 snaptag 载体)→ 回 KG 取现值 → 对账重写 MEMORY [mem] 段。
-recall/autodream 只建 mem-<id>.md(实体文件, 散 index), 不碰 MEMORY。冷启动空跳过
-不兜底; orphan [mem] 行永远删(orphan 文件删默认关)。批量 IN 查询免 N+1。
+ADR-15 P2: ``synthesis_index`` 是 MEMORY 投影行的**唯一写入口**——扫散落
+mem-{4hex}-{slug}.md(各路径建/刷的 snaptag 载体)→ 回 KG 取现值 → 对账重写 MEMORY 投影段。
+recall/autodream 只建 .md(实体文件, 散 index), 不碰 MEMORY。冷启动空跳过不兜底;
+orphan 投影行永远删(orphan 文件删默认关)。批量 IN 查询免 N+1。
 """
 from __future__ import annotations
 
@@ -21,6 +27,13 @@ from pathlib import Path
 from typing import Any
 
 
+# ── ADR-B: 文件名严格契约(全仓唯一正则常量) ───────────────────────────
+# mem-{fact_id[:4]}-{sanitize(topic)}.md。``mem-`` + 4hex + ``-`` 前缀天然区分 native
+# (mem-service-* 的 ``serv`` 非 4-hex, 不匹配 → 不被误判投影)。创建侧 _mem_filename
+# 断言匹配此 RE(不匹配 raise, 不静默写); 识别侧(synthesis scan / bootstrap.prune)共用。
+MEM_FILE_RE = re.compile(r"^mem-[0-9a-f]{4}-.+\.md$")
+
+
 def cc_memory_dir(cwd: str) -> Path:
     """cwd → CC project-scoped memory dir(~/.claude/projects/<encoded>/memory/)。
     encoded: '/' → '-', '.' → '-'(CC 规则; /home/yy/.claude → -home-yy--claude)。"""
@@ -28,38 +41,100 @@ def cc_memory_dir(cwd: str) -> Path:
     return Path.home() / ".claude" / "projects" / encoded / "memory"
 
 
-def _mem_filename(fact_id: str) -> str:
-    return f"mem-{fact_id}.md"
+_SLUG_MAX = 60  # 字符上限: 全中文 60 字 = 180 字节 + "mem-xxxx-.md" ≈ 193 < ext4 NAME_MAX 255
+
+
+def _sanitize_slug(s: str | None) -> str:
+    """topic → 路径安全 slug(ADR-B sanitize 约束)。
+
+    只做路径/URL/markdown 安全, **不改召回语义** —— topic 原文完整保留在
+    frontmatter description / 正文标题(召回靠那里), slug 仅作文件名标识。
+    ``/`` 与空白 → ``_``; 删 URL/markdown/YAML 不安全字符; 收尾剥离; 截断
+    防 >255 字节文件名致 ``os.replace``/``write`` 抛 OSError。空 → ``fact`` 占位。"""
+    s = (s or "").strip()
+    if not s:
+        return "fact"
+    s = re.sub(r"[\s/]+", "_", s)
+    s = re.sub(r"[()\[\]<>\"'`|\\^]", "", s)  # URL/markdown/YAML 不安全字符删除
+    s = s[:_SLUG_MAX].strip("_")
+    return s or "fact"
+
+
+def _fact_topic(fact: dict, subj_name: str) -> str:
+    """ADR-A/C: 投影标题/description 的唯一来源 = topic。
+
+    优先 ``fact['topic']``(ADR-C LLM 生成); 缺失/空 → 回退三元组拼接
+    ``{subject} {predicate} {value}``(向后兼容, 保投影可用)。
+    返回单行(strip 换行, 防破坏索引行)。"""
+    topic = (fact.get("topic") or "").strip()
+    if topic:
+        return topic.replace("\r", " ").replace("\n", " ").strip()
+    pred = fact.get("predicate") or ""
+    val = fact.get("value") or ""
+    display = f"{subj_name or '?'} {pred} {val}".strip()
+    return display.replace("\r", " ").replace("\n", " ").strip()
+
+
+def _yaml_scalar(s: str) -> str:
+    """YAML scalar 安全输出: 含特殊字符则双引号包裹并转义(F4)。
+
+    description 是 CC 召回命中的字段, 必须保证 ``yaml.safe_load`` 能解析。
+    quote 后 ``"`` 是可见边界字符, topic 原文仍是 description 的子串,
+    不破坏 CC 明文子串召回。"""
+    s = s.replace("\r", " ").replace("\n", " ").strip()
+    if not s:
+        return '""'
+    if re.search(r'[:#"\'\[\]{}`]', s) or s[0] in "!&*?|-+>%@":
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return s
+
+
+def _md_link_text(s: str) -> str:
+    """markdown link text 安全: 转义 ] [ \\(不破坏 CC 明文召回, 子串仍命中)(F7)。"""
+    return s.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _mem_filename(fact_id: str, topic: str | None = None) -> str:
+    """ADR-B: ``mem-{fact_id[:4]}-{sanitize(topic)}.md``。
+
+    断言匹配 ``MEM_FILE_RE``: 不匹配 raise(ValueError)—— 不静默写坏契约文件。
+    ``topic`` 缺失 → ``_sanitize_slug`` 回退 ``fact`` 占位。"""
+    slug = _sanitize_slug(topic)
+    name = f"mem-{fact_id[:4]}-{slug}.md"
+    if not MEM_FILE_RE.match(name):
+        raise ValueError(
+            f"projection filename violates MEM_FILE_RE: {name!r} "
+            f"(fact_id={fact_id!r}, topic={topic!r})")
+    return name
 
 
 def project_fact_md(fact: dict, subject: str, mem_dir: Path,
                     recalled_at: str | None = None) -> Path:
-    """投影单 fact → mem-<id>.md(snaptag 物化载体, ADR-15)。
+    """投影单 fact → ``mem-{4hex}-{slug}.md``(ADR-A/B/C 原生格式投影产物)。
 
     瘦 frontmatter: 只 ``source``/``fact_id``/``recalled_at``/``description``
-    (synthesis 经 ``fact_id`` 回 KG 取 confidence/LIF 现值, 不存原始重算)。
+    (``description`` = 干净明文 = topic, CC 代码层召回靠 description 匹配)。
+    正文自包含完整 fact(不依赖回查 KG, 保留 kg://fact/{id} 作可选溯源链接)。
     **原子写** ``.tmp`` + ``os.replace``(防 synthesis 扫读半写 TOCTOU)。幂等(同 fact_id 重写)。"""
     fid = fact["id"]
-    p = mem_dir / _mem_filename(fid)
+    topic = _fact_topic(fact, subject)
+    fname = _mem_filename(fid, topic)
+    p = mem_dir / fname
     pred = fact.get("predicate") or ""
     val = fact.get("value") or ""
-    lif = float(fact.get("LIF") or 0)
-    display = f"{subject} {pred} {val}".strip()
     content = f"""---
-description: {display}(mem-service KG fact, LIF {lif:.2f})
+description: {_yaml_scalar(topic)}
 source: mem-service
 fact_id: {fid}
 recalled_at: {recalled_at or ''}
 ---
-# {display}
+# {topic}
 
 - subject: {subject}
 - predicate: {pred}
 - value: {val}
 - source_refs: {fact.get('source_refs') or []}
 - kg://fact/{fid}
-
-召回扩展: cli recall "{subject}" 或 recall kg://fact/{fid}
 """
     tmp = p.with_suffix(".md.tmp")
     tmp.write_text(content, encoding="utf-8")
@@ -68,7 +143,7 @@ recalled_at: {recalled_at or ''}
 
 
 def read_fact_id(md_path: Path) -> str | None:
-    """从 ``mem-*.md`` **frontmatter**(首 ``---...---`` 块)读 ``fact_id``。
+    """从投影 ``mem-*.md`` **frontmatter**(首 ``---...---`` 块)读 ``fact_id``。
 
     限定 frontmatter 块: body 里若出现 ``fact_id:`` 也不误匹配(防幽灵 id)。
     容错: 文件缺/损坏/无 frontmatter/无 fact_id → None(synthesis 跳过, 不崩)。"""
@@ -85,30 +160,39 @@ def read_fact_id(md_path: Path) -> str | None:
     return m.group(1) if m else None
 
 
-# ── ADR-15 P2: synthesis_index (MEMORY [mem] 唯一写入口) ────────────
-# 散 index 对账: 扫 mem-<id>.md(各路径建/刷)→ 回 KG 取现值 → 对账重写 MEMORY [mem]。
-# recall/autodream 只建 mem-<id>.md(散 index 实体文件), synthesis 集中收口写 MEMORY。
-# build_index 已 P3 清退; synthesis 是 MEMORY [mem] 唯一写入口。
+# ── ADR-15 P2: synthesis_index (MEMORY 投影行唯一写入口) ────────────
+# 散 index 对账: 扫 mem-{4hex}-{slug}.md(各路径建/刷)→ 回 KG 取现值 → 对账重写 MEMORY 投影段。
+# recall/autodream 只建 .md(散 index 实体文件), synthesis 集中收口写 MEMORY。
+# build_index 已 P3 清退; synthesis 是 MEMORY 投影行唯一写入口。
 
-# orphan [mem] 索引行匹配: 新格式(``- {display} · [mem](memory/mem-<id>.md) — ...``)
-# + 历史 build_index 残留格式(``- [mem] {display}(memory/mem-<id>.md) — ...``)。两者都
-# 含 (memory/mem- 前缀, 用此子串过滤覆盖两格式, 保 index 干净(orphan 行永远删)。
-_MEM_LINE_MARKER = "(memory/mem-"
+# 投影索引行识别(ADR-A 原生格式 ``- [Title](mem-{4hex}-{slug}.md) — hook``):
+# 用 ``](mem-`` 子串覆盖新格式; 旧 ``(memory/mem-`` 残留也一并清(迁移期)。两者都在
+# MEMORY 重写时永远删(orphan 行永远删), 保 index 干净。
+_MEM_LINE_NEW_RE = re.compile(r"\]\(mem-[0-9a-f]{4}-.+?\.md\)")
+_MEM_LINE_OLD_MARKER = "(memory/mem-"   # 迁移期旧格式残留, 保留清理
+
+
+def _is_mem_index_line(ln: str) -> bool:
+    """MEMORY 索引行是否为 mem-service 投影行。
+
+    新格式按 MEM_FILE_RE 口径(4-hex)匹配 ``](mem-{4hex}-{slug}.md)``;
+    旧格式 ``(memory/mem-`` 迁移期一并清。两者都在 MEMORY 重写时永远删。"""
+    return bool(_MEM_LINE_NEW_RE.search(ln)) or _MEM_LINE_OLD_MARKER in ln
 
 
 def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None) -> dict:
-    """对账散 mem-<id>.md → 回 KG 取现值 → 重写 MEMORY.md [mem] 索引(唯一写入口)。
+    """对账散 ``mem-{4hex}-{slug}.md`` → 回 KG 取现值 → 重写 MEMORY.md 投影索引(唯一写入口)。
 
-    1. 扫 ``mem_dir/*.md``(排除 MEMORY.md/*.tmp)→ ``read_fact_id`` 收 (fact_id, path);
-       损坏/无 fact_id 跳过(容错)。
-    2. 冷启动: 无有效 fact_id → 清 MEMORY 的 [mem] 行(保非 [mem]), 返回 cold_start。
+    1. 扫 ``mem_dir/*.md``: ``MEM_FILE_RE`` 识别投影文件(ADR-B 单一源), 排除 MEMORY.md/*.tmp;
+       ``read_fact_id`` 收 (fact_id, path); 损坏/无 fact_id 跳过(容错)。
+    2. 冷启动: 无有效 fact_id → 清 MEMORY 的投影行(保非投影), 返回 cold_start。
        **不 top-K 兜底**(grill 裁决: 兜底违散 index 语义)。
     3. 批量回 KG ``WHERE id IN (...)`` 一次查 present facts(非 N+1);
        orphan = fact_ids 不在 present。
     4. 批量 ``entity WHERE id IN (present.subject_id)`` 取实体名。
     5. ``scoring.mem_score`` desc 排序(PPR 默认关, 留 .env MEM_SYNTH_PPR 占位)。
-    6. 对账写 MEMORY: 删所有含 ``_MEM_LINE_MARKER`` 的行(orphan 行永远删), 保 CC 原生行,
-       append 本次 present facts。
+    6. 对账写 MEMORY: 删所有投影索引行(_is_mem_index_line, orphan/旧格式永远删),
+       保 CC 原生行, append 本次 present facts(原生格式, ADR-A)。
     7. orphan 文件: ``MEM_SYNTH_PRUNE_ORPHANS=1`` 才删(``MEM_SYNTH_ORPHAN_BACKUP=1`` rename
        ``.orphan.bak`` 否则 unlink);默认 off 留文件。
 
@@ -121,11 +205,14 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
     mem_dir_p.mkdir(parents=True, exist_ok=True)  # 冷启动/全新项目: MEMORY.md 父目录可能不存在
     memory_md = mem_dir_p / "MEMORY.md"
 
-    # 1. 扫 mem-<id>.md → (fact_id, path)。MEMORY.md 与 *.tmp 排除。
+    # 1. 扫投影文件(MEM_FILE_RE 识别) → (fact_id, path)。MEMORY.md 与 *.tmp 排除。
     found: list[tuple[str, Path]] = []
     if mem_dir_p.is_dir():
         for p in mem_dir_p.glob("*.md"):
             if p.name == "MEMORY.md" or p.suffix == ".tmp" or p.name.endswith(".tmp"):
+                continue
+            # ADR-B: MEM_FILE_RE 识别投影文件(单一源, 不靠 frontmatter/source 子串)。
+            if not MEM_FILE_RE.match(p.name):
                 continue
             fid = read_fact_id(p)
             if fid:
@@ -133,23 +220,20 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
     fact_ids = [fid for fid, _ in found]
     path_by_id = {fid: p for fid, p in found}
 
-    # 2. 冷启动: 无有效 fact_id → 清 [mem] 行(保非 [mem]), 不兜底。
+    # 2. 冷启动: 无有效 fact_id → 清投影行(保非投影), 不兜底。
     if not fact_ids:
         _rewrite_mem_lines(memory_md, [])
         return {"projected": 0, "orphans": 0, "pruned": 0, "cold_start": True}
 
-    # 3. 批量回 KG(WHERE id IN (...), 一次非 N+1)。
+    # 3. 批量回 KG(WHERE id IN (...), 一次非 N+1)。取 topic(ADR-C)投影用。
     conn = db.get_conn()
     placeholders = ",".join("?" * len(fact_ids))
     rows = conn.execute(
-        f"SELECT id, subject_id, predicate, value, LIF, confidence, source_cwd "
+        f"SELECT id, subject_id, predicate, value, LIF, confidence, source_cwd, topic "
         f"FROM fact WHERE id IN ({placeholders})",
         fact_ids,
     ).fetchall()
     present_ids = {r["id"] for r in rows}
-    # ponytail: 直接构 fact dict 喂 mem_score(只需 id/LIF/confidence + subject_id/predicate/value);
-    # 不走 store._decode_fact(那 SELECT * 取全列, 这里已窄选 7 列, 避免重查)。
-    # store 未 import; 此处纯读 row, 无需 store。
     facts = [
         {
             "id": r["id"],
@@ -159,6 +243,7 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
             "LIF": r["LIF"],
             "confidence": r["confidence"],
             "source_cwd": r["source_cwd"],
+            "topic": r["topic"] if "topic" in r.keys() else None,
         }
         for r in rows
     ]
@@ -181,7 +266,7 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
     import scoring
     facts.sort(key=lambda f: scoring.mem_score(f), reverse=True)
 
-    # 6. 对账写 MEMORY.md: 删 orphan/旧 [mem] 行(永远删), append 本次 present(已排序)。
+    # 6. 对账写 MEMORY.md: 删 orphan/旧投影行(永远删), append 本次 present(原生格式, 已排序)。
     new_lines = [
         _format_mem_line(
             f,
@@ -213,25 +298,20 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
     }
 
 
-def _sanitize(s: str | None) -> str:
-    """换行/回车 → 空格 + 收尾空白剥离(防 [mem] 索引行被切成多物理行 → 破坏幂等 + 污染 MEMORY)。"""
-    return (s or "").replace("\r", " ").replace("\n", " ").strip()
-
-
 def _format_mem_line(fact: dict, subj_name: str) -> str:
-    """synthesis [mem] 索引行(新格式, ADR-15 P2): ``- {display} · [mem](memory/mem-<id>.md) — score {ms} · kg://fact/<id>``。"""
-    import scoring
-    fid = fact["id"]
-    display = f"{_sanitize(subj_name) or '?'} {_sanitize(fact.get('predicate'))} {_sanitize(fact.get('value'))}".strip()[:60]
-    ms = scoring.mem_score(fact)
-    return (f"- {display} · [mem](memory/mem-{fid}.md) — "
-            f"score {ms:.2f} · kg://fact/{fid}")
+    """ADR-A 原生索引行: ``- [{topic}](mem-{4hex}-{slug}.md) — {topic}``。
+
+    链接文本 = topic, 链接 = 相对路径(``mem-{4hex}-{slug}.md``, 与 MEMORY.md 同目录),
+    hook = topic。无 [mem] 标记 / 无 score / 无 kg://(纯原生, CC 代码层召回可消费)。"""
+    topic = _fact_topic(fact, subj_name)
+    fname = _mem_filename(fact["id"], topic)
+    return f"- [{_md_link_text(topic)}]({fname}) — {_md_link_text(topic)}"
 
 
 def _rewrite_mem_lines(memory_md: Path, new_lines: list[str]) -> None:
-    """删 MEMORY.md 中所有含 ``_MEM_LINE_MARKER`` 的行(orphan/旧 [mem] 行永远删),
-    保 CC 原生行(非 [mem]), append new_lines。幂等(每次重写 = 本次精确集合)。"""
+    """删 MEMORY.md 中所有投影索引行(新 ``](mem-`` / 旧 ``(memory/mem-``, orphan/旧格式永远删),
+    保 CC 原生行(非投影), append new_lines。幂等(每次重写 = 本次精确集合)。"""
     existing = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
-    out = [ln for ln in existing.splitlines() if _MEM_LINE_MARKER not in ln]
+    out = [ln for ln in existing.splitlines() if not _is_mem_index_line(ln)]
     out.extend(new_lines)
     memory_md.write_text("\n".join(out) + "\n", encoding="utf-8")

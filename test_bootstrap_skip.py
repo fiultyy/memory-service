@@ -8,21 +8,23 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 from bootstrap import init_memory
-from llm_provider import Extraction, FactOut
+from llm_provider import EdgeOut, EntityOut, Extraction
 
 
 class FakeProvider:
     """Fake provider 返回固定事实，用于验证是否被 ingest"""
     base_url = None
 
-    def __init__(self, expected_fact):
-        self.expected_fact = expected_fact
+    def __init__(self, expected_edge, expected_entities=None):
+        self.expected_edge = expected_edge
+        self.expected_entities = expected_entities or []
         self.seen_texts = []
 
     def extract_facts(self, text: str):
         self.seen_texts.append(text)
         return Extraction(
-            facts=[self.expected_fact],
+            entities=self.expected_entities,
+            edges=[self.expected_edge],
             confidence=0.9,
             source_meta={"provider": "fake"}
         )
@@ -46,7 +48,10 @@ def test_bootstrap_skips_mem_service_projection():
         f.write("---\nsource: mem-service\nfact_id: x\n---\n用户 uses rust")
 
     # Fake provider: 记录收到的 text，验证 mem-x.md 没有被喂进去
-    provider = FakeProvider(FactOut("用户", "uses", "rust"))
+    provider = FakeProvider(
+        EdgeOut("用户", "uses", "rust", topic="用户使用 rust"),
+        [EntityOut("用户", "person"), EntityOut("rust", "tool")],
+    )
 
     # 隔离 DB (用文件而非目录)
     import db

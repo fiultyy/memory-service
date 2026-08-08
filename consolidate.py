@@ -233,7 +233,7 @@ def decay() -> dict[str, int]:
         )
         decayed += 1
         if deprecate:
-            store.update_fact_status(f["id"], "deprecated")
+            store.update_fact_status(f["id"], "deprecated", valid_to=store._now())
             deprecated += 1
     if decayed:
         conn.commit()
@@ -298,7 +298,7 @@ def _merge_group(group: list[dict[str, Any]]) -> int:
         # ponytail: no transaction — single-writer cli, crash leaves at worst a
         # half-merged group re-runnable on next consolidate (idempotent: already
         # superseded dups fall out of the active group next pass).
-        store.update_fact_status(dup["id"], "superseded", supersedes_id=survivor_id)
+        store.update_fact_status(dup["id"], "superseded", supersedes_id=survivor_id, valid_to=store._now())
         merged += 1
 
     conn = db.get_conn()

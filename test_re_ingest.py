@@ -5,15 +5,17 @@ from pathlib import Path
 
 import db
 import bootstrap
-from llm_provider import Extraction, FactOut
+from llm_provider import EdgeOut, EntityOut, Extraction
 
 # mock provider (复用 _demo 模式)
 class _Fake:
     base_url = None
     def extract_facts(self, text: str):
-        # 固定返回 (用户, uses, rust)
-        return Extraction(facts=[FactOut("用户", "uses", "rust")],
-                          confidence=0.7, source_meta={"provider": "fake"})
+        # 固定返回 (用户, uses, rust, topic)
+        return Extraction(
+            entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
+            edges=[EdgeOut("用户", "uses", "rust", topic="用户使用 rust")],
+            confidence=0.7, source_meta={"provider": "fake"})
 
 # db.init(tmp) 隔离
 tmpdir = tempfile.mkdtemp()
@@ -32,6 +34,10 @@ conn = db.get_conn()
 rows = conn.execute("SELECT * FROM fact").fetchall()
 print(f"  KG facts after test1: {len(rows)} rows")
 assert len(rows) >= 1, "Expected at least 1 fact"
+# T1: topic 持久化断言 — SELECT topic 不只是行数(ADR-C LLM EdgeOut.topic → fact.topic)
+topics = [r["topic"] for r in conn.execute("SELECT topic FROM fact").fetchall()]
+print(f"  T1 topics persisted: {topics}")
+assert "用户使用 rust" in topics, f"topic 应持久化为投入值, got {topics}"
 
 # 2. 造 mem-x.md(frontmatter source:mem-service) → re-ingest → skipped, KG 无新
 mem_x_md = Path(tmpdir) / "mem-x.md"

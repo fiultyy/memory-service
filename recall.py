@@ -5,6 +5,11 @@ Pipeline: split query → ``search_entities`` (entity.name LIKE per token)
 networkx graph from active facts (entity nodes + fact edges) → pagerank →
 score ``α·match + β·centrality + γ·LIF`` (ADR-4v2) → sort desc → return Fact list.
 
+Optional BFS expansion (``use_bfs=True``): seed entities found by name match
+are expanded via graph BFS up to ``bfs_hops`` hops; expanded facts bypass the
+``score >= 0.3`` hard filter and contribute ``bfs_proximity`` to scoring.
+The entity graph is built once and shared between centrality and BFS.
+
 Graph construction is **on-the-fly** (ADR-2v2): rebuilt every recall from the
 SQLite active-fact set, never persisted, no ingest-time maintenance. O(V+E) per
 recall is acceptable for single-machine MVP.
@@ -31,6 +36,8 @@ import store
 # ADR-13 向量层(use_vec): 候选扩展 + vec_sim 阈值/top-N。
 VEC_MIN = 0.30   # cosine ≥ 此的 active fact 入向量候选(避免全 noise 污染 top-k)
 VEC_TOP_N = 20   # 向量候选上限(扩展 entity/value 候选集)
+# ADR-4 bfs hint: direct-match 薄(候选 < 阈值)且 use_bfs=False 时 suggest_bfs。
+SUGGEST_BFS_THRESHOLD = 3
 
 
 def _cosine(a: list[float] | None, b: list[float] | None) -> float:
@@ -42,21 +49,58 @@ def _cosine(a: list[float] | None, b: list[float] | None) -> float:
     nb = math.sqrt(sum(y * y for y in b))
     return dot / (na * nb) if na and nb else 0.0
 
+def _temporal_clause(as_of: str | None = None) -> tuple[str, list]:
+    """Fact validity WHERE fragment + bind params (status + temporal).
 
-def _build_centralities() -> dict[str, float]:
-    """On-the-fly pagerank centrality per entity, normalized to ``[0,1]`` (ADR-2v2).
+    Default (as_of=None): ``status='active' AND valid_to IS NULL`` — only
+    currently-valid facts (zero-regression with pre-D4 status='active' filter).
+    as_of given: point-in-time bi-temporal query — ``(valid_from IS NULL OR
+    valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)``.  The status
+    filter is dropped: a superseded fact was valid at a historical moment.
+    NULL valid_from = -inf (always <= as_of).  Returns ``(sql, params)``.
 
-    Builds a networkx graph from all active facts: each fact is an edge between
-    its subject entity and (if present) object entity. Runs ``nx.pagerank``,
-    then min-max normalizes (max → 1.0) so the most central entity carries the
-    full β weight. Rebuilt every recall — no persistence.
+    隐式假设(ADR-3 ③): SQLite TEXT 字典序 = 时间序。成立前提是所有 valid_from/
+    valid_to/as_of 均为同一归一格式 —— store._now() 统一 +00:00 秒级 ISO-8601
+    (ms-floor), cli 把 --as-of 归一为 UTC +00:00 再下传。任一处混入非 UTC 后缀
+    (如 +08:00) 或不同精度即字典序错序, 故归一只在 cli 输入端做(store 不再二次
+    归一, 避免覆盖显式 valid_from 参数)。
+    """
+    if as_of is None:
+        return ("status='active' AND valid_to IS NULL", [])
+    return (
+        "(valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)",
+        [as_of, as_of],
+    )
 
-    Returns ``{entity_id: centrality ∈ [0,1]}``. Empty when no active facts.
+
+def _build_entity_graph(
+    as_of: str | None = None, source_cwd: str | None = None,
+) -> tuple[nx.Graph, dict[str, float]]:
+    """Build entity graph from active facts + pagerank centrality (ADR-2v2).
+
+    Returns ``(graph, centrality_dict)``.  The graph is an undirected
+    ``nx.Graph`` where each active fact links ``subject_id ↔ object_id``.
+    ``centrality_dict`` is pagerank normalised to ``[0,1]``.  Single-source
+    build shared by centrality scoring and BFS expansion.
+
+    ``source_cwd`` (ADR-4 scoped opt-in, default None = global graph per ADR-14
+    单体 KG 跨 cwd 共享): when set, only facts whose ``source_cwd`` matches or
+    is NULL contribute edges — graph more precise but smaller, for cross-cwd
+    noise reduction. NULL 兼容老数据(无 source_cwd 的 fact 视为全局)。
     """
     conn = db.get_conn()
-    rows = conn.execute(
-        "SELECT subject_id, object_id FROM fact WHERE status='active'"
-    ).fetchall()
+    tc, tp = _temporal_clause(as_of)
+    if source_cwd is None:
+        rows = conn.execute(
+            f"SELECT subject_id, object_id FROM fact WHERE {tc}",
+            tp,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT subject_id, object_id FROM fact WHERE {tc} "
+            f"AND (source_cwd = ? OR source_cwd IS NULL)",
+            (*tp, source_cwd),
+        ).fetchall()
     g = nx.Graph()
     seen: set[str] = set()
     for r in rows:
@@ -69,13 +113,18 @@ def _build_centralities() -> dict[str, float]:
         else:
             g.add_node(s)
     if not seen:
-        return {}
+        return (g, {})
     pr = nx.pagerank(g) if g.number_of_edges() else {n: 0.0 for n in g.nodes}
     # Isolated-only graph → all zero. Edges present → min-max normalize max→1.0.
     mx = max(pr.values()) if pr else 0.0
     if mx <= 0.0:
-        return {eid: 0.0 for eid in seen}
-    return {eid: pr.get(eid, 0.0) / mx for eid in seen}
+        return (g, {eid: 0.0 for eid in seen})
+    return (g, {eid: pr.get(eid, 0.0) / mx for eid in seen})
+
+
+def _build_centralities(as_of: str | None = None) -> dict[str, float]:
+    """Thin wrapper: returns centrality dict only (backward compatible)."""
+    return _build_entity_graph(as_of=as_of)[1]
 
 
 def _fact_centrality(fact: dict[str, Any], centrality: dict[str, float]) -> float:
@@ -85,6 +134,42 @@ def _fact_centrality(fact: dict[str, Any], centrality: dict[str, float]) -> floa
     if oid:
         cands.append(centrality.get(oid, 0.0))
     return max(cands) if cands else 0.0
+
+def _hop_decay(hop: int) -> float:
+    """BFS hop → proximity weight.  hop 0→1.0, 1→0.5, 2→0.25, <0→0.0."""
+    if hop < 0:
+        return 0.0
+    return 1.0 if hop == 0 else 0.5 ** hop
+
+
+def bfs_neighbors(
+    seed_entity_ids: list[str],
+    graph: nx.Graph,
+    hops: int = 2,
+    max_nodes: int = 50,
+) -> dict[str, int]:
+    """BFS from *seed_entity_ids* over *graph*, return ``{entity_id: min_hop}``.
+
+    Seed entities are hop 0.  Uses ``nx.single_source_shortest_path_length``
+    per seed and merges keeping the minimum hop per entity.  Caps total
+    returned entities at *max_nodes* (lowest hop first).
+    """
+    if not seed_entity_ids or graph.number_of_nodes() == 0:
+        return {}
+    merged: dict[str, int] = {}
+    for seed in seed_entity_ids:
+        if seed not in graph:
+            continue
+        lengths = nx.single_source_shortest_path_length(graph, seed, cutoff=hops)
+        for eid, dist in lengths.items():
+            prev = merged.get(eid)
+            if prev is None or dist < prev:
+                merged[eid] = dist
+    if len(merged) > max_nodes:
+        # keep lowest hop first, then cap
+        by_hop = sorted(merged.items(), key=lambda x: x[1])
+        merged = dict(by_hop[:max_nodes])
+    return merged
 
 
 def search_entities(tokens: list[str]) -> list[dict[str, Any]]:
@@ -113,16 +198,17 @@ def search_entities(tokens: list[str]) -> list[dict[str, Any]]:
     return out
 
 
-def _facts_for_entities(entity_ids: list[str]) -> list[dict[str, Any]]:
+def _facts_for_entities(entity_ids: list[str], as_of: str | None = None) -> list[dict[str, Any]]:
     """Facts where any entity is subject_id OR object_id (status='active')."""
     if not entity_ids:
         return []
     conn = db.get_conn()
+    tc, tp = _temporal_clause(as_of)
     placeholders = ",".join("?" * len(entity_ids))
     rows = conn.execute(
-        f"SELECT * FROM fact WHERE status='active' AND "
+        f"SELECT * FROM fact WHERE {tc} AND "
         f"(subject_id IN ({placeholders}) OR object_id IN ({placeholders}))",
-        (*entity_ids, *entity_ids),
+        (*tp, *entity_ids, *entity_ids),
     ).fetchall()
     facts: list[dict[str, Any]] = []
     for r in rows:
@@ -143,6 +229,10 @@ def recall(
     cwd: str | None = None,
     with_tag: bool = False,
     mem_dir: str | Path | None = None,
+    use_bfs: bool = False,
+    bfs_hops: int = 2,
+    as_of: str | None = None,
+    use_bfs_scoped: bool = False,
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
@@ -182,17 +272,20 @@ def recall(
     # subject name does not echo the query (e.g. "用户" subject, "rust" in value).
     # Ceiling: linear scan of all active facts; fine for single-machine MVP.
     conn = db.get_conn()
-    # ADR-14 cwd 隔离(b 方案): cwd 给定时只扫该 cwd 的 fact(+ NULL 老数据兼容)。
+    tc, tp = _temporal_clause(as_of)
     if cwd:
         value_rows = conn.execute(
-            "SELECT * FROM fact WHERE status='active' AND (source_cwd = ? OR source_cwd IS NULL)",
-            (cwd,),
+            f"SELECT * FROM fact WHERE {tc} AND (source_cwd = ? OR source_cwd IS NULL)",
+            (*tp, cwd),
         ).fetchall()
     else:
-        value_rows = conn.execute("SELECT * FROM fact WHERE status='active'").fetchall()
+        value_rows = conn.execute(
+            f"SELECT * FROM fact WHERE {tc}",
+            tp,
+        ).fetchall()
     seen_ids: set[str] = set()
     candidates: list[dict[str, Any]] = []
-    for r in _facts_for_entities([e["id"] for e in entities]):
+    for r in _facts_for_entities([e["id"] for e in entities], as_of=as_of):
         if r["id"] not in seen_ids:
             seen_ids.add(r["id"])
             candidates.append(r)
@@ -233,25 +326,60 @@ def recall(
         candidates = [f for f in candidates
                       if not f.get("source_cwd") or f["source_cwd"] == cwd]
         seen_ids = {f["id"] for f in candidates}
-
     # ADR-2v2: on-the-fly pagerank centrality over the full active-fact graph
     # (one build per recall, no persistence). Each fact's centrality = the
     # pagerank of its most-central connected entity.
-    centralities = _build_centralities()
+    # BFS 扩展(use_bfs): 同一次图构建复用于 centrality + BFS, 不重复 build。
+    entity_graph, centralities = _build_entity_graph(
+        as_of=as_of, source_cwd=(cwd if use_bfs_scoped else None),
+    )
+    # BFS 图遍历扩展(use_bfs): 从 seed entity BFS 扩展邻居, 补充字面/向量未命中的 fact。
+    bfs_fact_min_hop: dict[str, int] = {}
+    bfs_expanded_ids: set[str] = set()
+    if use_bfs and entities:
+        seed_ids = [e["id"] for e in entities]
+        bfs_result = bfs_neighbors(seed_ids, entity_graph, hops=bfs_hops)
+        # 邻居实体(非 seed) → 取回 fact 扩展候选集
+        neighbor_eids = [eid for eid in bfs_result if eid not in seed_ids]
+        if neighbor_eids:
+            for f in _facts_for_entities(neighbor_eids, as_of=as_of):
+                fid = f["id"]
+                if fid not in seen_ids:
+                    seen_ids.add(fid)
+                    candidates.append(f)
+        # 记录每个 fact 的 min_hop(基于 subject_id/object_id 在 bfs_result 中的最小值)
+        for f in candidates:
+            fid = f["id"]
+            sub = f.get("subject_id")
+            obj = f.get("object_id")
+            hops_for_fact: list[int] = []
+            if sub and sub in bfs_result:
+                hops_for_fact.append(bfs_result[sub])
+            if obj and obj in bfs_result:
+                hops_for_fact.append(bfs_result[obj])
+            if hops_for_fact:
+                min_h = min(hops_for_fact)
+                # 如果该 fact 是 BFS 扩展来的(hop>0), 追踪
+                if min_h > 0:
+                    bfs_expanded_ids.add(fid)
+                prev = bfs_fact_min_hop.get(fid)
+                if prev is None or min_h < prev:
+                    bfs_fact_min_hop[fid] = min_h
     scored = []
     for f in candidates:
         vs = 0.0
         if qv and f.get("value"):
             fv = embedding.embed(f["value"])  # cache hit(向量候选扩展已 embed)
             vs = _cosine(qv, fv) if fv else 0.0
+        bfs_prox = _hop_decay(bfs_fact_min_hop.get(f["id"], -1)) if use_bfs else 0.0
         scored.append(scoring.score_fact(
             f, query,
             centrality=_fact_centrality(f, centralities),
             vec_sim=vs, weights=weights, delta=delta,
+            bfs_proximity=bfs_prox,
         ))
-    # drop low-score (噪音) 除非 verbose wants them; ADR-4v2 α=0.5 对齐: match≥0.6 达标,
-    # 总 score 门槛 0.3(保留中高质量 hit, 降噪)。vec_sim>0 的候选 score>0 不 drop — 即使字面 m=0(盲区解)。
-    scored = [s for s in scored if s["score"] >= 0.3]
+    # drop low-score (噪音); BFS 扩展 fact(hop>0) 绕过 0.3 门槛但仍参与排序+top_k。
+    scored = [s for s in scored if s["score"] >= 0.3 or s["fact"]["id"] in bfs_expanded_ids]
     scored.sort(key=lambda s: s["score"], reverse=True)
     if top_k is not None:
         scored = scored[: max(0, top_k)]
@@ -302,23 +430,34 @@ def recall(
         f = s["fact"]
         fid = f["id"]
         subj = ent_names.get(f.get("subject_id"), "?")
-        display = f"{subj} {f.get('predicate') or ''} {f.get('value') or ''}".strip()
+        # ADR-A/C: 投影标题 = topic(回退三元组); 与 project_fact_md 内部一致。
+        topic = projection._fact_topic(f, subj)
         ms = scoring.mem_score(f)
         mem_path = None
         if mem_dir_obj is not None:
             projection.project_fact_md(f, subj, mem_dir_obj, recalled_at=now_iso)
-            mem_path = f"memory/{projection._mem_filename(fid)}"
+            # ADR-B: 相对路径与 MEMORY.md 同目录 → 仅文件名(无 memory/ 前缀)。
+            mem_path = projection._mem_filename(fid, topic)
         tag = {
             "fact_id": fid,
             "mem_path": mem_path,
             "kg_uri": f"kg://fact/{fid}",
-            "display": display,
+            "display": topic,
+            "topic": topic,
             "mem_score": ms,
             "recalled_at": now_iso,
             "session_id": session_id,
         }
         f["_snaptag"] = tag  # 默认 list[dict] shape 嵌此字段(向后兼容, 调用方可忽略)
         s["tag"] = tag
+
+    # ADR-4 bfs hint: direct-match 薄(候选 < 阈值)且 use_bfs=False → suggest_bfs。
+    # hint 不改 default recall 行为(排序/过滤不变); 字段附在 envelope(verbose/
+    # with_tag), 默认 list 路径不动(零回归)。cli 单独从结果数自行判断(不依赖此字段)。
+    suggest_bfs = (
+        not use_bfs
+        and len(candidates) < SUGGEST_BFS_THRESHOLD
+    )
 
     if verbose:
         ent_ids = {e["id"] for e in entities}
@@ -332,9 +471,10 @@ def recall(
         return {
             "query": query,
             "session_id": session_id,
+            "suggest_bfs": suggest_bfs,
             "results": [{"fact": s["fact"], "score": s["score"], "tag": s["tag"]} for s in scored],
         }
     return [s["fact"] for s in scored]
 
 
-__all__ = ["search_entities", "recall"]
+__all__ = ["search_entities", "recall", "bfs_neighbors"]

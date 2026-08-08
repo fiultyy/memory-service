@@ -11,7 +11,10 @@ CREATE TABLE IF NOT EXISTS entity (
     name        TEXT NOT NULL,
     entity_type TEXT NOT NULL,
     properties  TEXT NOT NULL DEFAULT '{}',   -- JSON object
-    created_at  TEXT NOT NULL
+    aliases        TEXT NOT NULL DEFAULT '[]',   -- JSON array (ADR-D7: 同实体异写别名)
+    name_embedding TEXT,                          -- JSON array float (ADR-D7: 名称向量, 离线='[]'/NULL)
+    created_at  TEXT NOT NULL,
+    UNIQUE(name, entity_type)                     -- ADR-2 ①: DB 强制去重(resolver 是应用层闸非 DB 强制, 并发 re-ingest 竞态建孤儿)
 );
 CREATE INDEX IF NOT EXISTS idx_entity_name ON entity(name);
 CREATE INDEX IF NOT EXISTS idx_entity_type ON entity(entity_type);
@@ -42,6 +45,7 @@ CREATE TABLE IF NOT EXISTS fact (
     last_accessed_at TEXT,                          -- recall refresh timestamp (drives lif_recency)
     seen_sessions   TEXT NOT NULL DEFAULT '[]',     -- JSON array: sessions that recalled this fact (drives lif_spread)
     source_cwd    TEXT,                             -- ADR-14: 来源 cwd(b 方案, 跨 cwd 隔离; NULL=老数据/未知, recall --cwd 过滤含 NULL)
+    topic        TEXT,                              -- ADR-C: LLM 生成的一句话可读事实(投影 filename slug + index title + description)
     created_at    TEXT NOT NULL,
     FOREIGN KEY (subject_id) REFERENCES entity(id),
     FOREIGN KEY (object_id)  REFERENCES entity(id),

@@ -38,6 +38,21 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
     if "source_cwd" not in cols:
         conn.execute("ALTER TABLE fact ADD COLUMN source_cwd TEXT")
+    # ADR-C migration: 老 db fact 表无 topic 列 → ALTER ADD。
+    if "topic" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN topic TEXT")
+    # ADR-D7 migration: 老 db entity 表无 aliases/name_embedding 列 → ALTER ADD。
+    ent_cols = {r[1] for r in conn.execute("PRAGMA table_info(entity)")}
+    if "aliases" not in ent_cols:
+        conn.execute("ALTER TABLE entity ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'")
+    if "name_embedding" not in ent_cols:
+        conn.execute("ALTER TABLE entity ADD COLUMN name_embedding TEXT")
+    # ADR-2 ① migration: 老 db entity 表无 UNIQUE(name, entity_type) 约束。
+    # SQLite 不支持 ALTER ADD CONSTRAINT → 用 unique index 达成同等强制(老库空, 无冲突
+    # 负担; 生产有冲突行会 CREATE UNIQUE INDEX 失败 → 记 P4: 先跑 consolidate dedup)。
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_name_type ON entity(name, entity_type)"
+    )
     conn.commit()
     _conn = conn
     _conn_path = str(path)

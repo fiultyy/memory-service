@@ -32,6 +32,7 @@ import adapter
 import consolidate as consolidate_mod
 import db
 import store
+import resolver
 
 
 def _read_transcript(transcript_path: str | Path) -> str:
@@ -73,19 +74,6 @@ def _read_transcript(transcript_path: str | Path) -> str:
     return "\n".join(parts)
 
 
-def _resolve_subject(name: str) -> str | None:
-    """Resolve a fact subject to an entity id, creating it if absent.
-
-    Mirrors ``cli._ensure_entity`` semantics: relation patterns surface phrase
-    subjects not caught by entity patterns (e.g. "用户"); persist them as
-    ``inferred`` entities so the KG stays navigable. Re-extraction reuses the id.
-    """
-    if not name:
-        return None
-    existing = store.find_entities_by_name(name)
-    if existing:
-        return existing[0]["id"]
-    return store.put_entity(name, "inferred")
 
 
 def _find_active_fact(subject_id: str, predicate: str, value: str) -> dict[str, Any] | None:
@@ -103,18 +91,38 @@ def _find_active_fact(subject_id: str, predicate: str, value: str) -> dict[str, 
     return None
 
 
-# ponytail: predicate 基数 — functional(单值, 不同 value 才算矛盾) vs multivalue(多值共存)。
-# 与 extractor 7 谓词对应。升级路径: LLM 自由谓词时改读 fact schema cardinality 字段。
-_FUNCTIONAL_PREDICATES = frozenset({"is_a", "belongs_to"})
+# ponytail: ADR-1 R1 — 已知多值谓词集 short-circuit(不走 LLM), 省 token + 防 LLM
+# 误判共存。单值/开放谓词走 provider.judge_contradiction 纯 LLM 裁判(Graphiti 式)。
+# 升级路径: LLM 自由谓词时改读 fact schema cardinality 字段。
+_MULTIVALUE_PREDICATES = frozenset({
+    "uses", "depends_on", "contains", "implements",
+    "connected_to", "part_of", "relates_to",
+})
 
 
-def _is_contradiction(predicate: str, new_value: str, old_value: str) -> bool:
-    """True only for functional (single-valued) predicates with a different value.
+def _judge_contradiction(providers: list, subject_type: str, subject_name: str,
+                         predicate: str, new_value: str, old_value: str) -> bool:
+    """Whether ``new_value`` contradicts ``old_value`` for the same subject+
+    predicate (ADR-1 R1).
 
-    Multivalue predicates (uses/depends_on/contains/implements/connected_to) coexist:
-    "项目 uses rust AND docker" 非矛盾, 是并存。
+    Two fast paths skip the LLM: (1) multivalue predicates always coexist → False;
+    (2) identical values → False (same fact, not contradiction). Otherwise ask the
+    first reachable provider's ``judge_contradiction``. Provider unreachable /
+    raises / returns non-bool → fallback ``contradiction=False`` (do NOT supersede,
+    do NOT block ingest — matches A1 fallback contract). NEVER raises.
     """
-    return predicate in _FUNCTIONAL_PREDICATES and new_value != old_value
+    if predicate in _MULTIVALUE_PREDICATES:
+        return False
+    if new_value == old_value:
+        return False
+    if not providers:
+        return False
+    try:
+        verdict = providers[0].judge_contradiction(
+            subject_type, subject_name, predicate, new_value, old_value)
+    except Exception:
+        return False
+    return bool(verdict and verdict.get("contradiction") is True)
 
 
 def _has_active_for_predicate(subject_id: str, predicate: str) -> list[dict[str, Any]]:
@@ -163,23 +171,48 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     src_ref = f"session:{session_id}" if session_id else None
     added = updated = deleted = noop = 0
 
-    # Phase c — incremental decision per fact.
-    # ponytail: rebuild a name→entity_id cache per call (autodream is the
+    # Phase c — incremental decision per edge.
+    # R1 档 1: entities first (so declared types land), then edges. subject AND
+    # object both resolve to entities → put_fact(object_id=...) 必非空.
+    # ponytail: rebuild a name→entity_id/type cache per call (autodream is the
     # single writer in a PreCompact hook; no cross-call cache needed).
     name_to_id: dict[str, str] = {}
-    for fact in result.facts:
-        subject = (fact.subject or "").strip()
-        predicate = (fact.predicate or "").strip()
-        value = (fact.object or "").strip()
+    name_to_type: dict[str, str] = {}
+    for ent in result.entities:
+        if not ent.name:
+            continue
+        sid = resolver.resolve_entity(
+            ent.name, ent.type,
+            aliases=getattr(ent, 'aliases', None) or None,
+            providers=active_providers)
+        if sid is not None:
+            name_to_id[ent.name] = sid
+            name_to_type[ent.name] = ent.type
+
+    for edge in result.edges:
+        subject = (edge.subject or "").strip()
+        predicate = (edge.predicate or "").strip()
+        value = (edge.object or "").strip()
         if not subject or not predicate or not value:
             continue
+        topic = (edge.topic or "").strip() or None  # ADR-C: 投影 slug/title/desc 源
 
         if subject not in name_to_id:
-            sid = _resolve_subject(subject)
+            sid = resolver.resolve_entity(subject, name_to_type.get(subject, "concept"),
+                                          providers=active_providers)
             if sid is None:
                 continue
             name_to_id[subject] = sid
         subject_id = name_to_id[subject]
+
+        # object is a declared entity reference (R1 §A2) — resolve + link.
+        if value not in name_to_id:
+            oid = resolver.resolve_entity(value, name_to_type.get(value, "concept"),
+                                          providers=active_providers)
+            if oid is None:
+                continue
+            name_to_id[value] = oid
+        object_id = name_to_id[value]
 
         # Exact (subject, predicate, value) match ⇒ UPDATE / NOOP.
         exact = _find_active_fact(subject_id, predicate, value)
@@ -202,26 +235,33 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
             updated += 1
             continue
 
-        # Same (subject, predicate), different value: supersede ONLY if the
-        # predicate is functional (single-valued: is_a/belongs_to) — a real
-        # contradiction. Multivalue predicates (uses/depends_on/contains/...)
-        # coexist (项目 uses rust AND docker 非矛盾) ⇒ fall through to ADD.
+        # Same (subject, predicate), different value: supersede ONLY on a real
+        # contradiction (ADR-1 R1). Multivalue predicates (uses/depends_on/...)
+        # short-circuit to no-contradiction (coexist); single-valued/open
+        # predicates ask the LLM judge. Provider unreachable → no-contradiction
+        # fallback (do NOT supersede, do NOT block ingest). 一致性:
+        # contradiction ⇒ supersede 设 valid_to (与 bi-temporal supersede 一致).
+        subject_type = name_to_type.get(subject, "concept")
         siblings = _has_active_for_predicate(subject_id, predicate)
         contradicting = [s for s in siblings
-                         if _is_contradiction(predicate, value, s.get("value") or "")]
+                         if _judge_contradiction(
+                             active_providers, subject_type, subject, predicate,
+                             value, s.get("value") or "")]
         if contradicting:
             new_id = store.put_fact(
                 subject_id=subject_id,
                 predicate=predicate,
                 value=value,
+                object_id=object_id,
                 extractor=ext_label,
                 fact_type=fact_type,
                 source_cwd=source_cwd,
                 source_refs=[src_ref] if src_ref else [],
                 seen_sessions=[session_id] if session_id else [],
+                topic=topic,
             )
             for old in contradicting:
-                store.update_fact_status(old["id"], "superseded", supersedes_id=new_id)
+                store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now())
             deleted += len(contradicting)
             added += 1
             continue
@@ -232,11 +272,13 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
             subject_id=subject_id,
             predicate=predicate,
             value=value,
+            object_id=object_id,
             extractor=ext_label,
             fact_type=fact_type,
             source_cwd=source_cwd,
             source_refs=[src_ref] if src_ref else [],
             seen_sessions=[session_id] if session_id else [],
+            topic=topic,
         )
         added += 1
 

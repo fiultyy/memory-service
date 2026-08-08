@@ -1,30 +1,66 @@
 {
-  "topic": "recall-trail-projection",
-  "adr_path": "docs/adr/recall-trail-projection.md",
-  "spec_path": "docs/specs/recall-trail-projection.md",
-  "iteration_base": "a26be97b3e06fa7bef97ebc6e396235d0fbb3e1a",
-  "revision": "2026-08-07 post group-orche grill: Node B 简化(env 取代 hook), Node C 扩容 4 task(清空重写/UNION+env/score阈值/hook透传)",
+  "topic": "defer-cleanup",
+  "adr_path": "docs/adr/defer-cleanup.md",
+  "spec_path": "docs/specs/defer-cleanup.md",
+  "iteration_base": "120b5ad",
   "nodes": [
     {
-      "id": "A",
+      "id": "C",
       "type": "ultracode-workflow",
       "tasks": [
         {
-          "id": "T_A1",
-          "description": "bootstrap.init_memory 扫描时跳过 frontmatter source:mem-service 的投影 md(ADR-16f 闭环卫生)。grill-loop-leak 确认这是当前唯一真污染面。",
-          "files": ["bootstrap.py"],
-          "adr_constraints": ["ADR-16f"],
+          "id": "C1",
+          "description": "bi-temporal 时戳规范化(ADR-3 ①②③):\n(1) store._now() 加 .replace(microsecond=0) 对齐 scoring.py:296/consolidate.py:189 的 ms-floor 惯例(三处 _now 语义统一)。验证:ISO-8601 秒级仍字典序正确(年月日时分秒递减精度)。\n(2) cli --as-of 输入端归一:用 datetime 解析任意 ISO-8601(含 Z / +HH:MM / 无后缀 naive)→ 转 UTC +00:00 isoformat 再下传 recall._temporal_clause。杜绝非 UTC 字典序错序(SQLite TEXT 比较)。naive 输入按 UTC 解释(文档化)。\n(3) recall._temporal_clause 加注释:依赖 _now() 统一 +00:00 格式,TEXT 字典序 = 时间序的隐式假设。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:零回归(default recall 行为逐字不变);不改 schema 类型(保持 TEXT ISO-8601)。",
+          "files": ["store.py", "cli.py", "recall.py"],
+          "adr_constraints": ["ADR-3"],
           "verify": {
             "skeptic": {
-              "focus": "过滤正确跳过 source:mem-service md 且不误伤 CC 原生 md;test 区分'过滤跳过'vs'幂等 UPDATE'(查 source_refs/seen_sessions 无 mem-*.md 假 session)",
-              "acceptance": ["source:mem-service md 不被 ingest", "普通 CC md 仍被 ingest", "幂等", "test 断言 source_refs/seen_sessions 无 mem-*.md"]
+              "focus": "ms-floor 后 ISO-8601 字典序仍=时间序(秒级精度);--as-of 归一覆盖 'Z'/'+08:00'/无后缀三类输入且转 +00:00;default recall(use_bfs=False,无 as_of)逐字零回归;三处 _now 统一",
+              "acceptance": [
+                "store._now() 输出含 .replace(microsecond=0) 秒级",
+                "非 UTC --as-of(如 2026-08-08T12:00:00+08:00)归一为 2026-08-08T04:00:00+00:00 下传",
+                "default recall pytest 全绿(20 既有 + 新增归一测试)"
+              ]
             },
-            "general_test_hint": "单进程 python db.init(tmp) 隔离 → 造 native.md + mem-x.md(source:mem-service) → init_memory(providers=[Fake]) → 断言 KG 无 source_ref 含 mem-x.md",
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
+            "qa_test": null
+          }
+        },
+        {
+          "id": "C2",
+          "description": "valid_from 推导探索 + NULL=-∞ 运维文档(ADR-3 ②④):\n(1) 探索性:查 autodream 接收的 session transcript / source_meta 是否含可信时间源(事实发生时间,非 ingest now)。若 llm_provider.Extraction.source_meta 现状无时间字段(只有 provider/model/error),则**本轮 defer**(保持 put_fact valid_from 默认 _now()),在 commit message + P4 记录 defer 理由,**不强行造时间源**。若 transcript 有时间戳则接线(autodream 传 valid_from 给 put_fact)。\n(2) docs/ 写运维段:valid_from NULL 语义 = -∞(老行/迁移行),as_of 点时查询含全区间;_now() 统一 UTC+00:00 秒级;--as-of 非 UTC 输入已归一(C1)。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:不造时间源;defer 须显式记录;文档落 docs/(如 docs/operations-bi-temporal.md 或追加 iteration log)。",
+          "files": ["autodream.py", "store.py", "llm_provider.py", "docs/"],
+          "adr_constraints": ["ADR-3"],
+          "verify": {
+            "skeptic": {
+              "focus": "valid_from 推导要么真接时间源要么显式 defer(无中间糊弄态);不造时间源;运维文档明确 NULL=-∞ + _now 格式 + as_of 归一语义",
+              "acceptance": [
+                "source_meta/transcript 无时间源时,valid_from 保持 _now() 默认 + commit/P4 显式记 defer",
+                "docs/ 有 valid_from NULL=-∞ 运维说明",
+                "pytest 全绿(无时间源时不破坏 put_fact)"
+              ]
+            },
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
+            "qa_test": null
+          }
+        },
+        {
+          "id": "C3",
+          "description": "as_of + BFS 组合深测(ADR-3/4 深测):\n加测试覆盖 use_bfs=True 与 --as-of 点时召回的组合:图构建(_build_entity_graph)与 BFS(bfs_neighbors)都透 as_of(已实现,本轮加组合断言)。场景:某 fact 在 t1 valid,t2 superseded(valid_to=t2),as_of=t1.5 时 BFS 召回应含该 fact(区间内),as_of=t3 时不含(已失效)。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:测试用隔离 tmp db(不污染 data/memory.db);断言 BFS 路径与 _temporal_clause 一致透 as_of。",
+          "files": ["test_bi_temporal.py", "test_bfs_recall.py"],
+          "adr_constraints": ["ADR-3", "ADR-4"],
+          "verify": {
+            "skeptic": {
+              "focus": "组合场景覆盖 as_of 区间内/外 × BFS 召回;tmp db 隔离不污染生产库;断言 BFS+temporal 一致",
+              "acceptance": ["test_bi_temporal/test_bfs_recall 新增 as_of+BFS 组合 case 全绿", "data/memory.db 零污染"]
+            },
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
             "qa_test": null
           }
         }
       ],
       "parallel_within": false,
+      "workflow_spec": {"implement": "sequential (C1/C2 共改 store.py)", "verify_skeptic": "parallel", "verify_qa": "skip (qa_available=false)", "fix_loop": "max 3 rounds per task"},
       "depends_on": [],
       "max_fix_rounds": 3
     },
@@ -33,69 +69,162 @@
       "type": "ultracode-workflow",
       "tasks": [
         {
-          "id": "T_B1",
-          "description": "recall() session_id 默认 os.environ.get('CLAUDE_CODE_SESSION_ID','unknown')(ADR-16a,env 取代原 --session 强制/hook 方案)。refresh_lif_on_recall 因 session_id 现有值而激活写 seen_sessions。保留可选 --session 覆盖。SKILL.md 补 env 机制说明(无需用户带 --session)。grill 简化:不拆三,无需 hook 兜底。",
-          "files": ["cli.py", "recall.py", "SKILL.md"],
-          "adr_constraints": ["ADR-16a"],
+          "id": "B1",
+          "description": "entity UNIQUE 约束(ADR-2 ①):\n(1) schema.sql entity 表加 UNIQUE(name, entity_type) 约束(独立建表路径)。\n(2) db.init 迁移:老库 CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_name_type ON entity(name, entity_type)(ALTER ADD CONSTRAINT SQLite 不支持,用 unique index);若老库已有冲突行(duplicate name+type)先不强制(生产 db 当前空,记 P4 运维:有冲突先跑 consolidate dedup)。\n(3) store.put_entity 捕 sqlite3.IntegrityError → fallback find_entity_exact 复用既有行(与 resolver 两步闸语义一致,返回既有 entity_id 不建新)。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:库空迁移零负担;fallback 与 resolver 语义一致不建孤儿。",
+          "files": ["schema.sql", "db.py", "store.py"],
+          "adr_constraints": ["ADR-2"],
           "verify": {
             "skeptic": {
-              "focus": "recall() 默认读 env fallback;env 有值时 seen_sessions 累积当前 session;无 env 时 fallback 'unknown' 不崩;--session 显式覆盖优先",
-              "acceptance": ["CLAUDE_CODE_SESSION_ID 有值时 fact.seen_sessions 含该 id", "无 env 时 fallback unknown 不崩", "--session 显式覆盖 env", "SKILL.md 更新(env 自动,无需用户带 --session)"]
+              "focus": "UNIQUE 约束 DB 级强制(unique index);put_entity IntegrityError fallback 返回既有行不建孤儿;老库迁移 IF NOT EXISTS 幂等;fallback 与 resolver find_entity_exact 语义一致",
+              "acceptance": [
+                "schema.sql entity 表含 UNIQUE(name, entity_type)(或 unique index)",
+                "并发/重复 put_entity 同 name+type → 复用既有 id 不抛错不建孤儿",
+                "pytest 全绿"
+              ]
             },
-            "general_test_hint": "单进程 python db.init(tmp) → 造 fact → os.environ['CLAUDE_CODE_SESSION_ID']='test-sid' → cli.recall('rust') → 查 seen_sessions 含 test-sid;再测无 env fallback unknown",
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
+            "qa_test": null
+          }
+        },
+        {
+          "id": "B2",
+          "description": "aliases GC + embedding 版本(ADR-2 ②③):\n(1) store 加 set_aliases(entity_id, aliases)(全量替换) + remove_aliases(entity_id, to_remove);resolver 两步合并 survivor 时,被合并实体 name 若已是 survivor alias 则不重复追加,清理无效/重复别名(GC)。\n(2) name_embedding JSON 改结构 {\"v\":[...],\"model\":\"...\",\"dim\":N};resolver._cosine_topk 与 store.backfill_entity_embedding 兼容新结构 + **双认老结构**(裸 list / '[]' / NULL → 读时检测 len 匹配惰性 re-embed,写时一律新结构)。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:双认过渡期(老库行惰性升级);GC 不误删有效别名;backfill 写新结构幂等。",
+          "files": ["store.py", "resolver.py", "embedding.py"],
+          "adr_constraints": ["ADR-2"],
+          "verify": {
+            "skeptic": {
+              "focus": "_cosine_topk 双认新 {v,model,dim}/老 裸list/'[]'/NULL;backfill 写新结构 WHERE 双认 NULL OR '[]';set_aliases/remove_aliases 正确增删;GC 不误删 survivor 有效别名",
+              "acceptance": [
+                "name_embedding 新结构含 model+dim;老结构惰性 re-embed 升级",
+                "set_aliases/remove_aliases 测试覆盖",
+                "pytest 全绿(test_resolver 含别名 GC 回归)"
+              ]
+            },
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
             "qa_test": null
           }
         }
       ],
       "parallel_within": false,
+      "workflow_spec": {"implement": "sequential (B1/B2 共改 store.py)", "verify_skeptic": "parallel", "verify_qa": "skip", "fix_loop": "max 3 rounds per task"},
       "depends_on": [],
       "max_fix_rounds": 3
     },
     {
-      "id": "C",
+      "id": "E",
       "type": "ultracode-workflow",
       "tasks": [
         {
-          "id": "T_C1",
-          "description": "update_memory_md 改清空重写:正则删所有 [mem] 前缀行(当前无 # [mem] 段标题,投影是散行)→ 重写本次投影集(ADR-16c,修 ADR-15 累积 bug)。grep 确认仅 build_index 调用,改它非违背。",
-          "files": ["projection.py"],
-          "adr_constraints": ["ADR-16c"]
+          "id": "E1",
+          "description": "churn 监控(ADR-5):\n(1) store 加 churn_stats() -> {active, deprecated, superseded, supersede_rate, active_ratio}(纯 SQL 聚合现有列 status/created_at/valid_to,无新列)。supersede_rate = superseded/(active+superseded),active_ratio = active/total。\n(2) cli 加 stats subcommand(argparse):展示 churn_stats + count_entities + fact 总数,可读格式(表格或 key:value)。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:stats 只读快照(非时间序列);降阈值自动刷新本轮不做(defer);cli 走 argv seam 可测。",
+          "files": ["store.py", "cli.py"],
+          "adr_constraints": ["ADR-5"],
+          "verify": {
+            "skeptic": {
+              "focus": "churn_stats SQL 聚合正确(supersede_rate/active_ratio 分母非零保护);stats 只读不写;cli argv seam 可测;输出可读",
+              "acceptance": [
+                "store.churn_stats() 返回正确比率(空库时分母零保护不 ZeroDivision)",
+                "cli stats subcommand argv 测试通过",
+                "pytest 全绿"
+              ]
+            },
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
+            "qa_test": null
+          }
+        }
+      ],
+      "parallel_within": false,
+      "workflow_spec": {"implement": "single task", "verify_skeptic": "single", "verify_qa": "skip", "fix_loop": "max 3 rounds"},
+      "depends_on": [],
+      "max_fix_rounds": 3
+    },
+    {
+      "id": "A",
+      "type": "ultracode-workflow",
+      "tasks": [
+        {
+          "id": "A1",
+          "description": "LLM 矛盾裁判 provider 方法(ADR-1 provider 侧):\n(1) llm_provider.Protocol 加 judge_contradiction(subject_type, subject_name, predicate, new_value, old_value) -> {\"contradiction\": bool, \"reason\": str} 方法。\n(2) ZhipuAnthropicProvider 实现 + _CONTRADICTION_PROMPT few-shot(类 dedupe_entity 风格):明确「多值谓词(uses/depends_on/contains/implements/connected_to/part_of/relates_to)新旧值共存≠矛盾;单值属性(is_a/located_in/belongs_to/国籍/位置)新旧值不同=矛盾」;NEVER 误判 related-but-distinct(如 Java语言≠Java岛);中文友好。\n(3) provider 不可达(network/key)→ 不抛,fallback 返回 {contradiction: false, reason: 'provider-unavailable'}(不阻断 ingest,记 source_meta.error)。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:返回结构固定;few-shot 防误判多值共存;provider 不可达 fallback。",
+          "files": ["llm_provider.py"],
+          "adr_constraints": ["ADR-1"],
+          "verify": {
+            "skeptic": {
+              "focus": "judge_contradiction 返回 {contradiction,reason} 结构;few-shot prompt 明确多值共存≠矛盾 / 单值不同=矛盾;防 related-but-distinct 误判;provider 不可达 fallback 不抛不阻断",
+              "acceptance": [
+                "Protocol + ZhipuAnthropicProvider.judge_contradiction 实现完整",
+                "fake provider mock 测试:单值矛盾→true / 多值共存→false / related-distinct→false",
+                "provider 不可达 fallback 返回 contradiction=false 不抛"
+              ]
+            },
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
+            "qa_test": null
+          }
         },
         {
-          "id": "T_C2",
-          "description": "cli build_index 加 session_id(默认读 env)+ UNION 查询(轨迹 seen_sessions LIKE ∪ LIF top-K,按 id 去重)(ADR-16b/g)。",
-          "files": ["cli.py"],
-          "adr_constraints": ["ADR-16b", "ADR-16g"]
-        },
-        {
-          "id": "T_C3",
-          "description": "hooks/pre-compact-mem.sh build-index 调用透传 session_id(env 自动可用,或 hook stdin 已解析的 SESSION_ID)(ADR-16b)。",
-          "files": ["hooks/pre-compact-mem.sh"],
-          "adr_constraints": ["ADR-16b"]
-        },
-        {
-          "id": "T_C4",
-          "description": "recall.py:249 score>=0.3 噪音过滤(ADR-4v2 α=0.5 对齐);cli recall 加 --top-k(默认 None 保留兼容)。投影层自动受益(低相关尾巴不灌 CC 热层)。",
-          "files": ["recall.py", "cli.py"],
-          "adr_constraints": ["ADR-16 噪音"]
+          "id": "A2",
+          "description": "autodream 矛盾 supersede 接线(ADR-1 ingest 侧):\n(1) autodream 新 fact 入库前(或入后),对同 subject_id+predicate 的已存 active fact(_has_active_for_predicate 已有)逐个调 provider.judge_contradiction(subject, predicate, new_value, old_value)。\n(2) 多值谓词 short-circuit:已知多值集 {uses,depends_on,contains,implements,connected_to,part_of,relates_to} 直接判 no-contradiction 跳过 LLM(省调用 + 防 LLM 误判共存)。\n(3) judge 返回 contradiction=true → supersede 旧 fact:store.update_fact_status(old_id, 'superseded', supersedes_id=new_id, valid_to=store._now())(复用既有 bi-temporal supersede,与 autodream.py:239 一致)。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:supersede 设 valid_to;多值 short-circuit;provider 不可达(A1 fallback contradiction=false)→ 不 supersede 不阻断;复用 _has_active_for_predicate 不新写 scan。",
+          "files": ["autodream.py"],
+          "adr_constraints": ["ADR-1"],
+          "verify": {
+            "skeptic": {
+              "focus": "矛盾 fact supersede 设 valid_to=now + supersedes_id;多值谓词 short-circuit 不调 LLM;provider 不可达不 supersede 不阻断 ingest;复用 _has_active_for_predicate + update_fact_status 不新造路径",
+              "acceptance": [
+                "fake provider mock:同 subject-predicate 单值矛盾 → 旧 fact superseded(valid_to 非空)",
+                "多值谓词同 subject-predicate 共存 → 不 supersede(LLM 不调)",
+                "provider 不可达 → 不 supersede,ingest 正常完成",
+                "pytest 全绿"
+              ]
+            },
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
+            "qa_test": null
+          }
         }
       ],
       "parallel_within": true,
-      "workflow_spec": {
-        "implement": "parallel([T_C1_impl, T_C2_impl, T_C3_impl, T_C4_impl])",
-        "verify_skeptic": "parallel([T_C1..T_C4_skeptic])",
-        "verify_qa": "none(qa_available=false)",
-        "fix_loop": "max 3 rounds per task"
-      },
-      "verify_node": {
-        "skeptic": {
-          "focus": "清空重写幂等(同 session 重跑 [mem] 段=本次投影,不累积)+ UNION 两源去重 + score>=0.3 噪音过滤 + NULL 严格 + env session 透传",
-          "acceptance": ["[mem] 段每次重写,旧行清除(无累积膨胀)", "轨迹 fact ∪ top-K 按 id 去重", "score<0.3 的 fact 不投影", "NULL source_cwd 不投影", "同 session 重跑幂等"]
+      "workflow_spec": {"implement": "parallel (A1 llm_provider / A2 autodream 不同文件)", "verify_skeptic": "parallel", "verify_qa": "skip", "fix_loop": "max 3 rounds per task"},
+      "depends_on": ["C"],
+      "max_fix_rounds": 3
+    },
+    {
+      "id": "D",
+      "type": "ultracode-workflow",
+      "tasks": [
+        {
+          "id": "D1",
+          "description": "recall bfs hint + 跨 cwd scoped opt-in(ADR-4):\n(1) recall() direct-match 薄(候选数 < 阈值,或 entity-match 为空)且 use_bfs=False 时,返回结构加 suggest_bfs=True 提示字段;cli recall 显示「💡 direct-match 薄,可加 --bfs 扩展图近召回」(stderr 或结果尾,不污染 stdout 机器输出)。\n(2) 跨 cwd BFS 门控 = opt-in --bfs-scoped flag(default off 保持全局图,契合 ADR-14 单体 KG 跨 cwd 共享);on 时 _build_entity_graph 加 source_cwd 过滤(图更精确更小)。recall() 透 use_bfs_scoped 给 _build_entity_graph。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:hint 不改 default recall(只加字段);suggest_bfs 仅 direct-match 薄 + use_bfs=False 触发;--bfs-scoped default off 逐字零回归。",
+          "files": ["recall.py", "cli.py"],
+          "adr_constraints": ["ADR-4"],
+          "verify": {
+            "skeptic": {
+              "focus": "suggest_bfs 仅 direct-match 薄 + use_bfs=False 触发,default recall 行为不变;--bfs-scoped default off 零回归;on 时 _build_entity_graph 加 cwd 过滤;hint 不污染 stdout 机器输出",
+              "acceptance": [
+                "default recall(use_bfs=False)行为逐字不变,pytest 零回归",
+                "direct-match 薄时 suggest_bfs=True;候选足时 False",
+                "--bfs-scoped on 时 graph 含 cwd 过滤;off 时全局图"
+              ]
+            },
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
+            "qa_test": null
+          }
         },
-        "general_test_hint": "单进程 python db.init(tmp) → 造 F1(seen_sessions 含 sid, source_cwd=cwd, score 高) + F2(LIF 高, score 高) + F3(低 score 噪音) → build_index(scope=cwd, session=sid, memory_dir=tmp) → 断言 [mem] 段含 F1/F2 不含 F3;再跑一次断言行数不变(幂等,无累积)",
-        "qa_test": null
-      },
-      "depends_on": ["A", "B"],
+        {
+          "id": "D2",
+          "description": "BFS + use_vec 组合深测(ADR-4 深测):\n加测试覆盖 use_bfs=True 与 --vector(向量召回)组合:图近 fact(BFS hop>0)+ 语义近 fact(vec_sim)双路候选并入,scoring 融合(BFS_WEIGHT·bfs_proximity + DELTA_VEC·vec_sim)正确。场景:query 语义近 fact A(无图连)+ 图近 fact B(BFS hop=1,A↔B 同实体),两路都召回且 score 合理。\n测试规范(加测试时必读):必须用 def test_xxx() 函数让 pytest 收集,禁止模块级裸 assert+print(pytest 不收集=死代码=假绿,本项目头号雷区)。验证 python -m pytest -q 收集数应增长。既有 test_bi_temporal/test_bfs_recall 的裸 assert 是历史债勿复制。约束:tmp db 隔离;断言双路候选 union 不丢。",
+          "files": ["test_bfs_recall.py"],
+          "adr_constraints": ["ADR-4"],
+          "verify": {
+            "skeptic": {
+              "focus": "组合双路候选(图近+语义近)union 不丢;score 融合 BFS_WEIGHT+DELTA_VEC 正确;tmp db 隔离",
+              "acceptance": ["test_bfs_recall 新增 use_bfs+vector 组合 case 全绿", "data/memory.db 零污染"]
+            },
+            "general_test": {"verify_signals": [{"signal": "exit_code", "cmd": "python -m pytest -q", "expect": 0}]},
+            "qa_test": null
+          }
+        }
+      ],
+      "parallel_within": true,
+      "workflow_spec": {"implement": "parallel (D1 recall/cli / D2 test 不同文件)", "verify_skeptic": "parallel", "verify_qa": "skip", "fix_loop": "max 3 rounds per task"},
+      "depends_on": ["C"],
       "max_fix_rounds": 3
     }
   ],

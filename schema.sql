@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS fact (
     last_accessed_at TEXT,                          -- recall refresh timestamp (drives lif_recency)
     seen_sessions   TEXT NOT NULL DEFAULT '[]',     -- JSON array: sessions that recalled this fact (drives lif_spread)
     source_cwd    TEXT,                             -- ADR-14: 来源 cwd(b 方案, 跨 cwd 隔离; NULL=老数据/未知, recall --cwd 过滤含 NULL)
+    topic        TEXT,                              -- ADR-C: LLM 生成的一句话可读事实(投影 filename slug + index title + description)
     created_at    TEXT NOT NULL,
     FOREIGN KEY (subject_id) REFERENCES entity(id),
     FOREIGN KEY (object_id)  REFERENCES entity(id),

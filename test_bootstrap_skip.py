@@ -49,7 +49,7 @@ def test_bootstrap_skips_mem_service_projection():
 
     # Fake provider: 记录收到的 text，验证 mem-x.md 没有被喂进去
     provider = FakeProvider(
-        EdgeOut("用户", "uses", "rust"),
+        EdgeOut("用户", "uses", "rust", topic="用户使用 rust"),
         [EntityOut("用户", "person"), EntityOut("rust", "tool")],
     )
 

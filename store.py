@@ -104,6 +104,7 @@ def put_fact(
     last_accessed_at: str | None = None,
     seen_sessions: list[str] | None = None,
     source_cwd: str | None = None,
+    topic: str | None = None,
 ) -> str:
     """Insert a Fact (reified), return its id.
 
@@ -116,6 +117,9 @@ def put_fact(
     (no composition). ``lif_source`` defaults to ``SOURCE_WEIGHT[extractor]``
     (regex=0.4) when None — see consolidate.SOURCE_WEIGHT for the canonical
     table.
+
+    ``topic`` (ADR-C): LLM 生成的一句话可读事实, 投影 filename slug + index
+    title + description 的唯一来源。None/空 → 投影回退到三元组拼接。
     """
     conn = db.get_conn()
     fid = fact_id or _uid()
@@ -129,8 +133,8 @@ def put_fact(
             fact_type, LIF, original_lif, confidence, source_refs, extractor,
             status, supersedes_id, created_at,
             lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
-            access_count, last_accessed_at, seen_sessions, source_cwd)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            access_count, last_accessed_at, seen_sessions, source_cwd, topic)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fid, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, frozen_lif, confidence,
@@ -139,7 +143,7 @@ def put_fact(
             lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
             access_count, last_accessed_at,
             json.dumps(seen_sessions or [], ensure_ascii=False),
-            source_cwd,
+            source_cwd, topic,
         ),
     )
     conn.commit()
@@ -210,4 +214,5 @@ def _decode_fact(row: Any) -> dict[str, Any]:
         "last_accessed_at": row["last_accessed_at"],
         "seen_sessions": json.loads(row["seen_sessions"]) if row["seen_sessions"] else [],
         "source_cwd": row["source_cwd"] if "source_cwd" in row.keys() else None,
+        "topic": row["topic"] if "topic" in row.keys() else None,
     }

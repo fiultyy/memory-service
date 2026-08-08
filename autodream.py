@@ -184,6 +184,7 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
         value = (edge.object or "").strip()
         if not subject or not predicate or not value:
             continue
+        topic = (edge.topic or "").strip() or None  # ADR-C: 投影 slug/title/desc 源
 
         if subject not in name_to_id:
             sid = _resolve_subject(subject, name_to_type.get(subject, "concept"))
@@ -239,6 +240,7 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 source_cwd=source_cwd,
                 source_refs=[src_ref] if src_ref else [],
                 seen_sessions=[session_id] if session_id else [],
+                topic=topic,
             )
             for old in contradicting:
                 store.update_fact_status(old["id"], "superseded", supersedes_id=new_id)
@@ -258,6 +260,7 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
             source_cwd=source_cwd,
             source_refs=[src_ref] if src_ref else [],
             seen_sessions=[session_id] if session_id else [],
+            topic=topic,
         )
         added += 1
 

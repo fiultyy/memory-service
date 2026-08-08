@@ -118,6 +118,7 @@ def ingest(text: str, source_ref: str | None = None,
             fact_type=fact_type,
             source_cwd=source_cwd,
             source_refs=source_refs,
+            topic=(edge.topic or "").strip() or None,  # ADR-C: LLM 可读一句话
         )
         fact_ids.append(fid)
 

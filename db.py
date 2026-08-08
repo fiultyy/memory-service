@@ -38,6 +38,9 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
     if "source_cwd" not in cols:
         conn.execute("ALTER TABLE fact ADD COLUMN source_cwd TEXT")
+    # ADR-C migration: 老 db fact 表无 topic 列 → ALTER ADD。
+    if "topic" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN topic TEXT")
     conn.commit()
     _conn = conn
     _conn_path = str(path)

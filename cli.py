@@ -83,21 +83,36 @@ def ingest(text: str, source_ref: str | None = None,
 
     # name → entity_id cache (this ingest's working set).
     name_to_id: dict[str, str] = {}
+    # name → type map (entities carry their declared type; edges fall back to
+    # the cache or a default — R1 档 1: no more hardcoded "inferred").
+    name_to_type: dict[str, str] = {}
 
+    # Phase 1: persist declared entities (R1 档 1 — entities first, edges after).
+    # TODO Tier 2: persist aliases (put_entity properties.alias) + lookup by alias.
+    for ent in extracted.entities:
+        if not ent.name:
+            continue
+        eid = _ensure_entity(ent.name, ent.type, name_to_id)
+        if eid is not None:
+            name_to_type[ent.name] = ent.type
+
+    # Phase 2: edges. subject AND object both resolve to entities (R1 §A2 hard
+    # rule: object is a declared entity reference, never a free string) →
+    # object_id 必非空 → entity↔entity edges emerge.
     fact_ids: list[str] = []
-    for fact in extracted.facts:
-        subj_id = _ensure_entity(fact.subject, name_to_id)
+    for edge in extracted.edges:
+        subj_id = _ensure_entity(edge.subject, name_to_type.get(edge.subject, "concept"),
+                                 name_to_id)
         if subj_id is None:
             continue
-        # Object may be a multi-word phrase; store as literal value AND try to
-        # link an object entity if the object name was seen this ingest. ADR-3:
-        # object is value-carrier; object_id optional. Prefer linking when known.
-        obj_name = fact.object
-        obj_id = name_to_id.get(obj_name)
+        # object is guaranteed declared (adapter drops dangling refs); still
+        # _ensure_entity both sides so it lands as an entity.
+        obj_id = _ensure_entity(edge.object, name_to_type.get(edge.object, "concept"),
+                                name_to_id)
         fid = store.put_fact(
             subject_id=subj_id,
-            predicate=fact.predicate,
-            value=obj_name,
+            predicate=edge.predicate,
+            value=edge.object,  # backward-compat display value
             object_id=obj_id,
             extractor=ext_label,
             fact_type=fact_type,
@@ -109,12 +124,14 @@ def ingest(text: str, source_ref: str | None = None,
     return {"entities": len(name_to_id), "facts": fact_ids}
 
 
-def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
-    """Resolve a fact subject/object to an entity id, creating it if needed.
+def _ensure_entity(name: str, entity_type: str, cache: dict[str, str]) -> str | None:
+    """Resolve a name to an entity id, creating it if needed.
 
-    Subjects/objects from relation patterns may be phrases not caught by the
-    entity patterns (e.g. "用户", "笔记工具"); we still persist them as entities
-    so the KG is navigable. None only on empty.
+    ``entity_type`` is the LLM-declared type (component/protocol/tool/...);
+    for an edge endpoint whose name wasn't in entities[] the caller passes a
+    default. Existing entities are reused (exact-name match) regardless of the
+    requested type — type is set at creation, not overwritten. None only on
+    empty name. (R1 档 1: deleted the hardcoded "inferred" — type now flows in.)
     """
     if not name:
         return None
@@ -124,7 +141,7 @@ def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
     if existing:
         eid = existing[0]["id"]
     else:
-        eid = store.put_entity(name, "inferred")
+        eid = store.put_entity(name, entity_type)
     cache[name] = eid
     return eid
 

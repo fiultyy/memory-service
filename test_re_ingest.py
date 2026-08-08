@@ -5,15 +5,17 @@ from pathlib import Path
 
 import db
 import bootstrap
-from llm_provider import Extraction, FactOut
+from llm_provider import EdgeOut, EntityOut, Extraction
 
 # mock provider (复用 _demo 模式)
 class _Fake:
     base_url = None
     def extract_facts(self, text: str):
         # 固定返回 (用户, uses, rust)
-        return Extraction(facts=[FactOut("用户", "uses", "rust")],
-                          confidence=0.7, source_meta={"provider": "fake"})
+        return Extraction(
+            entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
+            edges=[EdgeOut("用户", "uses", "rust")],
+            confidence=0.7, source_meta={"provider": "fake"})
 
 # db.init(tmp) 隔离
 tmpdir = tempfile.mkdtemp()

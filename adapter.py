@@ -17,8 +17,9 @@ import os
 import re
 
 from llm_provider import (
+    EdgeOut,
+    EntityOut,
     Extraction,
-    FactOut,
     LLMProvider,
     ZhipuAnthropicProvider,
 )
@@ -56,10 +57,11 @@ def extract_facts(
     - **No reachable provider ⇒ ``RuntimeError``** (block; regex fallback removed).
     - Otherwise: fan out ``wings`` calls across the providers (round-robin when
       len(providers) < wings), vote on identical (subject, predicate, object)
-      triples (quorum ⌈n/2⌉), aggregate confidence as the max.
+      edge triples (quorum ⌈n/2⌉), union entities across wings, aggregate
+      confidence as the max.
     - Empty vote **with provider errors** ⇒ ``RuntimeError`` (LLM unavailable:
       no key / network / parse). Empty vote **without errors** ⇒ returned
-      as-is (the LLM legitimately found no fact).
+      as-is (the LLM legitimately found no edge).
     """
     if providers is None:
         providers = default_providers()
@@ -86,12 +88,12 @@ def extract_facts(
         extractions = list(ex.map(_wing, range(wings)))
 
     voted = _vote(extractions)
-    if not voted.facts:
+    if not voted.edges:
         errs = [e.source_meta.get("error") for e in extractions
                 if e.source_meta.get("error")]
         if errs:
             raise RuntimeError(
-                f"LLM providers returned no facts (errors: {errs[:2]}). "
+                f"LLM providers returned no edges (errors: {errs[:2]}). "
                 "regex fallback removed — block instead of silent low-quality ingest.")
     return voted
 
@@ -108,40 +110,67 @@ def _is_env_entity(name: str) -> bool:
 
 
 def _vote(extractions: list[Extraction]) -> Extraction:
-    """Majority vote per (subject, predicate, object) triple; confidence = max.
+    """Vote edges by quorum majority; union entities across wings; confidence = max.
 
-    case-fold 投票 key (A2A/a2a 合并达 quorum), 但 surviving 保留原 FactOut
-    (大小写原样存 KG)。ponytail: 最浅归一 (case-fold only), 不做 lemmatize/
-    alias (upgrade path)。A triple survives if it appears in ≥ ⌈n/2⌉ wings.
+    - **edges**: per (subject, predicate, object) case-fold key, a triple
+      survives if ≥ ⌈n/2⌉ wings produced it. Surviving edge keeps the first
+      wing's surface form (case preserved). Same logic as the old fact vote,
+      now on ext.edges.
+    - **entities**: cross-wing union, dedupe by case-fold name (keep first
+      surface form, merge aliases). R1 does not require entity voting —
+      union+dedupe suffices.
+    - env-pattern filter (_is_env_entity) applies to entity.name AND edge
+      subject/object.
 
-    #2: 过滤 env-pattern entity (全大写下划线) 作为 subject/object 的 fact。
+    ponytail: 最浅归一 (case-fold only) — no lemmatize/alias store (Tier 2).
     """
     n = len(extractions)
     quorum = (n + 1) // 2  # ⌈n/2⌉: 3→2, 2→1, 1→1
-    triple_wings: dict[tuple[str, str, str], list[tuple[int, FactOut]]] = {}
-    for wi, ext in enumerate(extractions):
-        for f in ext.facts:
-            key = (f.subject.strip().lower(), f.predicate.strip().lower(),
-                   f.object.strip().lower())
-            triple_wings.setdefault(key, []).append((wi, f))
 
-    surviving: list[FactOut] = []
+    # ── edges: quorum vote ──
+    triple_wings: dict[tuple[str, str, str], list[tuple[int, EdgeOut]]] = {}
+    for wi, ext in enumerate(extractions):
+        for e in ext.edges:
+            key = (e.subject.strip().lower(), e.predicate.strip().lower(),
+                   e.object.strip().lower())
+            triple_wings.setdefault(key, []).append((wi, e))
+
+    surviving: list[EdgeOut] = []
     contributing_confidences: list[float] = []
     agree_hist: list[int] = []
-    for key, wing_facts in triple_wings.items():
-        agree_hist.append(len(wing_facts))
-        if len(wing_facts) >= quorum:
-            fact = wing_facts[0][1]  # 保留首个原 FactOut (大小写原样)
-            # #2: 过滤 env-pattern (subject 或 object 匹配 env 变量名则跳过)
-            if _is_env_entity(fact.subject) or _is_env_entity(fact.object):
+    for key, wing_edges in triple_wings.items():
+        agree_hist.append(len(wing_edges))
+        if len(wing_edges) >= quorum:
+            edge = wing_edges[0][1]  # first surface form (case preserved)
+            # env-pattern filter: skip if subject or object is an env var name
+            if _is_env_entity(edge.subject) or _is_env_entity(edge.object):
                 continue
-            surviving.append(fact)
-            for wi, _ in wing_facts:
+            surviving.append(edge)
+            for wi, _ in wing_edges:
                 contributing_confidences.append(extractions[wi].confidence)
+
+    # ── entities: union + dedupe by case-fold name ──
+    seen_cf: dict[str, EntityOut] = {}
+    for ext in extractions:
+        for ent in ext.entities:
+            if _is_env_entity(ent.name):
+                continue
+            cf = ent.name.strip().lower()
+            if not cf:
+                continue
+            if cf in seen_cf:
+                # merge aliases (keep first surface form)
+                merged = seen_cf[cf]
+                for a in ent.aliases:
+                    if a and a not in merged.aliases:
+                        merged.aliases.append(a)
+            else:
+                seen_cf[cf] = EntityOut(
+                    name=ent.name, type=ent.type, aliases=list(ent.aliases))
 
     conf = max(contributing_confidences) if contributing_confidences else 0.0
     return Extraction(
-        facts=surviving, confidence=conf,
+        entities=list(seen_cf.values()), edges=surviving, confidence=conf,
         source_meta={
             "wings": n, "quorum": quorum,
             "agreement": sorted(agree_hist, reverse=True),
@@ -205,11 +234,16 @@ def _demo() -> None:  # ponytail self-check (mock provider, no network)
     class _Fake:
         base_url = None
         def extract_facts(self, text: str) -> Extraction:
-            return Extraction(facts=[FactOut("用户", "uses", "rust")],
-                              confidence=0.7, source_meta={"provider": "fake"})
+            return Extraction(
+                entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
+                edges=[EdgeOut("用户", "uses", "rust")],
+                confidence=0.7, source_meta={"provider": "fake"})
 
     r = extract_facts("用户使用 rust", providers=[_Fake()])
-    assert r.facts and r.confidence >= 0.6, (r.facts, r.confidence)
+    assert r.edges and r.confidence >= 0.6, (r.edges, r.confidence)
+    # entity union dedupe + both endpoints declared
+    names = {e.name for e in r.entities}
+    assert {"用户", "rust"} <= names, names
     # 无 provider → block (不降级 regex)
     try:
         extract_facts("x", providers=[])
@@ -217,7 +251,7 @@ def _demo() -> None:  # ponytail self-check (mock provider, no network)
         pass
     else:
         raise AssertionError("expected RuntimeError on no reachable provider")
-    print("adapter ok:", r.facts[0])
+    print("adapter ok:", r.edges[0])
 
 
 if __name__ == "__main__":

@@ -227,13 +227,15 @@ def prune_deleted(
 def _demo() -> None:  # ponytail self-check (mock provider, no network)
     import os
     import tempfile as _t
-    from llm_provider import Extraction, FactOut
+    from llm_provider import EdgeOut, EntityOut, Extraction
 
     class _Fake:
         base_url = None
         def extract_facts(self, text: str):
-            return Extraction(facts=[FactOut("用户", "uses", "rust")],
-                              confidence=0.7, source_meta={"provider": "fake"})
+            return Extraction(
+                entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
+                edges=[EdgeOut("用户", "uses", "rust")],
+                confidence=0.7, source_meta={"provider": "fake"})
 
     d = _t.mkdtemp()
     open(os.path.join(d, "x.md"), "w").write("用户使用 rust")

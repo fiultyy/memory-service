@@ -27,16 +27,29 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 
-# ── Normalized return shape (ADR-5b: facts[], confidence, source_meta) ───
+# ── Normalized return shape (graph-aware: entities[] + edges[], R1 档 1) ──
+#
+# Breaking change vs ADR-5b: ``FactOut`` deleted, ``Extraction.facts`` deleted.
+# The old schema was *graph-blind* — object was a free string, never a declared
+# entity reference → object_id 恒 NULL → zero entity↔entity edges (R1 §0).
+# New shape (LangChain _Graph + Graphiti Edge + 封闭谓词融合): edges reference
+# *declared* entity names; subject AND object both resolve to entities.
 
 @dataclass
-class FactOut:
-    """One fact surfaced by an LLM provider, in extractor.py's shape.
+class EntityOut:
+    """One declared entity. ``name`` is the verbatim surface form an edge
+    references (case preserved). ``type`` from the closed enum; aliases are
+    alternative spellings (P0 not yet persisted — Tier 2)."""
+    name: str
+    type: str = "concept"
+    aliases: list[str] = field(default_factory=list)
 
-    Mirrors ``extractor._extract_facts`` output so the adapter/cli can route
-    LLM facts and regex facts through the same store path: subject/predicate/
-    object are *names*, the cli resolves them to entity ids.
-    """
+
+@dataclass
+class EdgeOut:
+    """One edge between two *declared* entities. subject/object MUST be a
+    name appearing in ``EntityOut.name`` (enforced by prompt + cli/autodream
+    resolve both sides to entities). predicate from the closed 9-set."""
     subject: str
     predicate: str
     object: str
@@ -44,10 +57,11 @@ class FactOut:
 
 @dataclass
 class Extraction:
-    """Provider/adapter output: facts + an aggregate confidence ∈ [0,1] +
-    opaque source metadata (provider name, model, raw response bits for
-    debugging). Empty ``facts`` + confidence 0.0 = "nothing extracted"."""
-    facts: list[FactOut] = field(default_factory=list)
+    """Provider/adapter output: declared entities + edges between them, an
+    aggregate confidence ∈ [0,1], and opaque source metadata. Empty
+    entities/edges + confidence 0.0 = "nothing extracted"."""
+    entities: list[EntityOut] = field(default_factory=list)
+    edges: list[EdgeOut] = field(default_factory=list)
     confidence: float = 0.0
     source_meta: dict[str, Any] = field(default_factory=dict)
 
@@ -65,20 +79,36 @@ class LLMProvider(Protocol):
     def extract_facts(self, text: str) -> Extraction: ...
 
 
-# Fixed prompt: zero-shot fact extraction → strict JSON. One prompt, no
-# variation: per-call variation (the "butterfly wing" diversity) lives in the
-# adapter (prompt transforms / multi-provider), not here. ponytail: a single
+# Fixed two-step prompt: declare entities first, then edges between declared
+# entities (R1 §A3). object is ALWAYS another declared entity, never a free
+# phrase → cli/autodream _ensure_entity both sides → object_id 必非空 →
+# entity↔entity edges emerge (graph-blind schema fixed). One prompt; per-call
+# butterfly-wing diversity lives in the adapter, not here. ponytail: a single
 # hardened prompt beats N hand-tuned variants at v3-stage-1 scale.
-_EXTRACT_PROMPT = """从下面的文本抽取事实三元组,只返回 JSON。
-格式: {"facts": [{"subject": "...", "predicate": "...", "object": "..."}]}
-predicate 从这些里选: is_a, uses, depends_on, contains, belongs_to, implements, connected_to, part_of, relates_to
-规则:
-- 保留专有名词/技术术语/缩略词(如 a2a, mesh, A2A, ratatui, pydantic-ai)原样作为 subject/object,不要泛化成"系统/框架/agent"。
-- 同义不同写法(a2a/A2A)视为同一实体,用原文形式。
-- 找不到任何事实就返回 {"facts": []},不要解释。
+_EXTRACT_PROMPT = """你是知识图谱抽取器。分两步,只返回 JSON。
+
+第一步:从文本里抽出全部实体。每个实体:
+- name: 专有名词/技术术语原样(保留 a2a/A2A/ratatui/pydantic-ai 原形),同一实体只声明一次,用最完整的写法
+- type: 从 [component, protocol, tool, architecture, concept, org, person] 里选一个
+- aliases: 该实体在文中出现过的其他写法(大小写/连字符/缩写),没有就空数组
+
+第二步:在【已声明的实体】之间抽边。每条边:
+- subject / object: 必须是上面 entities 里出现过的 name(原样,不可改写)
+- predicate: 从 [is_a, uses, depends_on, contains, belongs_to, implements, connected_to, part_of, relates_to] 里选
+
+硬规则:
+- object 永远是【另一个实体】,不是描述性短语。如果某关系的目标是描述(如"是一种去中心化协议"),把它拆成:先声明该描述为实体,再连边。
+- edges 里每个 subject / object 必须 verbatim 出现在 entities[].name 里。
+- 找不到任何实体/边就返回 {"entities": [], "edges": []},不要解释。
+
+输出格式:
+{"entities": [{"name":"...","type":"...","aliases":[...]}],
+ "edges":    [{"subject":"...","predicate":"...","object":"..."}]}
+
 示例:
 文本: native agent 自成 A2A 节点, 形成内部 mesh
-{"facts": [{"subject": "native agent", "predicate": "is_a", "object": "A2A node"}, {"subject": "native agent", "predicate": "part_of", "object": "A2A mesh"}]}
+{"entities": [{"name":"native agent","type":"component","aliases":[]},{"name":"A2A","type":"protocol","aliases":["a2a"]},{"name":"mesh","type":"architecture","aliases":[]}],
+ "edges":    [{"subject":"native agent","predicate":"is_a","object":"A2A"},{"subject":"native agent","predicate":"part_of","object":"mesh"}]}
 文本: """
 
 
@@ -125,9 +155,9 @@ class ZhipuAnthropicProvider:
             return Extraction(confidence=0.0, source_meta={
                 "provider": "zhipu", "model": self.model,
                 "error": "no content block", "raw": raw[:200]})
-        facts = _parse_facts(content)
-        conf = 0.7 if facts else 0.0
-        return Extraction(facts=facts, confidence=conf,
+        entities, edges = _parse_facts(content)
+        conf = 0.7 if edges else 0.0
+        return Extraction(entities=entities, edges=edges, confidence=conf,
                           source_meta={"provider": "zhipu", "model": self.model})
 
 
@@ -149,32 +179,57 @@ def _extract_text(raw: str) -> str | None:
     return None
 
 
-def _parse_facts(content: str) -> list[FactOut]:
+def _parse_facts(content: str) -> tuple[list[EntityOut], list[EdgeOut]]:
     """Best-effort JSON extraction from the model's text response.
 
     Models occasionally wrap JSON in prose or fences; find the first {...}
-    blob and parse that. Malformed → empty list (provider-level failure
-    surfaces as confidence 0.0; adapter fallback handles it).
+    blob and parse that. Returns (entities, edges). Malformed → ([], [])
+    (provider-level failure surfaces as confidence 0.0; adapter handles it).
+
+    Hard rule enforced here: an edge whose subject/object is NOT verbatim in
+    entities[].name is dropped (R1 §A2 hard constraint — keeps the graph
+    well-formed; matches Graphiti/LangChain rejection of dangling refs).
     """
     start = content.find("{")
     end = content.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        return []
+        return [], []
     try:
         doc = json.loads(content[start:end + 1])
     except json.JSONDecodeError:
-        return []
-    out: list[FactOut] = []
-    for f in doc.get("facts", []):
+        return [], []
+
+    entities: list[EntityOut] = []
+    for e in doc.get("entities", []):
         try:
-            out.append(FactOut(
-                subject=str(f["subject"]).strip(),
-                predicate=str(f["predicate"]).strip(),
-                object=str(f["object"]).strip(),
-            ))
+            name = str(e["name"]).strip()
+            if not name:
+                continue
+            etype = str(e.get("type") or "concept").strip() or "concept"
+            raw_aliases = e.get("aliases") or []
+            aliases = [str(a).strip() for a in raw_aliases
+                       if isinstance(a, (str, int, float)) and str(a).strip()]
+            entities.append(EntityOut(name=name, type=etype, aliases=aliases))
         except (KeyError, TypeError):
             continue
-    return out
+
+    declared = {ent.name for ent in entities}
+    edges: list[EdgeOut] = []
+    for f in doc.get("edges", []):
+        try:
+            subj = str(f["subject"]).strip()
+            obj = str(f["object"]).strip()
+            pred = str(f["predicate"]).strip()
+            if not subj or not obj or not pred:
+                continue
+            # R1 §A2: edge endpoints must be declared entity names. Drop
+            # dangling refs (LLM 遵守 prompt 但仍可能漏 → 不污染 graph).
+            if subj not in declared or obj not in declared:
+                continue
+            edges.append(EdgeOut(subject=subj, predicate=pred, object=obj))
+        except (KeyError, TypeError):
+            continue
+    return entities, edges
 
 
 # ── Stub providers (ADR-5b "备", concrete impl deferred to a deploy target) ─

@@ -287,6 +287,18 @@ def stats() -> dict[str, Any]:
     }
 
 
+# ── dream-daemon (operational #1: 常驻 autodream loop) ──────────────
+
+def dream_daemon(cwd: str | None = None, interval: int = 30, once: bool = False) -> int:
+    """启动 autoDream daemon: 常驻进程 watch CC transcript 增长 → 增量 dream。
+
+    详见 ``mem_daemon.run``。CC flag ``tengu_onyx_plover`` 未开时走文件 watch
+    (有 idle/延迟风险); flag 开后 CC 主动 push trigger.json 触发即时 dream。
+    """
+    import mem_daemon
+    return mem_daemon.run(cwd=cwd, interval=interval, once=once)
+
+
 # ── argv entry ──────────────────────────────────────────────────────
 
 def _main(argv: list[str] | None = None) -> int:
@@ -374,6 +386,13 @@ def _main(argv: list[str] | None = None) -> int:
                    help="回填 active fact value → L2 embedding cache (ADR-13 向量通电)")
     sub.add_parser("stats",
                    help="只读 churn 快照 (ADR-5): entity/fact 计数 + supersede_rate/active_ratio")
+    dd = sub.add_parser("dream-daemon",
+                        help="启动 autoDream daemon(常驻 autodream loop, operational #1)")
+    dd.add_argument("--cwd", default=None, help="project cwd to watch(默认 $PWD)")
+    dd.add_argument("--interval", type=int, default=30,
+                    help="poll interval seconds(默认 30)")
+    dd.add_argument("--once", action="store_true",
+                    help="single sweep, no loop(smoke test / cron mode)")
 
     args = p.parse_args(argv)
     if args.cmd == "ingest":
@@ -409,6 +428,9 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(embed_backfill(), ensure_ascii=False))
     elif args.cmd == "stats":
         print(json.dumps(stats(), ensure_ascii=False))
+    elif args.cmd == "dream-daemon":
+        # daemon runs its own loop (blocking); returns exit code, not JSON.
+        return dream_daemon(cwd=args.cwd, interval=args.interval, once=args.once)
     return 0
 
 

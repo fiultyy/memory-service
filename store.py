@@ -39,6 +39,11 @@ def put_entity(name: str, entity_type: str, properties: dict[str, Any] | None = 
     名称向量(JSON list); None → [](空)。**put_entity 不做网络 I/O** — embedding 计算
     属 resolver(Node B step 2 算一次, 显式传入); store 是纯存储原语。这样 entity 创建
     不耦合 embedding provider(离线/防火墙不 block, 测试不污染 embeddings.db)。
+
+    ADR-2 ①: UNIQUE(name, entity_type) 约束在并发 re-ingest 同实体竞态时抛
+    IntegrityError → fallback find_entity_exact 复用既有行(与 resolver 两步闸语义一致,
+    不建孤儿, 返回既有 entity_id 不建新)。fallback 查无(case-insensitive 无命中, 仅
+    exact-case 冲突)则按 find_entities_by_name 取同 type 既有行; 仍无则重抛(不应发生)。
     """
     conn = db.get_conn()
     eid = entity_id or _uid()
@@ -46,19 +51,33 @@ def put_entity(name: str, entity_type: str, properties: dict[str, Any] | None = 
         aliases = []
     if name_embedding is None:
         name_embedding = []  # resolver owns embedding; store stays network-free
-    conn.execute(
-        "INSERT INTO entity (id, name, entity_type, properties, aliases, name_embedding, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            eid, name, entity_type,
-            json.dumps(properties or {}, ensure_ascii=False),
-            json.dumps(aliases, ensure_ascii=False),
-            json.dumps(name_embedding, ensure_ascii=False),
-            _now(),
-        ),
-    )
-    conn.commit()
-    return eid
+    try:
+        conn.execute(
+            "INSERT INTO entity (id, name, entity_type, properties, aliases, name_embedding, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                eid, name, entity_type,
+                json.dumps(properties or {}, ensure_ascii=False),
+                json.dumps(aliases, ensure_ascii=False),
+                _encode_embedding(name_embedding),
+                _now(),
+            ),
+        )
+        conn.commit()
+        return eid
+    except sqlite3.IntegrityError:
+        # UNIQUE(name, entity_type) 冲突 — 并发 re-ingest 同实体。复用既有行, 不建孤儿。
+        # 回滚未提交的 INSERT(防事务脏状态影响后续查询)。
+        conn.rollback()
+        # 先 find_entity_exact(与 resolver step1 同语义: case-insensitive name+alias),
+        # 命中且 type 一致 → 复用; 否则按 (name, entity_type) 精确查(约束保证存在)。
+        hit = find_entity_exact(name)
+        if hit is not None and hit["entity_type"] == entity_type:
+            return hit["id"]
+        same_type = find_entities_by_name(name, entity_type)
+        if same_type:
+            return same_type[0]["id"]
+        raise  # 不应发生: IntegrityError 必有同 (name, entity_type) 行; 重抛暴露不一致
 
 
 def get_entity(entity_id: str) -> dict[str, Any] | None:
@@ -87,6 +106,42 @@ def find_entities_by_name(name: str, entity_type: str | None = None) -> list[dic
     return [_decode_entity(r) for r in rows]
 
 
+# ADR-2③: name_embedding JSON 双认过渡期。
+# 新结构: {"v":[...], "model":"...", "dim":N}; 老结构: 裸 list / '[]' / NULL。
+# 写一律新结构(写入端单一源); 读时双认(_decode_embedding 归一到 list[float])。
+# 模型升级维度变 → _cosine_topk 读时检测 len 不匹配惰性 re-embed 升级(过渡期)。
+_EMB_MODEL = "qwen3-embedding-4b"  # ADR-13 默认 provider 模型; 与 embedding.default_providers 对齐
+
+
+def _encode_embedding(vec: list[float] | None, model: str | None = None) -> str:
+    """写时一律新结构 {"v":[...],"model":"...","dim":N}; 空向量 → '[]'(空标记, 不填 model)。"""
+    if not vec:
+        return "[]"
+    return json.dumps(
+        {"v": list(vec), "model": model or _EMB_MODEL, "dim": len(vec)},
+        ensure_ascii=False,
+    )
+
+
+def _decode_embedding(raw: Any) -> list[float]:
+    """读时双认: 新结构 {"v":[...],...} → v; 老结构 裸 list / '[]' / NULL → []。
+
+    归一到 list[float](consumer 一律拿 list)。model/dim 信息留在 JSON 里供
+    全库 re-embed 后迁移判定; 维度升级路径在 _cosine_topk 按 len 惰性 re-embed。
+    """
+    if raw is None:
+        return []
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(doc, dict):  # 新结构
+        return list(doc.get("v") or [])
+    if isinstance(doc, list):  # 老结构裸 list
+        return list(doc)
+    return []
+
+
 def _decode_entity(row: Any) -> dict[str, Any]:
     _r = dict(row)  # sqlite3.Row → dict (防御老 row 无键)
     return {
@@ -95,7 +150,7 @@ def _decode_entity(row: Any) -> dict[str, Any]:
         "entity_type": _r["entity_type"],
         "properties": json.loads(_r["properties"]) if _r["properties"] else {},
         "aliases": json.loads(_r.get("aliases") or "[]"),
-        "name_embedding": json.loads(_r.get("name_embedding") or "[]"),
+        "name_embedding": _decode_embedding(_r.get("name_embedding")),
         "created_at": _r["created_at"],
     }
 
@@ -123,7 +178,9 @@ def backfill_entity_embedding(entity_id: str, name_embedding: list[float] | None
 
     空向量不回填(离线 emb=[] 不覆盖既有向量)。只填"空"行 — 空同时认 ``NULL``
     (老库 ALTER ADD name_embedding 无 DEFAULT → 迁移行 = NULL)和 ``'[]'``(离线
-    INSERT 行)。两者都得认: 只写 ``'[]'`` 会漏老库 NULL 行(两轮核查逼出的关键点)。
+    INSERT 行 / 新结构空标记)。两者都得认: 只写 ``'[]'`` 会漏老库 NULL 行。
+    写入一律新结构 ``{"v":[...],"model":"...","dim":N}`` (ADR-2③); 老库裸 list 行
+    不被覆盖(非空, 留给 _cosine_topk 惰性 re-embed 升级维度)。
     Returns 影响行数(0 = 空向量 / 行已非空 / entity 不存在)。
     """
     if not name_embedding:
@@ -132,7 +189,7 @@ def backfill_entity_embedding(entity_id: str, name_embedding: list[float] | None
     cur = conn.execute(
         "UPDATE entity SET name_embedding = ? WHERE id = ? "
         "AND (name_embedding IS NULL OR name_embedding = '[]')",
-        (json.dumps(name_embedding, ensure_ascii=False), entity_id),
+        (_encode_embedding(name_embedding), entity_id),
     )
     conn.commit()
     return cur.rowcount
@@ -152,6 +209,42 @@ def add_aliases(entity_id: str, new_aliases: list[str]) -> None:
     conn.execute(
         "UPDATE entity SET aliases = ? WHERE id = ?",
         (json.dumps(merged, ensure_ascii=False), entity_id),
+    )
+    conn.commit()
+
+
+def set_aliases(entity_id: str, aliases: list[str]) -> None:
+    """全量替换 entity.aliases (ADR-2② GC 用: resolver 合并 survivor 时清理无效/重复别名)。
+
+    保序去重(None → []);entity 不存在 → no-op。区别 add_aliases(并入增量)。
+    """
+    conn = db.get_conn()
+    clean: list[str] = []
+    for a in (aliases or []):
+        if a and a not in clean:
+            clean.append(a)
+    conn.execute(
+        "UPDATE entity SET aliases = ? WHERE id = ?",
+        (json.dumps(clean, ensure_ascii=False), entity_id),
+    )
+    conn.commit()
+
+
+def remove_aliases(entity_id: str, to_remove: list[str]) -> None:
+    """从 entity.aliases 移除给定别名 (ADR-2② GC: 清理合并后旧实体的残留别名)。
+
+    大小写敏感移除; entity 不存在 → no-op。
+    """
+    conn = db.get_conn()
+    row = conn.execute("SELECT aliases FROM entity WHERE id = ?", (entity_id,)).fetchone()
+    if row is None:
+        return
+    existing = json.loads(row["aliases"]) if row["aliases"] else []
+    rm = set(to_remove or [])
+    kept = [a for a in existing if a not in rm]
+    conn.execute(
+        "UPDATE entity SET aliases = ? WHERE id = ?",
+        (json.dumps(kept, ensure_ascii=False), entity_id),
     )
     conn.commit()
 

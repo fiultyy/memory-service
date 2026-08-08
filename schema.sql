@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS entity (
     properties  TEXT NOT NULL DEFAULT '{}',   -- JSON object
     aliases        TEXT NOT NULL DEFAULT '[]',   -- JSON array (ADR-D7: 同实体异写别名)
     name_embedding TEXT,                          -- JSON array float (ADR-D7: 名称向量, 离线='[]'/NULL)
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    UNIQUE(name, entity_type)                     -- ADR-2 ①: DB 强制去重(resolver 是应用层闸非 DB 强制, 并发 re-ingest 竞态建孤儿)
 );
 CREATE INDEX IF NOT EXISTS idx_entity_name ON entity(name);
 CREATE INDEX IF NOT EXISTS idx_entity_type ON entity(entity_type);

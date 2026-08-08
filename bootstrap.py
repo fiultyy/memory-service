@@ -184,8 +184,21 @@ def prune_deleted(
     # ADR-B ``mem-`` + 4hex + ``-`` 前缀天然区分(mem-service-* 的 serv 非 4-hex, 不匹配)。
     from projection import MEM_FILE_RE
     if mem_dir.is_dir():
-        existing = {p.name for p in mem_dir.glob("*.md")
-                    if not MEM_FILE_RE.match(p.name) and p.name != "MEMORY.md"}
+        existing = set()
+        for p in mem_dir.glob("*.md"):
+            if p.name == "MEMORY.md":
+                continue
+            if MEM_FILE_RE.match(p.name):
+                # 撞正则: frontmatter 确认是否真投影(source:mem-service)
+                # 真投影 → 排除(产物非源); 无 frontmatter → native 撞名, 留 existing
+                # 防 native(如 mem-dead-notes.md, dead=合法 4-hex)被误判孤儿删(F1)
+                try:
+                    txt = p.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    txt = ""
+                if _is_mem_service_projection(txt):
+                    continue
+            existing.add(p.name)
     else:
         existing = set()  # ponytail: dir 都没了 → 所有 memory 源 fact 视为孤儿
 

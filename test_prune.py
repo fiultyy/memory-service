@@ -56,8 +56,10 @@ assert r4["pruned"] == 1 and r4["pruned_ids"] == [f_multi], r4
 #    ADR-B MEM_FILE_RE (mem-{4hex}-{slug}.md) 区分投影, 否则误判 mem-service-* 为投影 → 误删其 fact。
 mem_dir.mkdir()
 (mem_dir / "mem-service-native.md").write_text("x")
-# 投影文件: 符合 ADR-B mem-{4hex}-{slug}.md 契约
-(mem_dir / "mem-0011-projection.md").write_text("proj")
+# 投影文件: 符合 ADR-B mem-{4hex}-{slug}.md 契约, 真投影必带 source frontmatter
+# (F1 后 prune 用 frontmatter 二次确认; 裸 "proj" 无 frontmatter 会被当 native 撞名误留 existing)
+(mem_dir / "mem-0011-projection.md").write_text(
+    "---\nsource: mem-service\nfact_id: 0011\n---\nproj\n")
 f_ms = store.put_fact(eid, "notes", "native", extractor="llm", fact_type="permanent",
                       source_cwd="/test2", source_refs=["session:memory:mem-service-native.md#0"])
 r5 = bootstrap.prune_deleted(mem_dir, source_cwd="/test2")
@@ -65,6 +67,20 @@ print(f"Test 5 (mem-service-* collision): present={r5['native_md_present']}, pru
 assert "mem-service-native.md" in r5["native_md_present"], r5
 assert "mem-0011-projection.md" not in r5["native_md_present"], r5
 assert r5["pruned"] == 0, r5
+
+# 6. T7 (F1): native mem-dead-notes.md (dead=合法4hex, 无 frontmatter) + 其 fact →
+#    prune 不删该 fact。撞 MEM_FILE_RE 但无 source frontmatter → native 撞名, 留 existing。
+f_dead = store.put_fact(eid, "notes", "dead-native", extractor="llm", fact_type="permanent",
+                        source_cwd="/test3", source_refs=["session:memory:mem-dead-notes.md#0"])
+(mem_dir / "mem-dead-notes.md").write_text("dead native notes, no frontmatter")
+r6 = bootstrap.prune_deleted(mem_dir, source_cwd="/test3")
+print(f"Test 6/T7 (mem-dead-* 4hex collision): present={r6['native_md_present']}, pruned={r6['pruned']}")
+assert "mem-dead-notes.md" in r6["native_md_present"], r6
+assert r6["pruned"] == 0, r6
+# fact 仍 active(未被误判孤儿 soft-delete)
+active_dead = db.get_conn().execute(
+    "SELECT status FROM fact WHERE id=?", (f_dead,)).fetchone()[0]
+assert active_dead == "active", f"native 撞名 fact 不应被 prune 误删: status={active_dead}"
 
 print("\n✓ All prune tests passed")
 shutil.rmtree(tmpdir)

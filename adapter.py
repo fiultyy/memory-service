@@ -12,6 +12,7 @@ API: ``adapter.extract_facts(text, providers=None)`` → ``llm_provider.Extracti
 """
 
 from __future__ import annotations
+from dataclasses import replace
 
 import os
 import re
@@ -145,6 +146,15 @@ def _vote(extractions: list[Extraction]) -> Extraction:
             # env-pattern filter: skip if subject or object is an env var name
             if _is_env_entity(edge.subject) or _is_env_entity(edge.object):
                 continue
+            # topic: 取首个非空 wing 的 topic(避免首 wing 空 topic 遮蔽)。
+            # surface form(subject/object case)仍 first wing, 仅 topic 补全。
+            if not (edge.topic or "").strip():
+                best_topic = next(
+                    (e.topic for _, e in wing_edges if (e.topic or "").strip()),
+                    "",
+                )
+                if best_topic:
+                    edge = replace(edge, topic=best_topic)
             surviving.append(edge)
             for wi, _ in wing_edges:
                 contributing_confidences.append(extractions[wi].confidence)

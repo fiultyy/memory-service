@@ -278,14 +278,27 @@ def test_newline_value_idempotent():
         mem_dir = Path(tmp) / "memory"
         mem_dir.mkdir()
         (mem_dir / "MEMORY.md").write_text("# Index\n", encoding="utf-8")
-        eid, fid = _mk_fact(value="line1\nline2", topic="line1 line2")  # topic 单行
-        _write_mem_md(mem_dir, fid, topic="line1 line2")
+        # T2: topic 含真换行(非已 sanitize 的 "line1 line2") → 文件名/description 无换行
+        topic_nl = "line1\nline2"
+        eid, fid = _mk_fact(value="line1\nline2", topic=topic_nl)
+        _write_mem_md(mem_dir, fid, topic=topic_nl)
+        # 文件名侧: _sanitize_slug 替换 \n(\s) → 文件名无换行字符
+        fname_nl = projection._mem_filename(fid, topic_nl)
+        assert "\n" not in fname_nl, f"文件名无换行: {fname_nl!r}"
+        # description 侧: project_fact_md 经 _fact_topic strip 换行 → description 单行
+        p_nl = projection.project_fact_md(
+            {"id": fid, "predicate": "uses", "value": "line1\nline2",
+             "source_refs": [], "topic": topic_nl},
+            "用户", mem_dir, recalled_at="2026-08-08")
+        desc_nl = [ln for ln in p_nl.read_text(encoding="utf-8").splitlines()
+                   if ln.startswith("description:")]
+        assert desc_nl and "\n" not in desc_nl[0], f"description 单行: {desc_nl}"
+        # synthesis 跑两次验幂等(投影行单物理行, 不增殖)
         projection.synthesis_index(cwd="/test", mem_dir=mem_dir)
-        projection.synthesis_index(cwd="/test", mem_dir=mem_dir)  # 跑两次验幂等
+        projection.synthesis_index(cwd="/test", mem_dir=mem_dir)
         txt = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
-        assert "line1 line2" in txt, f"topic 应单行:\n{txt}"
+        assert "line1" in txt and "line2" in txt, f"topic 内容应在:\n{txt}"
         assert _mem_line_count(txt) == 1, f"恰好 1 行投影(不增殖):\n{txt}"
-        # 投影行是单物理行(无内嵌换行)
         mem_lines = [ln for ln in txt.splitlines() if "](mem-" in ln]
         assert len(mem_lines) == 1 and "\n" not in mem_lines[0]
     finally:
@@ -375,6 +388,69 @@ def test_clean_description():
     print("✓ T12 clean description: = topic, 无机器噪声(ADR-A)")
 
 
+# ── T4(F6): 长 topic → 文件名字节 < 255 且匹配 MEM_FILE_RE ──────────────
+def test_long_topic_filename():
+    long_topic = "极" * 200  # 200 CJK 字符(3 字节/字, 压测 NAME_MAX 字节上限)
+    name = projection._mem_filename("abcdef1234567890", long_topic)
+    nbytes = len(name.encode("utf-8"))
+    assert nbytes < 255, f"文件名字节 < 255: got {nbytes} ({name!r})"
+    assert projection.MEM_FILE_RE.match(name), f"匹配 MEM_FILE_RE: {name!r}"
+    print(f"✓ T4 long topic: 200 字符 → 文件名 {nbytes} 字节 < 255, 匹配 RE")
+
+
+# ── T5(F4): topic 含冒号 → frontmatter description 经 yaml.safe_load 解析 ─
+def test_yaml_colon_description():
+    import yaml
+    tmp = tempfile.mkdtemp()
+    try:
+        db.init(Path(tmp) / "mem.db")
+        mem_dir = Path(tmp) / "memory"
+        mem_dir.mkdir()
+        eid, fid = _mk_fact(topic="a: b")
+        p = projection.project_fact_md(
+            {"id": fid, "predicate": "uses", "value": "b",
+             "source_refs": [], "topic": "a: b"},
+            "用户", mem_dir, recalled_at="2026-08-08")
+        content = p.read_text(encoding="utf-8")
+        assert content.startswith("---\n"), content
+        _h, fm, _body = content.split("---\n", 2)
+        data = yaml.safe_load(fm)
+        assert data["description"] == "a: b", f"description == 'a: b': {data}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("✓ T5 YAML colon: topic 'a: b' → yaml.safe_load(description) == 'a: b'")
+
+
+# ── T6(F7): topic 含 ] → MEMORY 索引行是合法 markdown 链接(] 已转义) ────
+def test_md_link_escape_bracket():
+    from markdown_it import MarkdownIt
+    tmp = tempfile.mkdtemp()
+    try:
+        db.init(Path(tmp) / "mem.db")
+        mem_dir = Path(tmp) / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "MEMORY.md").write_text("# Index\n", encoding="utf-8")
+        eid, fid = _mk_fact(topic="a]b")
+        _write_mem_md(mem_dir, fid, topic="a]b")
+        projection.synthesis_index(cwd="/test", mem_dir=mem_dir)
+        txt = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+        mem_lines = [ln for ln in txt.splitlines() if "](mem-" in ln]
+        assert len(mem_lines) == 1, f"恰好 1 投影行:\n{txt}"
+        line = mem_lines[0]
+        # markdown-it-py 解析(parseInline): link_open href 合法 mem-*.md
+        inline = MarkdownIt().parseInline(line)[0]
+        link_open = next((t for t in inline.children if t.type == "link_open"), None)
+        assert link_open is not None, f"应有 link_open token: {line!r}"
+        href = link_open.attrs.get("href", "")
+        assert href.startswith("mem-") and href.endswith(".md"), (
+            f"href 合法 mem-*.md, got {href!r}: {line!r}")
+        # ] 已转义: link text 内 ] 被转成 \], 不 prematurely 闭合
+        assert "\\]" in line, f"] 已转义(\\]): {line!r}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("✓ T6 md escape: topic 'a]b' → 索引行合法 markdown 链接(] 已转义)")
+
+
 if __name__ == "__main__":
     test_basic_projection()
     test_cold_start()
@@ -388,4 +464,7 @@ if __name__ == "__main__":
     test_read_fact_id_frontmatter_only()
     test_filename_contract()
     test_clean_description()
+    test_long_topic_filename()
+    test_yaml_colon_description()
+    test_md_link_escape_bracket()
     print("\n✓ All synthesis_index tests passed")

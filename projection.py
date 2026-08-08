@@ -41,16 +41,23 @@ def cc_memory_dir(cwd: str) -> Path:
     return Path.home() / ".claude" / "projects" / encoded / "memory"
 
 
-def _sanitize_slug(s: str | None) -> str:
-    """topic → 路径安全 slug(ADR-B sanitize 约束: 只做路径安全, 不改语义)。
+_SLUG_MAX = 60  # 字符上限: 全中文 60 字 = 180 字节 + "mem-xxxx-.md" ≈ 193 < ext4 NAME_MAX 255
 
-    ``/`` 与空白 → ``_``; 收尾空白剥离; 其余字符(含中文/标点)原样保留(语义不损)。
-    空 → ``fact``(占位, 防 ``mem-xxxx-.md`` 末尾空 slug)。"""
+
+def _sanitize_slug(s: str | None) -> str:
+    """topic → 路径安全 slug(ADR-B sanitize 约束)。
+
+    只做路径/URL/markdown 安全, **不改召回语义** —— topic 原文完整保留在
+    frontmatter description / 正文标题(召回靠那里), slug 仅作文件名标识。
+    ``/`` 与空白 → ``_``; 删 URL/markdown/YAML 不安全字符; 收尾剥离; 截断
+    防 >255 字节文件名致 ``os.replace``/``write`` 抛 OSError。空 → ``fact`` 占位。"""
     s = (s or "").strip()
     if not s:
         return "fact"
-    # ponytail: 路径安全最小处理 — 替换会当路径分隔符的 ``/`` 与空白, 不动其他字符。
-    return re.sub(r"[\s/]+", "_", s).strip("_") or "fact"
+    s = re.sub(r"[\s/]+", "_", s)
+    s = re.sub(r"[()\[\]<>\"'`|\\^]", "", s)  # URL/markdown/YAML 不安全字符删除
+    s = s[:_SLUG_MAX].strip("_")
+    return s or "fact"
 
 
 def _fact_topic(fact: dict, subj_name: str) -> str:
@@ -66,6 +73,25 @@ def _fact_topic(fact: dict, subj_name: str) -> str:
     val = fact.get("value") or ""
     display = f"{subj_name or '?'} {pred} {val}".strip()
     return display.replace("\r", " ").replace("\n", " ").strip()
+
+
+def _yaml_scalar(s: str) -> str:
+    """YAML scalar 安全输出: 含特殊字符则双引号包裹并转义(F4)。
+
+    description 是 CC 召回命中的字段, 必须保证 ``yaml.safe_load`` 能解析。
+    quote 后 ``"`` 是可见边界字符, topic 原文仍是 description 的子串,
+    不破坏 CC 明文子串召回。"""
+    s = s.replace("\r", " ").replace("\n", " ").strip()
+    if not s:
+        return '""'
+    if re.search(r'[:#"\'\[\]{}`]', s) or s[0] in "!&*?|-+>%@":
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return s
+
+
+def _md_link_text(s: str) -> str:
+    """markdown link text 安全: 转义 ] [ \\(不破坏 CC 明文召回, 子串仍命中)(F7)。"""
+    return s.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
 
 def _mem_filename(fact_id: str, topic: str | None = None) -> str:
@@ -97,7 +123,7 @@ def project_fact_md(fact: dict, subject: str, mem_dir: Path,
     pred = fact.get("predicate") or ""
     val = fact.get("value") or ""
     content = f"""---
-description: {topic}
+description: {_yaml_scalar(topic)}
 source: mem-service
 fact_id: {fid}
 recalled_at: {recalled_at or ''}
@@ -142,13 +168,16 @@ def read_fact_id(md_path: Path) -> str | None:
 # 投影索引行识别(ADR-A 原生格式 ``- [Title](mem-{4hex}-{slug}.md) — hook``):
 # 用 ``](mem-`` 子串覆盖新格式; 旧 ``(memory/mem-`` 残留也一并清(迁移期)。两者都在
 # MEMORY 重写时永远删(orphan 行永远删), 保 index 干净。
-_MEM_LINE_NEW_MARKER = "](mem-"
-_MEM_LINE_OLD_MARKER = "(memory/mem-"
+_MEM_LINE_NEW_RE = re.compile(r"\]\(mem-[0-9a-f]{4}-.+?\.md\)")
+_MEM_LINE_OLD_MARKER = "(memory/mem-"   # 迁移期旧格式残留, 保留清理
 
 
 def _is_mem_index_line(ln: str) -> bool:
-    """MEMORY 索引行是否为 mem-service 投影行(新格式 ``](mem-`` 或旧 ``(memory/mem-``)。"""
-    return _MEM_LINE_NEW_MARKER in ln or _MEM_LINE_OLD_MARKER in ln
+    """MEMORY 索引行是否为 mem-service 投影行。
+
+    新格式按 MEM_FILE_RE 口径(4-hex)匹配 ``](mem-{4hex}-{slug}.md)``;
+    旧格式 ``(memory/mem-`` 迁移期一并清。两者都在 MEMORY 重写时永远删。"""
+    return bool(_MEM_LINE_NEW_RE.search(ln)) or _MEM_LINE_OLD_MARKER in ln
 
 
 def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None) -> dict:
@@ -276,7 +305,7 @@ def _format_mem_line(fact: dict, subj_name: str) -> str:
     hook = topic。无 [mem] 标记 / 无 score / 无 kg://(纯原生, CC 代码层召回可消费)。"""
     topic = _fact_topic(fact, subj_name)
     fname = _mem_filename(fact["id"], topic)
-    return f"- [{topic}]({fname}) — {topic}"
+    return f"- [{_md_link_text(topic)}]({fname}) — {_md_link_text(topic)}"
 
 
 def _rewrite_mem_lines(memory_md: Path, new_lines: list[str]) -> None:

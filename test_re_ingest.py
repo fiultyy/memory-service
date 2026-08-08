@@ -34,6 +34,10 @@ conn = db.get_conn()
 rows = conn.execute("SELECT * FROM fact").fetchall()
 print(f"  KG facts after test1: {len(rows)} rows")
 assert len(rows) >= 1, "Expected at least 1 fact"
+# T1: topic 持久化断言 — SELECT topic 不只是行数(ADR-C LLM EdgeOut.topic → fact.topic)
+topics = [r["topic"] for r in conn.execute("SELECT topic FROM fact").fetchall()]
+print(f"  T1 topics persisted: {topics}")
+assert "用户使用 rust" in topics, f"topic 应持久化为投入值, got {topics}"
 
 # 2. 造 mem-x.md(frontmatter source:mem-service) → re-ingest → skipped, KG 无新
 mem_x_md = Path(tmpdir) / "mem-x.md"

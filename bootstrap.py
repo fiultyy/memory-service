@@ -179,13 +179,13 @@ def prune_deleted(
     import re
 
     mem_dir = Path(memory_dir)
-    # 现存 native md: 排除投影 mem-<32hex>.md (projection._mem_filename) + MEMORY.md 索引。
+    # 现存 native md: 排除投影文件(ADR-B ``MEM_FILE_RE`` 单一源) + MEMORY.md 索引。
     # 陷阱: native 文件常叫 mem-service-*.md, 也 startswith "mem-" → 不能用前缀区分,
-    # 必须按投影的 32-hex fact_id 形态精确匹配, 否则误把 mem-service-* 当投影排除。
-    proj_re = re.compile(r"^mem-[0-9a-f]{32}\.md$")
+    # ADR-B ``mem-`` + 4hex + ``-`` 前缀天然区分(mem-service-* 的 serv 非 4-hex, 不匹配)。
+    from projection import MEM_FILE_RE
     if mem_dir.is_dir():
         existing = {p.name for p in mem_dir.glob("*.md")
-                    if not proj_re.match(p.name) and p.name != "MEMORY.md"}
+                    if not MEM_FILE_RE.match(p.name) and p.name != "MEMORY.md"}
     else:
         existing = set()  # ponytail: dir 都没了 → 所有 memory 源 fact 视为孤儿
 
@@ -234,7 +234,7 @@ def _demo() -> None:  # ponytail self-check (mock provider, no network)
         def extract_facts(self, text: str):
             return Extraction(
                 entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
-                edges=[EdgeOut("用户", "uses", "rust")],
+                edges=[EdgeOut("用户", "uses", "rust", topic="用户使用 rust")],
                 confidence=0.7, source_meta={"provider": "fake"})
 
     d = _t.mkdtemp()

@@ -53,16 +53,17 @@ print(f"Test 4 (dir gone): pruned={r4['pruned']}, ids={r4['pruned_ids']}")
 assert r4["pruned"] == 1 and r4["pruned_ids"] == [f_multi], r4
 
 # 5. 命名碰撞回归 (真实 bug): native mem-service-*.md 也 startswith "mem-" →
-#    必须按 32-hex 形态区分投影, 否则误判 mem-service-* 为投影 → 误删其 fact。
+#    ADR-B MEM_FILE_RE (mem-{4hex}-{slug}.md) 区分投影, 否则误判 mem-service-* 为投影 → 误删其 fact。
 mem_dir.mkdir()
 (mem_dir / "mem-service-native.md").write_text("x")
-(mem_dir / "mem-00112233445566778899aabbccddeeff.md").write_text("proj")
+# 投影文件: 符合 ADR-B mem-{4hex}-{slug}.md 契约
+(mem_dir / "mem-0011-projection.md").write_text("proj")
 f_ms = store.put_fact(eid, "notes", "native", extractor="llm", fact_type="permanent",
                       source_cwd="/test2", source_refs=["session:memory:mem-service-native.md#0"])
 r5 = bootstrap.prune_deleted(mem_dir, source_cwd="/test2")
 print(f"Test 5 (mem-service-* collision): present={r5['native_md_present']}, pruned={r5['pruned']}")
 assert "mem-service-native.md" in r5["native_md_present"], r5
-assert "mem-00112233445566778899aabbccddeeff.md" not in r5["native_md_present"], r5
+assert "mem-0011-projection.md" not in r5["native_md_present"], r5
 assert r5["pruned"] == 0, r5
 
 print("\n✓ All prune tests passed")

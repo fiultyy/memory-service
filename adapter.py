@@ -236,7 +236,7 @@ def _demo() -> None:  # ponytail self-check (mock provider, no network)
         def extract_facts(self, text: str) -> Extraction:
             return Extraction(
                 entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
-                edges=[EdgeOut("用户", "uses", "rust")],
+                edges=[EdgeOut("用户", "uses", "rust", topic="用户使用 rust")],
                 confidence=0.7, source_meta={"provider": "fake"})
 
     r = extract_facts("用户使用 rust", providers=[_Fake()])

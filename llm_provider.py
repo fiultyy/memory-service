@@ -49,10 +49,13 @@ class EntityOut:
 class EdgeOut:
     """One edge between two *declared* entities. subject/object MUST be a
     name appearing in ``EntityOut.name`` (enforced by prompt + cli/autodream
-    resolve both sides to entities). predicate from the closed 9-set."""
+    resolve both sides to entities). predicate from the closed 9-set.
+    ``topic`` (ADR-C) is a one-sentence human-readable fact the LLM emits per
+    edge — projection uses it as filename slug + index title + description."""
     subject: str
     predicate: str
     object: str
+    topic: str = ""
 
 
 @dataclass
@@ -82,9 +85,11 @@ class LLMProvider(Protocol):
 # Fixed two-step prompt: declare entities first, then edges between declared
 # entities (R1 §A3). object is ALWAYS another declared entity, never a free
 # phrase → cli/autodream _ensure_entity both sides → object_id 必非空 →
-# entity↔entity edges emerge (graph-blind schema fixed). One prompt; per-call
-# butterfly-wing diversity lives in the adapter, not here. ponytail: a single
-# hardened prompt beats N hand-tuned variants at v3-stage-1 scale.
+# entity↔entity edges emerge (graph-blind schema fixed). ADR-C: each edge also
+# carries a human-readable ``topic`` (one short sentence stating the fact) —
+# projection uses it as filename slug + index title + description. One prompt;
+# per-call butterfly-wing diversity lives in the adapter, not here. ponytail: a
+# single hardened prompt beats N hand-tuned variants at v3-stage-1 scale.
 _EXTRACT_PROMPT = """你是知识图谱抽取器。分两步,只返回 JSON。
 
 第一步:从文本里抽出全部实体。每个实体:
@@ -95,20 +100,22 @@ _EXTRACT_PROMPT = """你是知识图谱抽取器。分两步,只返回 JSON。
 第二步:在【已声明的实体】之间抽边。每条边:
 - subject / object: 必须是上面 entities 里出现过的 name(原样,不可改写)
 - predicate: 从 [is_a, uses, depends_on, contains, belongs_to, implements, connected_to, part_of, relates_to] 里选
+- topic: 用一句简短自然语言概括这条事实(subject 与 object 之间通过 predicate 表达的关系),作为可读标题(<= 30 字, 无标点结尾, 无换行)
 
 硬规则:
 - object 永远是【另一个实体】,不是描述性短语。如果某关系的目标是描述(如"是一种去中心化协议"),把它拆成:先声明该描述为实体,再连边。
 - edges 里每个 subject / object 必须 verbatim 出现在 entities[].name 里。
+- topic 是给人读的一句话事实概括,不要复述三元组原文,要凝练。
 - 找不到任何实体/边就返回 {"entities": [], "edges": []},不要解释。
 
 输出格式:
 {"entities": [{"name":"...","type":"...","aliases":[...]}],
- "edges":    [{"subject":"...","predicate":"...","object":"..."}]}
+ "edges":    [{"subject":"...","predicate":"...","object":"...","topic":"..."}]}
 
 示例:
 文本: native agent 自成 A2A 节点, 形成内部 mesh
 {"entities": [{"name":"native agent","type":"component","aliases":[]},{"name":"A2A","type":"protocol","aliases":["a2a"]},{"name":"mesh","type":"architecture","aliases":[]}],
- "edges":    [{"subject":"native agent","predicate":"is_a","object":"A2A"},{"subject":"native agent","predicate":"part_of","object":"mesh"}]}
+ "edges":    [{"subject":"native agent","predicate":"is_a","object":"A2A","topic":"native agent 是 A2A 协议节点"},{"subject":"native agent","predicate":"part_of","object":"mesh","topic":"native agent 组成内部 mesh"}]}
 文本: """
 
 
@@ -226,7 +233,13 @@ def _parse_facts(content: str) -> tuple[list[EntityOut], list[EdgeOut]]:
             # dangling refs (LLM 遵守 prompt 但仍可能漏 → 不污染 graph).
             if subj not in declared or obj not in declared:
                 continue
-            edges.append(EdgeOut(subject=subj, predicate=pred, object=obj))
+            # ADR-C: topic — best-effort read (LLM 偶尔漏 → topic=""), strip
+            # newlines so a multiline topic can't break filename/index line.
+            raw_topic = f.get("topic")
+            topic = str(raw_topic).strip() if raw_topic is not None else ""
+            topic = topic.replace("\r", " ").replace("\n", " ").strip()
+            edges.append(EdgeOut(subject=subj, predicate=pred, object=obj,
+                                 topic=topic))
         except (KeyError, TypeError):
             continue
     return entities, edges

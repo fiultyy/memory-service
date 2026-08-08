@@ -302,17 +302,20 @@ def recall(
         f = s["fact"]
         fid = f["id"]
         subj = ent_names.get(f.get("subject_id"), "?")
-        display = f"{subj} {f.get('predicate') or ''} {f.get('value') or ''}".strip()
+        # ADR-A/C: 投影标题 = topic(回退三元组); 与 project_fact_md 内部一致。
+        topic = projection._fact_topic(f, subj)
         ms = scoring.mem_score(f)
         mem_path = None
         if mem_dir_obj is not None:
             projection.project_fact_md(f, subj, mem_dir_obj, recalled_at=now_iso)
-            mem_path = f"memory/{projection._mem_filename(fid)}"
+            # ADR-B: 相对路径与 MEMORY.md 同目录 → 仅文件名(无 memory/ 前缀)。
+            mem_path = projection._mem_filename(fid, topic)
         tag = {
             "fact_id": fid,
             "mem_path": mem_path,
             "kg_uri": f"kg://fact/{fid}",
-            "display": display,
+            "display": topic,
+            "topic": topic,
             "mem_score": ms,
             "recalled_at": now_iso,
             "session_id": session_id,

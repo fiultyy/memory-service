@@ -11,10 +11,10 @@ from llm_provider import EdgeOut, EntityOut, Extraction
 class _Fake:
     base_url = None
     def extract_facts(self, text: str):
-        # 固定返回 (用户, uses, rust)
+        # 固定返回 (用户, uses, rust, topic)
         return Extraction(
             entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
-            edges=[EdgeOut("用户", "uses", "rust")],
+            edges=[EdgeOut("用户", "uses", "rust", topic="用户使用 rust")],
             confidence=0.7, source_meta={"provider": "fake"})
 
 # db.init(tmp) 隔离

@@ -1,4 +1,6 @@
 # Grill Report: ADR-16 Round-trip 污染面审查
+> ⚠ **SUPERSEDED 2026-08-07→08**:本文审查的 ADR-16f 污染面(round-trip 闭环)**已实施封堵**:`bootstrap._is_mem_service_projection` 过滤投影 md(init_memory L122-125 / prune_deleted L191-200 frontmatter 二次确认)+ projection-native-format 的 `MEM_FILE_RE` 文件名契约(projection.py:34)。文中「代码未实施/只有规划」的结论、`build_index`/`build-index` 引用(已 P3 清退改名 `synthesis_index`)、旧 `[mem]` 索引行格式均已过时。本文作为「审查时的污染面盘点」留档,代码现状以 `docs/mem-service-iteration-log.md` projection-native-format + recall-trail-projection 条目为准。
+
 
 **角度**: 闭环未封污染面(round-trip 完整性)
 **日期**: 2026-08-07

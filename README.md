@@ -64,10 +64,12 @@ mem-service (KG 叠加层)
 | `cli` | 顶层 seam（argparse argv + Python 函数同管道） |
 | `adapter` | 蝴蝶翼 LLM 抽取（fan-out + 投票 + confidence） |
 | `llm_provider` | LLM Protocol + 具体实现（env 配置 base_url/model/key） |
-| `store` / `db` | KG CRUD + SQLite schema（Entity + Fact reified） |
+| `store` / `db` | KG CRUD + SQLite schema(Entity + Fact reified) |
 | `recall` / `scoring` | 召回入口 + 加权排序 |
+| `resolver` | 实体解析(精确/别名闸 → 向量 top-k + LLM 去重 → 创建,ADR-D3) |
 | `embedding` | OpenAI-compat 向量 + two-tier cache |
-| `autodream` | session transcript → KG 增量（幂等） |
+| `autodream` | session transcript → KG 增量(幂等) |
+| `mem_daemon` | 常驻 autoDream loop(watch transcript 增长 → 增量 dream,operational #1) |
 | `bootstrap` | CC memory → KG permanent 种子 |
 | `consolidate` | LIF decay + dedup |
 | `projection` | KG → CC memory 投影 |
@@ -96,6 +98,6 @@ mem-service (KG 叠加层)
 
 ## 状态
 
-**仍 defer**：autoDream daemon（常驻）/ 冷层类聚 / 跨 scope 向量联邦 / query 独立 cli / CC→KG 反向 re-ingest。
+**仍 defer**：冷层类聚 / 跨 scope 向量联邦 / query 独立 cli / BFS_WEIGHT 调参（需 eval）。
 
 接线与部署见 [`INSTALL.md`](INSTALL.md)，CC 内调用语法见 [`SKILL.md`](SKILL.md)。

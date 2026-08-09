@@ -66,7 +66,7 @@ commit: `ded4deb`
 ### ZhipuAnthropicProvider (`b7eda40`)
 - llm_provider.py ZhipuAnthropicProvider 直连智谱 (`open.bigmodel.cn/api/anthropic`, glm-5-turbo, coding plan), 不经 CCR (少一跳)
 - api_key 从 env `ZHIPU_API_KEY`/CCR config 复用 (**不进 git**), 国内服务禁境外代理 (`ProxyHandler({})`)
-- adapter.default_providers: `[Zhipu, CCR fallback]`
+- adapter.default_providers: `[ZhipuAnthropicProvider]`(直连智谱,无 CCR fallback;regex fallback 已移除 2026-08-07)
 - 实测蝴蝶翼 3.3s conf 0.70
 
 ### ADR-14 source_cwd b 方案 (`eca8d30`)
@@ -124,7 +124,7 @@ commit: `ded4deb`
 - **defer(本迭代治 D3+D7)**: D5 BFS 召回(KG 唯一独占价值, 下一迭代)/ D6 gating(避单 session -17.7%)/ D4 双时态。盲区: embedding 模型升级维度变→全库 name_embedding 失效无迁移; aliases 只加不删无 GC; 并发 re-ingest 无 UNIQUE(name,type) 竞态。
 
 ### bfs-recall-gating (D5 BFS 召回 + D6 门控) — 2026-08-08 [OMP 实施 + 主 session 验证]
-- **D5 BFS 召回**: KG 相对纯向量 RAG 唯一独占价值(φ_bfs 抓「语义远但图近」, R2 实证 +18.5% LongMemEval)。recall.py 抽 `_build_entity_graph() -> (nx.Graph, centrality)`(图复用单一源, centrality + BFS 共用, 不建两次);新增 `bfs_neighbors(seeds, graph, hops=2, max_nodes=50)`(nx 单源最短路取 min hop, lowest-hop-first 截 max_nodes)+ `_hop_decay`(0→1.0/1→0.5/2→0.25)。recall() 加 `use_bfs=False, bfs_hops=2`: seed entity → BFS → 邻域 fact 并入候选, BFS-found fact(hop>0)**绕过 score≥0.3 硬滤**(显式图召回非噪音)仍参与排序。
+- **D5 BFS 召回**: KG 相对纯向量 RAG 唯一独占价值(φ_bfs 抓「语义远但图近」, R2 实证 +18.5% LongMemEval)。recall.py 抽 `_build_entity_graph() -> (nx.Graph, centrality)`(图复用单一源, centrality + BFS 共用, 不建两次);新增 `bfs_neighbors(seed_entity_ids, graph, hops=2, max_nodes=50)`(nx 单源最短路取 min hop, lowest-hop-first 截 max_nodes)+ `_hop_decay`(0→1.0/1→0.5/2→0.25)。recall() 加 `use_bfs=False, bfs_hops=2`: seed entity → BFS → 邻域 fact 并入候选, BFS-found fact(hop>0)**绕过 score≥0.3 硬滤**(显式图召回非噪音)仍参与排序。
 - **D6 门控 = opt-in `--bfs`**(default off): 契合项目"agent 自主召回"哲学; -17.7% 单 session 退化源于 BFS 总 fire, opt-in 天然规避; **default off 逐字零回归**(score_fact 加 bfs_proximity=0 → 同分; 过滤线 `>=0.3 or fid in bfs_expanded_ids`, use_bfs=False 时空集 → 同 `>=0.3`)。cli `--bfs` / `--bfs-hops` flag。
 - **scoring**: score_fact 加 `bfs_proximity` 形参 + `BFS_WEIGHT=0.1`(ε), `score += BFS_WEIGHT·bfs_proximity`(镜像 `DELTA_VEC·vec_sim`);**weights (α,β,γ) 三元组不动**(eval_recall grid 依赖)。
 - **验证**: OMP(workflowz)实施; 主 session 新鲜跑 **12/12**(含 test_bfs_recall 9 断言: BFS 召回 2-hop fact / 门控 off 不召回 / hop cap hops=1 vs 2 / max_nodes≤50 / hop_decay / zero-regression bfs=0.668≥without=0.618 / db 隔离)。data/memory.db 零污染。P0+projection+entity-dedupe 契约未触(只加可选路径, default off 不改原 recall)。
@@ -171,20 +171,20 @@ commit: `ded4deb`
 
 ---
 
-## 当前状态 (`main 094022a`)
+## 当前状态 (`main ff790d6`, 6 迭代 merge main 2026-08-09)
 
 **存储**:
-- KG: `data/memory.db` (entity 5 列 + fact 25 列含 source_cwd, SQLite WAL)
+- KG: `data/memory.db` (entity 7 列 id/name/entity_type/properties/aliases/name_embedding/created_at + fact 含 source_cwd/valid_from/valid_to/topic, SQLite WAL)
 - 向量 cache: `data/embeddings.db` (embed_cache, L2 SQLite, text_hash→vector)
 - CC 投影: `~/.claude/projects/<encoded-cwd>/memory/mem-<fact_id>.md` + MEMORY.md `[mem]` 索引行
 
 **Provider**:
-- LLM 抽取 (蝴蝶翼): ZhipuAnthropicProvider (glm-5-turbo 直连智谱) + CCR fallback
+- LLM 抽取 (蝴蝶翼): ZhipuAnthropicProvider (glm-5-turbo 直连智谱; 无 CCR/regex fallback, LLM 不可用即 block)
 - Embedding: LM Studio qwen3-embedding-4b (port 16666) + Ollama fallback
 
 **测试**: ~40 pytest (test_e2e/lif_wire/lif_coherence/adapter/autodream/bootstrap/vec_recall) + eval_recall 2 (ADR-9 baseline + ADR-4v2 grid)
 
-**架构**: 纯脚本 CLI (cli.py argparse, 短命进程) + SQLite 跨进程持久 + PreCompact hook (bash) 触发。无 daemon/server/port。
+**架构**: 纯脚本 CLI (cli.py argparse, 短命进程) + SQLite 跨进程持久 + PreCompact hook (bash) 触发 + autoDream daemon (`dream-daemon`, operational #1)。无 server/port。
 
 ---
 
@@ -198,7 +198,7 @@ commit: `ded4deb`
 - [x] **D7** aliases 持久化 — entity-dedupe
 
 ### 🟡 研究机制剩余(R2 Graphiti 抄的, 五迭代后还没做)
-- [ ] **Graphiti 式 LLM 矛盾检测** — 新 fact → LLM 比同实体对已存边 → 自动失效(R2 L148; 当前只复用 autodream `_is_contradiction` 功能性谓词判断)
+- [ ] **Graphiti 式 LLM 矛盾检测** — 新 fact → LLM 比同实体对已存边 → 自动失效(R2 L148; defer-cleanup 已做纯 LLM 裁判 `judge_contradiction`, supersede 触发 `_judge_contradiction`)
 - [ ] **bi-temporal churn 监控** — supersede rate / active ratio, 降阈值触发刷新(R2 L149/159)
 
 ### 🟡 五迭代 minor 尾巴(非阻断, 详各迭代条目)

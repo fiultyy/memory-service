@@ -1,4 +1,6 @@
 # Spec: recall-trail-projection
+> **实现更新注(P3)**:本 spec 中的 `build_index`/`update_memory_md` 已在 P3 清退重命名为 `synthesis_index`/`_rewrite_mem_lines`(projection.py);行号引用以当前代码为准(`recall.py:382` score>=0.3 过滤)。
+
 Status: Locked(P5 收敛后,go P2)
 
 ## 1-3. Problem / Solution(In-Scope) / Out-of-Scope
@@ -7,8 +9,8 @@ Status: Locked(P5 收敛后,go P2)
 
 **Solution(In-Scope)**(grill 收敛后修订):
 - `recall()` session_id 默认 `os.environ.get("CLAUDE_CODE_SESSION_ID","unknown")`(ADR-16a,**env 取代原 --session 强制/hook/文件**)
-- `build_index` UNION(轨迹 seen_sessions ∪ LIF top-K)+ `update_memory_md` **清空重写 [mem] 段**(修 ADR-15 累积 bug)
-- `recall.py:249 score>=0.3` 噪音过滤 + cli `--top-k`(默认 None 兼容)
+- `synthesis_index` UNION(轨迹 seen_sessions ∪ LIF top-K)+ `_rewrite_mem_lines` **清空重写 [mem] 段**(修 ADR-15 累积 bug)
+- `recall.py:382 score>=0.3` 噪音过滤 + cli `--top-k`(默认 None 兼容)
 - `bootstrap` 过滤 `source: mem-service` md(闭环卫生)
 - hook 透传 session_id(env 自动)
 
@@ -31,7 +33,7 @@ Status: Locked(P5 收敛后,go P2)
 - 闭环验证(US2)查 `source_refs`/`seen_sessions` 无 `mem-*.md` 假 session(区分过滤 vs 幂等 UPDATE)
 
 ## 7. Acceptance(关联编排图节点)
-- US1 → Node C(T_C2 UNION + T_C4 score 阈值;build_index --session 后 [mem] 含轨迹 fact,score<0.3 不投影)
+- US1 → Node C(T_C2 UNION + T_C4 score 阈值;synthesis-index --session 后 [mem] 含轨迹 fact,score<0.3 不投影)
 - US2 → Node A(T_A1 bootstrap 过滤)
 - US3 → Node B(T_B1 recall env fallback;Node C 单 task 简化)
 - Node C 4 task:T_C1 清空重写 / T_C2 UNION+env / T_C3 hook透传 / T_C4 score阈值

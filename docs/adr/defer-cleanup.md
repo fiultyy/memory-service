@@ -10,9 +10,9 @@ Iteration base: `120b5ad`(branch p0-entities-edges-schema)
 ## ADR-1: R1 矛盾检测 = 纯 LLM 裁判(Graphiti 式)
 Status: Accepted
 Date: 2026-08-08
-Context: 当前 `autodream._is_contradiction` 是硬编码 functional predicate 集 `{is_a,belongs_to}` + 纯值比较,覆盖不了开放式谓词(中文同义异写矛盾如「X 位于 A」vs「X 位于 B」)。Graphiti R2 L148 式矛盾检测是 KG 双时态的另一半:新 fact → 比同实体对已存边 → 自动失效。用户选纯 LLM(非 hardcode 快路径)。
+Context: 当前矛盾检测(`autodream._judge_contradiction`)是硬编码 functional predicate 集 `{is_a,belongs_to}` + 纯值比较,覆盖不了开放式谓词(中文同义异写矛盾如「X 位于 A」vs「X 位于 B」)。Graphiti R2 L148 式矛盾检测是 KG 双时态的另一半:新 fact → 比同实体对已存边 → 自动失效。用户选纯 LLM(非 hardcode 快路径)。
 Decision:
-- `llm_provider.Protocol` 加 `judge_contradiction(subject, predicate, new_value, old_value) -> {contradiction: bool, reason: str}` 方法;`ZhipuAnthropicProvider` 实现(`_CONTRADICTION_PROMPT` few-shot,类 `dedupe_entity`:明确「多值谓词(uses/depends_on)共存不矛盾,单值属性(is_a/located_in)新旧值不同才矛盾」,NEVER 误判 related-but-distinct)。
+- `llm_provider.Protocol` 加 `judge_contradiction(subject_type, subject_name, predicate, new_value, old_value) -> {contradiction: bool, reason: str}` 方法;`ZhipuAnthropicProvider` 实现(`_CONTRADICTION_PROMPT` few-shot,类 `dedupe_entity`:明确「多值谓词(uses/depends_on)共存不矛盾,单值属性(is_a/located_in)新旧值不同才矛盾」,NEVER 误判 related-but-distinct)。
 - `autodream` 新 fact ingest 时,对同 `subject_id+predicate` 的已存 active fact(`_has_active_for_predicate` 已有)调 `judge_contradiction`;矛盾 → supersede 旧 fact(`update_fact_status(..., "superseded", supersedes_id=new, valid_to=now)`,复用既有 bi-temporal supersede)。
 - 多值谓词 short-circuit:已知多值集 `{uses,depends_on,contains,implements,connected_to,part_of,relates_to}` 直接判 no-contradiction,不走 LLM(省调用,防 LLM 误判共存)。
 Alternatives: (a) hardcode 快路径 + LLM fallback(未选,用户要纯 LLM 最贴近 Graphiti);(b) 仅扩 hardcode 谓词集(未选,覆盖不了开放式)。多值 short-circuit 保留为防 LLM 误判的成本优化,不违背「单值矛盾走 LLM」。

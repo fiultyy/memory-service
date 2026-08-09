@@ -9,7 +9,7 @@
 - **valid_from 默认 now**: put_fact 未传 valid_from 时 = 当前 ISO(`_now()`)。老数据 valid_from NULL 视为 **-∞(始终有效)**, 点时查询 `valid_from IS NULL OR valid_from <= t`。
 - **supersede 设 valid_to**: `update_fact_status` 加 `valid_to` 参数;autodream.py:239 supersede 时传 `valid_to=_now()`(旧 fact 失效时刻)。status='superseded' 与 valid_to 同设(COALESCE 不覆盖已设)。
 - **recall 默认 `valid_to IS NULL`**: 与 status='active' 一致(**零回归**, 防御性);NULL valid_from 视为 -∞(不加 valid_from 过滤)。
-- **新能力 `--as-of`**: recall(`as_of=None`)点时召回;as_of 给定时候选过滤 `valid_from <= t AND (valid_to IS NULL OR valid_to > t)`(NULL valid_from 视为 <= t)。cli recall `--as-of <iso>` flag。**复用既有 supersede 触发器(autodream `_is_contradiction`), 不新增 LLM 矛盾检测**(Graphiti 式 defer)。
+- **新能力 `--as-of`**: recall(`as_of=None`)点时召回;as_of 给定时候选过滤 `valid_from <= t AND (valid_to IS NULL OR valid_to > t)`(NULL valid_from 视为 <= t)。cli recall `--as-of <iso>` flag。**复用既有 supersede 触发器(autodream `_judge_contradiction`), 不新增 LLM 矛盾检测**(Graphiti 式 defer)。
 
 ## Node A — 双时态通电(核心)
 **改**:
@@ -25,7 +25,7 @@
 - `recall()` 加 `as_of: str | None = None`;as_of 给定时, 候选过滤改 `valid_from <= as_of AND (valid_to IS NULL OR valid_to > as_of)`(NULL valid_from 视为 <= as_of)。应用到所有 fact 查询(_facts_for_entities / value_rows / _build_centralities)。BFS/vec 路径与 as_of 正交(都过滤候选集)。
 - `cli.py`: recall 子命令加 `--as-of <iso>`(dest as_of);透传 recall_mod.recall。
 - `test_bi_temporal.py`(新, db.init(tmp) 隔离):
-  - 构 F1(subject=A, pred=uses, obj=rust, valid_from=t0);supersede(新 F2 不同 value, 触发 _is_contradiction)→ F1 status='superseded' + valid_to=t1。
+  - 构 F1(subject=A, pred=uses, obj=rust, valid_from=t0);supersede(新 F2 不同 value, 触发 _judge_contradiction)→ F1 status='superseded' + valid_to=t1。
   - 默认 recall(query 命中 A)→ F1 不在(valid_to 非空), F2 在。
   - `recall(as_of=t0 之前)` → F1 不在(valid_from=t0 > 早于 t0 的时刻), F2 不在。 / `recall(as_of=t0)` → F1 在, F2 视 valid_from。
   - `recall(as_of=t0 与 t1 之间)` → F1 在(valid_from=t0<=t, valid_to=t1>t), F2 在。

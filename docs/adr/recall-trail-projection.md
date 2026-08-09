@@ -2,6 +2,8 @@
 Date: 2026-08-07
 Status: Active
 Revision: 2026-08-07(post group-orche grill `recall-trail-grill-1`,2 轮 12 teammate 收敛;关键修订:env 取代 hook / 清空重写修 ADR-15 / score 阈值)
+> **修订 2026-08-08(P3 清退)**:Decision 中的 `build_index`/`update_memory_md`/`[mem]` 索引行格式已在 P3 清退——`build_index`→`synthesis_index`、`update_memory_md`→`_rewrite_mem_lines`、索引行改原生格式 `- [{topic}](mem-{4hex}-{slug}.md) — {topic}`(无 `[mem]`/kg://,见 projection-native-format ADR-A);`recall.py:249` score≥0.3 过滤现 `recall.py:382`。决策逻辑(UNION 轨迹+top-K、env 取代 hook、清空重写、score 阈值)不变,仅命名/格式演进。
+
 
 ## ADR-16: 召回轨迹投影(recall-trail → MEMORY [mem])
 Status: Accepted

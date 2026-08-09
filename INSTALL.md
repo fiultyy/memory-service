@@ -13,7 +13,7 @@ mem-service = 独立 Python CLI(无 daemon/端口),叠加在 CC MEMORY.md 之上
 
 ## 前置
 - Python 3.10+
-- repo:`services/memory-service/`(本仓)
+- repo:`/home/yy/projects/memory-service/`(本仓,2026-08-07 从 AO2 `services/memory-service/` cp 独立)
 - 三方依赖:`networkx`(唯一,`pip install networkx`)
 
 ## 接线 6 task
@@ -25,7 +25,7 @@ mem-service = 独立 Python CLI(无 daemon/端口),叠加在 CC MEMORY.md 之上
 
 验证:
 ```bash
-cd services/memory-service && python3 cli.py ingest "项目使用 rust 做后端"
+cd /home/yy/projects/memory-service && python3 cli.py ingest "项目使用 rust 做后端"
 # → {"entities": N, "facts": [...]} 非空 = LLM 通
 ```
 无 key → `RuntimeError` block(**不降级 regex**)。
@@ -41,7 +41,7 @@ LM Studio + Ollama(local OpenAI-compat),`default_providers() = [LM_STUDIO 16666,
 
 ### 3. skill 软链(CC `/mem` 入口)
 ```bash
-ln -s $(pwd)/services/memory-service ~/.claude/skills/mem
+ln -s /home/yy/projects/memory-service ~/.claude/skills/mem
 ```
 验证:`ls -l ~/.claude/skills/mem` → 指向本仓
 
@@ -54,7 +54,7 @@ ln -s $(pwd)/services/memory-service ~/.claude/skills/mem
       "matcher": "*",
       "hooks": [{
         "type": "command",
-        "command": "/abs/path/to/services/memory-service/hooks/pre-compact-mem.sh",
+        "command": "/home/yy/projects/memory-service/hooks/pre-compact-mem.sh",
         "timeout": 60
       }]
     }]
@@ -65,7 +65,7 @@ ln -s $(pwd)/services/memory-service ~/.claude/skills/mem
 
 ### 5. 初始化(新装 / 空 KG)
 ```bash
-cd services/memory-service
+cd /home/yy/projects/memory-service
 # KG 种子:CC memory .md → permanent fact
 python3 cli.py init-memory --memory-dir ~/.claude/projects/<encoded-cwd>/memory --cwd <repo>
 # 向量回填:active fact value → L2 cache
@@ -93,12 +93,16 @@ sqlite3 data/embeddings.db  "SELECT COUNT(*) FROM embed_cache"
 ## 子命令(cli.py)
 | 命令 | 作用 |
 |------|------|
-| `ingest "<text>"` | LLM 抽 fact 入 KG |
-| `recall "<q>" [--vector] [--cwd <cwd>]` | 召回(字面 / 向量融合) |
-| `autodream --session <id> --transcript <jsonl> [--cwd]` | session transcript → KG 增量 |
-| `init-memory --memory-dir <dir> [--cwd]` | CC memory .md → KG permanent 种子 |
-| `synthesis-index [--scope <cwd>] [--memory-dir <dir>]` | 散 mem-*.md 对账 → MEMORY [mem] 投影(ADR-15 P2, 唯一写入口) |
+| `ingest "<text>"` | 蝴蝶翼 LLM 抽 fact 入 KG |
+| `recall "<q>" [--vector] [--bfs] [--as-of <ts>] [--cwd <cwd>] [--top-k <n>]` | 加权召回(字面 / 向量 / BFS / 点时) |
+| `consolidate` | LIF decay + 精确重复 dedup |
+| `autodream --session <id> --transcript <jsonl> [--cwd]` | session transcript → KG 增量(ADR-10/11) |
+| `init-memory --memory-dir <dir> [--cwd]` | CC memory .md → KG permanent 种子(ADR-12) |
+| `re-ingest <file>` | 单 md → KG 增量(ADR-17) |
+| `synthesis-index [--scope <cwd>] [--memory-dir <dir>] [--session <id>]` | 散 mem-*.md 对账 → MEMORY 投影(ADR-15 P2, 唯一写入口) |
+| `prune [--scope <cwd>] [--memory-dir <dir>]` | 删除 KG 中无对应 memory .md 的孤儿 fact |
 | `embed-backfill` | active fact value → L2 向量 cache |
-| `consolidate` | decay + dedup |
+| `stats` | 只读 churn 快照(entity/fact 计数 + status 分布) |
+| `dream-daemon [--cwd] [--interval <s>] [--once]` | 常驻 autoDream loop(operational #1) |
 
 详见 `SKILL.md`(CC `/mem` 用法)+ `docs/mem-service-iteration-log.md`(12 ADR + 完整迭代)。

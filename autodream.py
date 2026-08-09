@@ -166,7 +166,32 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
         text = text[:4000]  # ponytail: 截断长 session (防 LLM 超时, 同 bootstrap)
     active_providers = adapter.default_providers() if providers is None else providers
     result = adapter.extract_facts(text, providers=active_providers)
-    ext_label = "llm"
+    ext_label = result.source_meta.get("extractor_label", "llm")
+    # Initial 5-dim LIF at ingest (ADR-8v2): distinct_sessions=1 when session_id
+    # present (fact's seen_sessions starts with it). coherence=1.0 (no siblings
+    # queried; consolidate recomputes authoritatively).
+    import scoring as scoring_mod
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    lif_dims = scoring_mod.compute_lif(
+        {"extractor": ext_label, "fact_type": fact_type, "created_at": now.isoformat()},
+        access_count=0,
+        last_accessed_at=now.isoformat(),
+        distinct_sessions=1 if session_id else 0,
+        neighbors=[],
+        now=now,
+    )
+    def _put_new_fact(**edge_kw):
+        """Persist a new fact with confidence + initial LIF dims (used by both
+        contradiction-supersede and brand-new ADD paths)."""
+        return store.put_fact(
+            **edge_kw,
+            confidence=result.confidence,
+            LIF=lif_dims["LIF"],
+            lif_freq=lif_dims["lif_freq"], lif_recency=lif_dims["lif_recency"],
+            lif_spread=lif_dims["lif_spread"], lif_coherence=lif_dims["lif_coherence"],
+            lif_source=lif_dims["lif_source"],
+        )
 
     src_ref = f"session:{session_id}" if session_id else None
     added = updated = deleted = noop = 0
@@ -248,7 +273,7 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                              active_providers, subject_type, subject, predicate,
                              value, s.get("value") or "")]
         if contradicting:
-            new_id = store.put_fact(
+            new_id = _put_new_fact(
                 subject_id=subject_id,
                 predicate=predicate,
                 value=value,
@@ -268,7 +293,7 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
         # 多值共存 / 无矛盾 ⇒ 落到下方 brand-new ADD (不 continue)。
 
         # Brand new — ADD.
-        store.put_fact(
+        _put_new_fact(
             subject_id=subject_id,
             predicate=predicate,
             value=value,

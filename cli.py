@@ -63,26 +63,39 @@ def ingest(text: str, source_ref: str | None = None,
            source_cwd: str | None = None) -> dict[str, Any]:
     """Extract facts from ``text`` via the adapter and persist them to the KG.
 
-    The adapter runs butterfly-wing LLM extraction (ADR-5b) and falls back to
-    the regex extractor (ADR-5) when no provider is reachable or confidence is
-    low. ``fact.extractor`` reflects which path won: "llm" or "regex".
-    ``fact_type`` is ADR-8 (default stable; ingest ``--fact-type`` overrides).
-    Entities are resolved via ``resolver.resolve_entity`` (ADR-D3 two-step
-    merge: cheap exact/alias gate → vector top-k + LLM dedupe → create).
-    Re-extraction of a known name reuses its id (name_to_id cache per ingest).
+    The adapter runs butterfly-wing LLM extraction (ADR-5b, N=3 fan-out +
+    quorum vote). ``fact.extractor`` reflects the vote outcome: "vote" when
+    wings≥2, "llm" for single-wing. No regex fallback (LLM unreachable ⇒
+    RuntimeError). ``fact_type`` is ADR-8 (default stable; ``--fact-type``
+    overrides). Entities resolved via ``resolver.resolve_entity`` (ADR-D3
+    two-step merge). Re-extraction of a known name reuses its id.
 
-    ``providers`` defaults to ``[CCRProvider()]`` (the deployed ccr router).
-    Pass ``[]`` to force the regex fallback path (Spec §4 story 5).
+    Initial LIF is computed at ingest from five dims (ADR-8v2) and passed to
+    ``put_fact`` — not deferred to first consolidate. ``confidence`` carries
+    the adapter's vote-aggregated confidence (max across contributing wings).
 
     Returns a summary ``{"entities": n, "facts": [...]}`` (fact ids).
     """
     if providers is None:
         providers = adapter.default_providers()
     extracted = adapter.extract_facts(text, providers=providers)
-    # "llm" when the adapter's LLM vote produced the surviving facts (its
-    # source_meta carries provider ≠ "regex"); "regex" on fallback.
-    ext_label = "regex" if extracted.source_meta.get("provider") == "regex" else "llm"
+    # adapter._vote computes the label (vote when quorum wings≥2, else llm).
+    ext_label = extracted.source_meta.get("extractor_label", "llm")
     source_refs = [source_ref] if source_ref else []
+    # Initial 5-dim LIF at ingest (ADR-8v2): all edges in one ingest share the
+    # same source/recency/coherence at creation — compute once. coherence=1.0
+    # (no siblings queried; consolidate recomputes authoritatively). freq=0,
+    # spread=0 (fresh fact, no recall hits yet).
+    import scoring
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    lif_dims = scoring.compute_lif(
+        {"extractor": ext_label, "fact_type": fact_type, "created_at": now.isoformat()},
+        access_count=0,
+        last_accessed_at=now.isoformat(),
+        distinct_sessions=0,
+        neighbors=[],
+        now=now,
+    )
 
     # name → entity_id cache (this ingest's working set).
     name_to_id: dict[str, str] = {}
@@ -135,6 +148,11 @@ def ingest(text: str, source_ref: str | None = None,
             source_cwd=source_cwd,
             source_refs=source_refs,
             topic=(edge.topic or "").strip() or None,  # ADR-C: LLM 可读一句话
+            confidence=extracted.confidence,
+            LIF=lif_dims["LIF"],
+            lif_freq=lif_dims["lif_freq"], lif_recency=lif_dims["lif_recency"],
+            lif_spread=lif_dims["lif_spread"], lif_coherence=lif_dims["lif_coherence"],
+            lif_source=lif_dims["lif_source"],
         )
         fact_ids.append(fid)
 

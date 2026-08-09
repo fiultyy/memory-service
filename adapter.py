@@ -185,6 +185,7 @@ def _vote(extractions: list[Extraction]) -> Extraction:
             "wings": n, "quorum": quorum,
             "agreement": sorted(agree_hist, reverse=True),
             "mode": "majority",
+            "extractor_label": "vote" if n >= 2 else "llm",
         },
     )
 

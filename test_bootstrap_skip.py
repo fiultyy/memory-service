@@ -47,11 +47,20 @@ def test_bootstrap_skips_mem_service_projection():
     with open(proj_path, "w") as f:
         f.write("---\nsource: mem-service\nfact_id: x\n---\n用户 uses rust")
 
-    # Fake provider: 记录收到的 text，验证 mem-x.md 没有被喂进去
+    # Fake provider: M6 后提取主径是 gazetteer (providers 只喂 contradiction
+    # judge), 可观察面 = gazetteer.extract 收到的 text — 用记录型 wrapper 包真
+    # 占位提取器, 验证 mem-x.md 没有被喂进去。
+    import gazetteer
     provider = FakeProvider(
         EdgeOut("用户", "uses", "rust", topic="用户使用 rust"),
         [EntityOut("用户", "person"), EntityOut("rust", "tool")],
     )
+    seen_texts: list[str] = []
+    _orig_gaz = gazetteer.extract
+
+    def _recording_gaz(text: str):
+        seen_texts.append(text)
+        return _orig_gaz(text)
 
     # 隔离 DB (用文件而非目录)
     import db
@@ -60,18 +69,22 @@ def test_bootstrap_skips_mem_service_projection():
     db.init(db_tmp)
 
     # 执行
-    r = init_memory(d, providers=[provider])
+    gazetteer.extract = _recording_gaz
+    try:
+        r = init_memory(d, providers=[provider])
+    finally:
+        gazetteer.extract = _orig_gaz
 
     # 验证
     print(f"[INFO] totals: {r}")
     assert r["files"] == 1, f"应处理 1 个文件 (native)，实际: {r['files']}"
     assert r["skipped"] == 1, f"应跳过 1 个文件 (mem-x.md)，实际: {r['skipped']}"
 
-    # 关键: provider 只看到了 native.md 的内容，没看到 mem-x.md 的内容
+    # 关键: 占位提取器只看到了 native.md 的内容，没看到 mem-x.md 的内容
     # 注意: 按 CHUNK 分段，可能被分多段，但所有段都不应含投影内容
-    all_text = "".join(provider.seen_texts)
-    assert "用户使用 rust" in all_text, "provider 应收到 native.md 内容"
-    assert "用户 uses rust" not in all_text, "provider 不应收到 mem-x.md 内容（投影被跳过）"
+    all_text = "".join(seen_texts)
+    assert "用户使用 rust" in all_text, "gazetteer 应收到 native.md 内容"
+    assert "用户 uses rust" not in all_text, "gazetteer 不应收到 mem-x.md 内容（投影被跳过）"
 
     # 验证 KG 中没有来自 mem-x.md 的 fact
     from db import get_conn

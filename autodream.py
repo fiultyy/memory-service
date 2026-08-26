@@ -4,12 +4,14 @@ PreCompact hook entry: ``autodream(session_id, transcript_path, providers=None)`
 reads a CC transcript JSONL **preserving block grammar** (M8: ``_read_transcript``
 returns ``(block_type, text)`` pairs — tool_use/tool_result no longer skipped,
 S1 fix), groups consecutive same-provenance blocks into segments (M8-v2 G2;
-segment budget N4 replaces the old 4000-char flat truncation), and reuses
-``adapter.extract_facts()`` per segment (ADR-5b 蝴蝶翼 LLM 直连, **no regex
-fallback** — provider 不可达即 raise block, 不静默产低质量 fact) to pull facts.
-Each fact inherits its segment's provenance (P21 出处轴 → M2 column; veracity
-auto-maps via M3). Then ``consolidate.consolidate()`` (decay+dedup, v2/v3 复用),
-then an incremental decision per extracted fact:
+segment budget N4 replaces the old 4000-char flat truncation), and runs the
+**M6/M7 占位通道** per segment: ``gazetteer.extract()`` (KG 自举词典 +
+extractor.py regex 三路并行, deterministic 零 LLM inline — **行为反转, 反
+ADR-5**: regex 复活为占位通道, provider 断供不再中断写入; wings LLM 退役为
+异步升级, M4 队列消费侧复活). Each fact inherits its segment's provenance
+(P21 出处轴 → M2 column; veracity auto-maps via M3) and lands as
+``extractor='regex'`` (lif_source 0.4 档). Then ``consolidate.consolidate()``
+(decay+dedup, v2/v3 复用), then an incremental decision per extracted fact:
 
 - **ADD**    — new (subject, predicate, value) not in the active KG → put_fact.
 - **UPDATE** — same (subject, predicate, value) already active → refresh LIF
@@ -33,9 +35,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-import adapter
 import consolidate as consolidate_mod
 import db
+import gazetteer
 import store
 import resolver
 
@@ -255,9 +257,10 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
 
     1. ``consolidate.consolidate()`` — decay+dedup 复用 v2/v3 (phase a).
     2. ``_read_transcript`` (块文法, M8) + ``_build_segments`` (连续同 provenance
-       合并成段, G2; 段预算截尾, N4) + 逐段 ``adapter.extract_facts()`` 蝴蝶翼
-       LLM — session→facts (phase b; 无 regex 降级 — LLM 不可用即 raise block);
-       fact 继承段 provenance (M2 列, veracity 由 M3 映射自动生成)。
+       合并成段, G2; 段预算截尾, N4) + 逐段 ``gazetteer.extract()`` M7 占位
+       提取 (词典+regex 三路, 零 LLM inline — M6 反 ADR-5: provider 断供不再
+       raise, wings 退役为异步升级 M4); fact 继承段 provenance (M2 列, veracity
+       由 M3 映射自动生成; extractor='regex' → lif_source 0.4)。
     3. Incremental decision per extracted fact (phase c): ADD / UPDATE / DELETE
        (supersede) / NOOP, tally counts.
 
@@ -276,15 +279,19 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     # stable wall clock, so re-runs add no churn.
     consolidate_mod.consolidate()
 
-    # Phase b — M8 块文法: (block_type, text) 序列 → 连续同 provenance 块合并成段
-    # (G2) + 段预算截尾 (N4, 替换旧 4000 平截断); 逐段调 adapter 提取, fact 直接
-    # 继承段 provenance (M2 通道; veracity 由 M3 映射自动生成, 不另传)。
-    # 无 regex 降级 — LLM 不可用即 raise block, 不静默产低质量 fact。
+    # Phase b — M8 块文法 + M6 占位通道: (block_type, text) 序列 → 连续同
+    # provenance 块合并成段 (G2) + 段预算截尾 (N4); 逐段调 M7 gazetteer 占位
+    # 提取器 (词典+regex 三路, 零 LLM inline), fact 直接继承段 provenance
+    # (M2 通道; veracity 由 M3 映射自动生成, 不另传)。wings (adapter LLM)
+    # 退役为异步升级 — 主径 provider 断供不再 RuntimeError (反 ADR-5)。
+    # TODO(M4): 段/事实标记待升级 — gazetteer 占位产出应入 upgrade 队列供 wings 异步升级 (M4 建表时接)。
     blocks = _read_transcript(transcript_path)
     segments = _build_segments(blocks)
-    active_providers = adapter.default_providers() if providers is None else providers
+    # M6: providers 仅供 contradiction judge (显式传入才生效); 主径提取零 LLM,
+    # 不再 default_providers() 自取。
+    active_providers = list(providers) if providers else []
     seg_results: list[tuple[str, Any]] = [
-        (prov, adapter.extract_facts(text, providers=active_providers))
+        (prov, gazetteer.extract(text))
         for prov, text in segments
     ]
 
@@ -391,9 +398,9 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
             # Same (subject, predicate), different value: supersede ONLY on a real
             # contradiction (ADR-1 R1). Multivalue predicates (uses/depends_on/...)
             # short-circuit to no-contradiction (coexist); single-valued/open
-            # predicates ask the LLM judge. Provider unreachable → no-contradiction
-            # fallback (do NOT supersede, do NOT block ingest). 一致性:
-            # contradiction ⇒ supersede 设 valid_to (与 bi-temporal supersede 一致).
+            # predicates ask the judge — M6 占位径 providers 默认 [] → 规则
+            # fallback (值比较共存, 不 supersede 不阻断); 显式传 providers 时才
+            # 问 LLM judge。一致性: contradiction ⇒ supersede 设 valid_to。
             subject_type = name_to_type.get(subject, "concept")
             siblings = _has_active_for_predicate(subject_id, predicate)
             contradicting = [s for s in siblings

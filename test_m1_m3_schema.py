@@ -19,8 +19,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-import adapter
 import autodream
+import gazetteer
 import consolidate
 import db
 import embedding
@@ -288,7 +288,7 @@ def test_autodream_contradiction_writes_reason():
                                 new_value, old_value):
             return {"contradiction": True, "reason": "单值谓词不同值"}
 
-    def _fake_extract(text, providers=None, wings=None):
+    def _fake_extract(text):
         return Extraction(
             entities=[EntityOut("ContraSubj", "concept")],
             edges=[EdgeOut("ContraSubj", "is_a", "new_val", topic="")],
@@ -297,14 +297,14 @@ def test_autodream_contradiction_writes_reason():
         )
 
     orig_embed = embedding.embed
-    orig_extract = adapter.extract_facts
+    orig_extract = gazetteer.extract
     embedding.embed = lambda text, providers=None: []  # resolver step2 跳过, 不触本地服务
-    adapter.extract_facts = _fake_extract
+    gazetteer.extract = _fake_extract  # M6: 提取主径 seam 迁至 gazetteer
     try:
         out = autodream.autodream("sess-m1m3", str(tpath), providers=[_Prov()])
     finally:
         embedding.embed = orig_embed
-        adapter.extract_facts = orig_extract
+        gazetteer.extract = orig_extract
 
     assert out["deleted"] == 1 and out["added"] == 1, (
         f"contradiction 分支应 1 supersede + 1 add, got {out}")

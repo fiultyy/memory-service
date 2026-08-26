@@ -16,8 +16,8 @@ import json
 import tempfile
 from pathlib import Path
 
-import adapter
 import autodream
+import gazetteer
 import db
 import embedding
 from llm_provider import EdgeOut, EntityOut, Extraction
@@ -145,7 +145,7 @@ class _MarkerExtractor:
     def __init__(self):
         self.calls: list[str] = []
 
-    def __call__(self, text, providers=None, wings=None):
+    def __call__(self, text):  # M6: gazetteer.extract seam (单参, 零 LLM)
         self.calls.append(text)
         # 整词匹配: MARKT 是 MARKTU 的子串, 子串匹配会串段 (fixture 设计坑)。
         words = set(text.split())
@@ -178,14 +178,14 @@ def _run_autodream(tmpdir: str, extractor, session_id="sess-m8"):
     tpath = Path(tmpdir) / "session.jsonl"
     _attrib_fixture(tpath)
     orig_embed = embedding.embed
-    orig_extract = adapter.extract_facts
+    orig_extract = gazetteer.extract
     embedding.embed = lambda text, providers=None: []
-    adapter.extract_facts = extractor
+    gazetteer.extract = extractor  # M6: 主径 seam 迁至 gazetteer
     try:
         out = autodream.autodream(session_id, str(tpath), providers=[])
     finally:
         embedding.embed = orig_embed
-        adapter.extract_facts = orig_extract
+        gazetteer.extract = orig_extract
     return out, tpath
 
 
@@ -245,14 +245,14 @@ def test_total_over_4000_not_flat_truncated():
 
     extractor = _MarkerExtractor()
     orig_embed = embedding.embed
-    orig_extract = adapter.extract_facts
+    orig_extract = gazetteer.extract
     embedding.embed = lambda text, providers=None: []
-    adapter.extract_facts = extractor
+    gazetteer.extract = extractor  # M6: 主径 seam 迁至 gazetteer
     try:
         autodream.autodream("sess-budget", str(tpath), providers=[])
     finally:
         embedding.embed = orig_embed
-        adapter.extract_facts = orig_extract
+        gazetteer.extract = orig_extract
 
     assert len(extractor.calls) == 5, (
         f"五段都应被提取 (旧 4000 平截只剩 ~4 段), got {len(extractor.calls)}")

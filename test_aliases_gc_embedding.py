@@ -96,7 +96,8 @@ def test_resolve_step1_gc_no_self_alias_after_merge():
 def test_resolve_step2_gc_alias_dedup():
     """step2 LLM 合并: surface form 记入别名后 GC 清掉精确冗余(case-variant 保留)。"""
     _fresh_db()
-    vec = [1.0, 0.0, 0.0]
+    import vec_index as _vi
+    vec = [1.0, 0.0, 0.0] + [0.0] * (_vi.VEC_DIM - 3)  # perf/vec-index: pad
     js_id = store.put_entity("JavaScript", "tool", name_embedding=vec)
 
     class _FakeLLM:
@@ -215,32 +216,35 @@ def test_backfill_skips_nonempty_legacy_bare_list():
 # ── _cosine_topk 维度不匹配惰性 re-embed (③) ─────────────────────────
 
 def test_cosine_topk_lazy_reembed_dim_mismatch():
-    """老裸 list dim=4 行, 查询 emb dim=3 → 惰性 re-embed 升级 dim=3 让其成候选。"""
+    """perf/vec-index 语义迁移: 老裸 list dim≠VEC_DIM 行 → heal_entities_if_pending
+    re-embed(当前维度)落盘并入索引后成候选 (旧惰性 re-embed 语义由 heal 承接)。"""
     _fresh_db()
-    # 老结构行: dim=4 裸 list
+    import vec_index
     old_id = store.put_entity("OldDim4", "tool")
     conn = db.get_conn()
     conn.execute("UPDATE entity SET name_embedding=? WHERE id=?",
                  (json.dumps([1.0, 0.0, 0.0, 0.0]), old_id))
     conn.commit()
-
-    vec3 = [1.0, 0.0, 0.0]
-
-    class _FakeEmb:
-        model = "fake"
-        def embed(self, text): return list(vec3)
+    # 触发覆盖缺口标记 (sync 走维度不匹配路径)。
+    vec_now = [1.0, 0.0, 0.0] + [0.0] * (vec_index.VEC_DIM - 3)
 
     orig = embedding.embed
-    embedding.embed = lambda text, providers=None: list(vec3)
+    orig_batch = embedding.embed_batch
+    embedding.embed = lambda text, providers=None: list(vec_now)
+    embedding.embed_batch = lambda texts, providers=None: [list(vec_now)] * len(texts)
     try:
-        cands = resolver._cosine_topk(vec3, 5, embedding_providers=[_FakeEmb()])
+        vec_index.sync_entity(old_id, [1.0, 0.0, 0.0, 0.0])  # dim 缺口 → pending
+        healed = vec_index.heal_entities_if_pending()
+        cands = resolver._cosine_topk(vec_now, 5, embedding_providers=[])
     finally:
         embedding.embed = orig
+        embedding.embed_batch = orig_batch
+    assert healed == 1, f"老结构行应被 heal, got {healed}"
     ids = [c["id"] for c in cands]
-    assert old_id in ids, "dim=4 老行经惰性 re-embed 升级后应成候选"
-    # 候选 score 正常(dim=3 对齐后 cosine)
+    assert old_id in ids, "heal 后老行应成 ANN 候选"
     cand = [c for c in cands if c["id"] == old_id][0]
-    assert abs(cand["score"] - 1.0) < 1e-6
+    # vec0 cosine 距离 float32 精度 (~1e-4 漂移), 容差放宽。
+    assert abs(cand["score"] - 1.0) < 1e-3
 
 
 def test_cosine_topk_dim_mismatch_no_provider_skips():
@@ -258,8 +262,10 @@ def test_cosine_topk_dim_mismatch_no_provider_skips():
 def test_cosine_topk_new_structure_matches():
     """新结构 {v,dim} 行 dim 匹配 → 正常入候选, 无需 re-embed。"""
     _fresh_db()
-    new_id = store.put_entity("NewStruct", "tool", name_embedding=[1.0, 0.0, 0.0])
-    cands = resolver._cosine_topk([1.0, 0.0, 0.0], 5, embedding_providers=[])
+    import vec_index as _vi2
+    v = [1.0, 0.0, 0.0] + [0.0] * (_vi2.VEC_DIM - 3)
+    new_id = store.put_entity("NewStruct", "tool", name_embedding=v)
+    cands = resolver._cosine_topk(v, 5, embedding_providers=[])
     assert new_id in [c["id"] for c in cands]
 
 
@@ -302,34 +308,39 @@ def test_cosine_topk_reembed_persists_to_db():
     之前调 backfill(WHERE 漏老裸list行)→ rowcount=0 不落盘 → 每次重算。
     """
     _fresh_db()
+    import vec_index
     old_id = store.put_entity("OldDim4", "tool")
     conn = db.get_conn()
     conn.execute("UPDATE entity SET name_embedding=? WHERE id=?",
                  (json.dumps([1.0, 0.0, 0.0, 0.0]), old_id))  # 老裸 list dim=4
     conn.commit()
-    vec3 = [1.0, 0.0, 0.0]
+    vec_now = [1.0, 0.0, 0.0] + [0.0] * (vec_index.VEC_DIM - 3)
 
     orig = embedding.embed
-    embedding.embed = lambda text, providers=None: list(vec3)
+    orig_batch = embedding.embed_batch
+    embedding.embed = lambda text, providers=None: list(vec_now)
+    embedding.embed_batch = lambda texts, providers=None: [list(vec_now)] * len(texts)
     try:
-        resolver._cosine_topk(vec3, 5, embedding_providers=["fake"])
+        vec_index.sync_entity(old_id, [1.0, 0.0, 0.0, 0.0])  # 缺口 → pending
+        vec_index.heal_entities_if_pending()
     finally:
         embedding.embed = orig
+        embedding.embed_batch = orig_batch
 
-    # B2 核心断言: re-embed 后 DB raw 应是新结构(非老裸 list)
+    # B2 核心断言 (语义迁移): heal 后 DB raw 应是新结构当前维度(非老裸 list)
     raw = conn.execute("SELECT name_embedding FROM entity WHERE id=?", (old_id,)).fetchone()[0]
     assert raw != json.dumps([1.0, 0.0, 0.0, 0.0]), (
-        f"B2: re-embed 未落盘! raw 仍为老裸 list: {raw}"
+        f"B2: heal 未落盘! raw 仍为老裸 list: {raw}"
     )
     doc = json.loads(raw)
-    assert "v" in doc and doc["v"] == [1.0, 0.0, 0.0], (
-        f"B2: re-embed 落盘应为新结构 v={vec3}, got raw={raw}"
+    assert "v" in doc and doc["v"] == vec_now, (
+        f"B2: heal 落盘应为新结构 v=当前维度, got raw={raw}"
     )
     # 二次调用不 re-embed(已落盘新结构 dim 匹配): 如果 _cosine_topk 仍调
     # embedding.embed → AssertionError 传播 → 测试 fail(不再静吞)。
     embedding.embed = lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("不应 re-embed: 已落盘新结构 dim 匹配"))
     try:
-        resolver._cosine_topk(vec3, 5, embedding_providers=["fake"])
+        resolver._cosine_topk(vec_now, 5, embedding_providers=["fake"])
     finally:
         embedding.embed = orig

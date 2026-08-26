@@ -91,6 +91,11 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     if "material_prov" not in uq_cols:
         conn.execute("ALTER TABLE upgrade_queue ADD COLUMN material_prov TEXT")
     conn.commit()
+    # perf/vec-index: sqlite-vec **硬依赖** (用户裁决 2026-08-26: 无降级 —
+    # 失败响亮 raise VecIndexError 含可行动诊断, 不静默回退)。建 vec_entity/
+    # vec_fact 两张 vec0 虚拟表 (cosine 度量)。
+    import vec_index
+    vec_index.init_conn(conn)
     _conn = conn
     _conn_path = str(path)
     return conn

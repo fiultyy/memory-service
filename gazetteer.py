@@ -142,6 +142,114 @@ def _dict_entity_hits(masked: str, gaz: dict[str, tuple[str, str]]
     return hits
 
 
+# ── ①+ 语义优先实体匹配 (追加任务 B: 词典①路升级为表面+语义双路) ────
+
+# CJK 候选 span: CJK 字符 run (标点/空白切分), 长 2–12 字。
+_CJK_RUN = re.compile(r"[一-龥]{2,12}")
+
+# 语义链接阈值 (用户裁决实测: 跨语言同义对 cosine 0.53–0.81, 无关对照
+# 0.31–0.34, 分离带清晰 → 0.45 可用; [设] 可调)。
+_SEMANTIC_LINK_THRESHOLD = 0.45
+
+# 语义候选容量闸 (单段 span 上限; ponytail MVP)。
+_MAX_SEMANTIC_SPANS = 16
+
+
+def _semantic_entity_hits(masked: str, gaz: dict[str, tuple[str, str]],
+                          dict_hits: dict[str, EntityOut]
+                          ) -> dict[str, str]:
+    """B 路触发位: CJK 候选 span (词典未覆盖) → 共用管道语义链接。
+
+    返回 ``{span_lower: canonical}`` 映射 (供 ②③ 路归一, 防关系路把已
+    语义链接的 span 原文再声明为新实体)。与 step1/词典表面精确匹配
+    **并行不替代**: 词典命中的 span 不重算 (零成本优先)。
+    """
+    seen_lower = {a.lower() for e in dict_hits.values() for a in e.aliases}
+    seen_lower |= {e.name.lower() for e in dict_hits.values()}
+    spans: list[str] = []
+    for m in _CJK_RUN.finditer(masked):
+        s = m.group(0)
+        if s.lower() in seen_lower or s.lower() in gaz:
+            continue  # 词典/已命中 surface 精确覆盖 → 语义路不重算
+        if s not in spans:
+            spans.append(s)
+        if len(spans) >= _MAX_SEMANTIC_SPANS:
+            break
+    return _link_spans(spans, dict_hits)
+
+
+def _link_spans(spans: list[str],
+                dict_hits: dict[str, EntityOut]) -> dict[str, str]:
+    """B/C 共用语义链接核心: span 批量 embed → vec_entity ANN → 最高
+    cosine ≥ ``_SEMANTIC_LINK_THRESHOLD`` → 链接既有 canonical 实体
+    (in-place 并入 dict_hits), 返回 ``{span_lower: canonical}``。
+
+    跨语言同义投影 (「护理担保」→ "aged care guarantee", 实测 0.53–0.81;
+    无关对照 0.31–0.39 被阈值拦)。embedding 离线 ([]) / 索引不可用 →
+    静默跳过 (降级不 crash, 循 resolver 红线; 主径不受影响)。
+    """
+    semantic_map: dict[str, str] = {}
+    if not spans:
+        return semantic_map
+    try:
+        import embedding
+        vecs = embedding.embed_batch(spans)
+    except Exception:
+        return semantic_map
+    import vec_index
+    conn = db.get_conn()
+    for span, vec in zip(spans, vecs):
+        if not vec:
+            continue
+        try:
+            top = vec_index.entity_topk(vec, 1)
+        except Exception:
+            return semantic_map
+        if not top:
+            continue
+        eid, sim = top[0]
+        if sim < _SEMANTIC_LINK_THRESHOLD:
+            continue  # 无关注联 (< 0.45) 不误链
+        row = conn.execute(
+            "SELECT name, entity_type FROM entity WHERE id = ?",
+            (eid,)).fetchone()
+        if row is None:
+            continue
+        canonical = row["name"]
+        semantic_map[span.lower()] = canonical
+        if canonical in dict_hits:
+            dict_hits[canonical].aliases.append(span)  # 语义 surface 参考归一
+        else:
+            dict_hits[canonical] = EntityOut(
+                name=canonical, type=row["entity_type"], aliases=[span])
+    return semantic_map
+
+
+def semantic_fallback_hits(text: str) -> list[EntityOut]:
+    """追加任务 C: 空提取段的零 LLM 向量兜底 — CJK run span 批量 embed →
+    vec_entity ANN ≥0.45 → 链接既有实体。
+
+    产出形态: **实体声明** (EntityOut, declared 类型) — 不硬造谓词边 (span
+    无句式证据, 造边=臆测; 谓词留 wings)。C 不吞 A: 命中若干实体后段仍无
+    edges → 调用方 (autodream) 仍按 A 层入队 (实体链接了, 语义内容还没提)。
+    与 B 共用 :func:`_link_spans` 管道 (span 生成同 _CJK_RUN, 阈值同
+    ``_SEMANTIC_LINK_THRESHOLD``), 触发位在空提取段兜底处。
+    """
+    masked = _mask_code_zones(text)  # 块分流 A 前置同防 (代码区 span 不产)
+    spans: list[str] = []
+    for m in _CJK_RUN.finditer(masked):
+        s = m.group(0)
+        if s not in spans:
+            spans.append(s)
+        if len(spans) >= _MAX_SEMANTIC_SPANS:
+            break
+    if not spans:
+        return []
+    hits: dict[str, EntityOut] = {}
+    _link_spans(spans, hits)
+    return list(hits.values())
+
+
 # ── ②③ extractor.py 休眠模式复活 (§7 冻结指模式资产; 复活调用不违冻结) ──
 
 def extract(text: str) -> Extraction:
@@ -157,6 +265,10 @@ def extract(text: str) -> Extraction:
 
     # ① 词典: 命中链到既有 canonical 名 (resolver step1 落到既有 id)。
     entities: dict[str, EntityOut] = _dict_entity_hits(masked, gaz)
+    # ①+ 语义优先 (追加任务 B): 词典未覆盖的 CJK span 批量 embed → ANN →
+    # ≥0.45 链接 canonical (跨语言同义投影); 返回 span→canonical 映射贯通
+    # ②③ 路 (防关系路把已语义链接的 span 原文再声明为实体)。
+    semantic_map = _semantic_entity_hits(masked, gaz, entities)
     dict_hit_names = {e.name for e in entities.values()}
     # 词典全域 surface (lower): regex 实体名 case-fold 命中任一已知 surface →
     # canonical 已覆盖, 不重复声明 (词典优先于 regex surface 形)。
@@ -170,19 +282,70 @@ def extract(text: str) -> Extraction:
         # 词典 canonical 已覆盖同一 surface (case-fold) → 不重复声明。
         if name.strip().lower() in dict_surfaces_lower or name in dict_hit_names:
             continue
+        # 语义路已链接该 surface → canonical 已声明, 不重复。
+        if semantic_map.get(name.strip().lower()):
+            continue
         entities.setdefault(name, EntityOut(name=name, type=ent["entity_type"]))
 
     # ③ 关系模式 → edges; subject/object 必须 declared (wings 契约)。端点若
     # case-fold 命中词典 surface → 归一为 canonical (词典链接在提取面即生效,
-    # 防 surface 形重复声明)。
+    # 防 surface 形重复声明); 语义链接的 span 同归一到 canonical。
     def _canon(name: str) -> str:
-        hit = gaz.get(name.strip().lower())
-        return hit[0] if hit else name
+        low = name.strip().lower()
+        hit = gaz.get(low)
+        if hit:
+            return hit[0]
+        sem = semantic_map.get(low)
+        return sem if sem else name
+
+    raw_facts = extractor._extract_facts(masked)
+    # 端点级语义链接 (B 补): CJK run 与关系模式切出的 span 不一致 (run 含
+    # 关系动词整串, 模式切短 span) — 对仍为原文的端点批 embed+ANN, ≥阈值归
+    # 一 canonical, 防 span 形态差导致重复新建。
+    endpoint_canon: dict[str, str] = {}
+    pending_eps: list[str] = []
+    for fact in raw_facts:
+        for ep in (fact["subject"], fact["object"]):
+            ep = (ep or "").strip()
+            low = ep.lower()
+            if (not ep or low in endpoint_canon or ep in pending_eps
+                    or gaz.get(low) or semantic_map.get(low)):
+                continue
+            pending_eps.append(ep)
+    if pending_eps:
+        try:
+            import embedding
+            ep_vecs = embedding.embed_batch(pending_eps)
+        except Exception:
+            ep_vecs = []
+        if ep_vecs:
+            import vec_index
+            econn = db.get_conn()
+            for ep, vec in zip(pending_eps, ep_vecs):
+                if not vec:
+                    continue
+                try:
+                    top = vec_index.entity_topk(vec, 1)
+                except Exception:
+                    break
+                if top and top[0][1] >= _SEMANTIC_LINK_THRESHOLD:
+                    row = econn.execute(
+                        "SELECT name FROM entity WHERE id = ?",
+                        (top[0][0],)).fetchone()
+                    if row is not None:
+                        endpoint_canon[ep.lower()] = row["name"]
+
+    def _canon_full(name: str) -> str:
+        base = _canon(name)
+        if base != name:
+            return base
+        return endpoint_canon.get(name.strip().lower(), name)
 
     edges: list[EdgeOut] = []
-    for fact in extractor._extract_facts(masked):
+    for fact in raw_facts:
         subject, predicate, obj = (
-            _canon(fact["subject"]), fact["predicate"], _canon(fact["object"]))
+            _canon_full(fact["subject"]), fact["predicate"],
+            _canon_full(fact["object"]))
         if _ENV_NAME.match(subject) or _ENV_NAME.match(obj):
             continue
         for name, etype in ((subject, "concept"), (obj, "concept")):

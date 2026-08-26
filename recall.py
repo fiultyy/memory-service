@@ -307,24 +307,27 @@ def recall(
             seen_ids.add(rid)
             candidates.append(store._decode_fact(r))
 
-    # ADR-13 向量候选扩展(use_vec): query embed → cosine vs active fact.value →
-    # top-N 加入候选集。解 synonym/rewrite 字面盲区(铁锈↔rust cosine 信号 > 字面 0)。
+    # ADR-13 向量候选扩展(use_vec): query embed 一次 → vec_fact ANN top-N
+    # (perf/vec-index: 替代逐 fact 重 embed+Python 余弦; cosine 度量语义等价)。
     # embedding passive([]); use_vec 且 qv 空时跳过(回退纯字面/centrality/LIF)。
     qv = embedding.embed(query) if use_vec else []
     if qv:
+        import vec_index
         vec_cands: list[tuple[dict[str, Any], float]] = []
-        for r in value_rows:
-            rid = r["id"]
-            val = r["value"]
-            if not val or rid in seen_ids:
-                continue
-            fv = embedding.embed(val)
-            if not fv:
-                continue
-            sim = _cosine(qv, fv)
+        ann = vec_index.fact_topk(qv, VEC_TOP_N * 3)  # 多取兜 active 过滤
+        rows_by_id = {}
+        if ann:
+            ph = ",".join("?" * len(ann))
+            vrows = conn.execute(
+                f"SELECT * FROM fact WHERE id IN ({ph}) AND status = 'active'",
+                [fid for fid, _ in ann]).fetchall()
+            rows_by_id = {r["id"]: r for r in vrows}
+        for fid, sim in ann:
+            r = rows_by_id.get(fid)
+            if r is None or fid in seen_ids:
+                continue  # 非活跃 (vec 行残留双保险) / 已入候选
             if sim >= VEC_MIN:
                 vec_cands.append((store._decode_fact(r), sim))
-        vec_cands.sort(key=lambda x: -x[1])
         for f, _sim in vec_cands[:VEC_TOP_N]:
             if f["id"] not in seen_ids:
                 seen_ids.add(f["id"])

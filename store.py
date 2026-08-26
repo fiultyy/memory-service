@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import db
+import vec_index
 
 
 def _now() -> str:
@@ -75,7 +76,11 @@ def put_entity(name: str, entity_type: str, properties: dict[str, Any] | None = 
                 _now(),
             ),
         )
+        # perf/vec-index: 写路径同步 vec_entity (数据条件跳过: 空/维度不匹配
+        # 无可索引向量; SQL 失败传播 — 硬依赖无降级)。
+        vec_index.sync_entity(eid, name_embedding)
         conn.commit()
+        _invalidate_exact_index()  # step1 字典写时失效
         return eid
     except sqlite3.IntegrityError:
         # UNIQUE(name, entity_type) 冲突 — 并发 re-ingest 同实体。复用既有行, 不建孤儿。
@@ -196,22 +201,51 @@ def _decode_entity(row: Any) -> dict[str, Any]:
     }
 
 
+# perf/vec-index: step1 进程内 name/alias 小写→id 字典 (消全表扫)。
+# 一次构建写时失效: put_entity/add_aliases/set_aliases/remove_aliases 置 None。
+_exact_index: dict[str, str] | None = None
+
+
+def _invalidate_exact_index() -> None:
+    global _exact_index
+    _exact_index = None
+
+
+def _build_exact_index() -> dict[str, str]:
+    """lower(name)/lower(alias) → entity_id, created_at 序 first-wins
+    (与旧逐行扫描的「首个命中」语义一致)。"""
+    conn = db.get_conn()
+    idx: dict[str, str] = {}
+    for row in conn.execute(
+            "SELECT id, name, aliases FROM entity ORDER BY created_at").fetchall():
+        eid = row["id"]
+        for surface in [row["name"]] + (json.loads(row["aliases"]) if row["aliases"] else []):
+            key = (surface or "").strip().lower()
+            if key and key not in idx:  # first-wins (created_at 序)
+                idx[key] = eid
+    return idx
+
+
 def find_entity_exact(name: str) -> dict[str, Any] | None:
     """大小写不敏感精确匹配 (合并廉价闸专用, ADR-D7)。
 
     命中当 entity.name.lower() == name.lower() 或 name.lower() 在 aliases(大小写
     不敏感)中。**区别于** find_entities_by_name(大小写敏感、不查 alias、返回 list)。
-    rows 量小 → Python 侧比对。命中返回第一个 _decode_entity, 否则 None。
+    perf/vec-index: 进程内字典一次构建写时失效 (消每候选全表扫), 语义与旧
+    逐行扫描等价 (created_at 序 first-wins, name/alias 同键合并)。
     """
+    global _exact_index
+    target = (name or "").strip().lower()
+    if not target:
+        return None
+    if _exact_index is None:
+        _exact_index = _build_exact_index()
+    eid = _exact_index.get(target)
+    if eid is None:
+        return None
     conn = db.get_conn()
-    target = name.lower()
-    for row in conn.execute("SELECT * FROM entity ORDER BY created_at").fetchall():
-        ent = _decode_entity(row)
-        if ent["name"].lower() == target:
-            return ent
-        if target in [a.lower() for a in ent.get("aliases") or []]:
-            return ent
-    return None
+    row = conn.execute("SELECT * FROM entity WHERE id = ?", (eid,)).fetchone()
+    return _decode_entity(row) if row else None
 
 
 def backfill_entity_embedding(entity_id: str, name_embedding: list[float] | None) -> int:
@@ -233,6 +267,8 @@ def backfill_entity_embedding(entity_id: str, name_embedding: list[float] | None
         (_encode_embedding(name_embedding), entity_id),
     )
     conn.commit()
+    if cur.rowcount:
+        vec_index.sync_entity(entity_id, name_embedding)  # vec 行同步
     return cur.rowcount
 
 def upsert_entity_embedding(entity_id: str, name_embedding: list[float] | None) -> int:
@@ -253,6 +289,8 @@ def upsert_entity_embedding(entity_id: str, name_embedding: list[float] | None) 
         (_encode_embedding(name_embedding), entity_id),
     )
     conn.commit()
+    if cur.rowcount:
+        vec_index.sync_entity(entity_id, name_embedding)  # vec 行同步
     return cur.rowcount
 
 
@@ -272,6 +310,7 @@ def add_aliases(entity_id: str, new_aliases: list[str]) -> None:
         (json.dumps(merged, ensure_ascii=False), entity_id),
     )
     conn.commit()
+    _invalidate_exact_index()  # alias 增量影响 step1 字典
 
 
 def set_aliases(entity_id: str, aliases: list[str]) -> None:
@@ -289,6 +328,7 @@ def set_aliases(entity_id: str, aliases: list[str]) -> None:
         (json.dumps(clean, ensure_ascii=False), entity_id),
     )
     conn.commit()
+    _invalidate_exact_index()  # alias 全量替换影响 step1 字典
 
 
 def remove_aliases(entity_id: str, to_remove: list[str]) -> None:
@@ -308,6 +348,7 @@ def remove_aliases(entity_id: str, to_remove: list[str]) -> None:
         (json.dumps(kept, ensure_ascii=False), entity_id),
     )
     conn.commit()
+    _invalidate_exact_index()  # alias 移除影响 step1 字典
 
 # ── Fact ────────────────────────────────────────────────────────────
 
@@ -399,7 +440,9 @@ def put_fact(
     if value:
         try:
             import embedding
-            embedding.embed(value)  # ponytail: L2 cache 预热 (on-ingest), passive 失败不影响写入
+            vec = embedding.embed(value)  # ponytail: L2 cache 预热 (on-ingest), passive 失败不影响写入
+            # perf/vec-index: 写路径同步 vec_fact (embed 离线=[] → 数据条件跳过)。
+            vec_index.sync_fact(fid, vec)
         except Exception:
             pass
     return fid
@@ -439,6 +482,10 @@ def update_fact_status(fact_id: str, status: str, supersedes_id: str | None = No
         (status, supersedes_id, valid_to, reason, fact_id),
     )
     conn.commit()
+    if status != "active":
+        # perf/vec-index: 非活跃 (superseded/deprecated/deleted) → 删 vec_fact
+        # 行保持一致 (查询面另有 active 过滤兜底, 双保险)。
+        vec_index.delete_fact(fact_id)
 
 
 def _decode_fact(row: Any) -> dict[str, Any]:

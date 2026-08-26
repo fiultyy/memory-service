@@ -311,10 +311,27 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     # M6: providers 仅供 contradiction judge (显式传入才生效); 主径提取零 LLM,
     # 不再 default_providers() 自取。
     active_providers = list(providers) if providers else []
-    seg_results: list[tuple[str, Any]] = [
-        (prov, gazetteer.extract(text))
-        for prov, text in segments
-    ]
+    # 分段提取 + 三级空产出时序 (追加 A/C): 段提取零产出 →
+    #   C 层 (零 LLM 兜底): CJK span 批量 embed → vec_entity ANN ≥0.45 →
+    #     链接既有实体 (**只产实体声明不造谓词边** — span 无句式证据造边=
+    #     臆测, 谓词留 wings; 落库走 resolver step1 精确命中路径);
+    #   仍无 edges → A 层: enqueue_segment 全文入队 (wings 异步; C 不吞 A —
+    #     实体链接了语义内容还没提)。
+    # 幂等: 同 material_ref 拒重; M9 novelty (embedding 语言中立) 定优先级,
+    # wings 判「无事实」→ 合法 done, attempts≥3 封顶防重复浪费。
+    seg_results: list[tuple[str, Any]] = []
+    for seg_idx, (seg_prov, seg_text) in enumerate(segments):
+        result = gazetteer.extract(seg_text)
+        if not result.entities and not result.edges:
+            # C 层: 语义兜底实体声明 (与 B 共用 _link_spans 管道)。
+            c_ents = gazetteer.semantic_fallback_hits(seg_text)
+            if c_ents:
+                result.entities = c_ents  # 实体声明接管; edges 保持空
+            if not result.edges:
+                # A 层: 全文入队 (C 命中实体但无边也入 — 语义内容待 wings)。
+                upgrade.enqueue_segment(transcript_path, seg_idx, seg_text,
+                                        provenance=seg_prov)
+        seg_results.append((seg_prov, result))
 
     # Initial 5-dim LIF at ingest (ADR-8v2): distinct_sessions=1 when session_id
     # present (fact's seen_sessions starts with it). coherence=1.0 (no siblings
@@ -359,13 +376,26 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 lif_source=lif_dims["lif_source"],
             )
 
+        # perf/vec-index: 段级实体批式消解 — 一次 embed 批 (embed_batch 单次
+        # POST 预热 L1) + 逐名三步协议 (aliases 语义经 aliases_map 全保留);
+        # names 跨段共享 name_to_id 缓存。
+        seg_entities = [ent for ent in result.entities if ent.name]
+        seg_resolved = resolver.resolve_entities_batch(
+            [e.name for e in seg_entities],
+            entity_types=[e.type for e in seg_entities],
+            aliases_map={e.name: list(e.aliases) for e in seg_entities
+                         if getattr(e, "aliases", None)},
+            providers=active_providers) if seg_entities else {}
         for ent in result.entities:
             if not ent.name:
                 continue
-            sid = resolver.resolve_entity(
-                ent.name, ent.type,
-                aliases=getattr(ent, 'aliases', None) or None,
-                providers=active_providers)
+            sid = seg_resolved.get(ent.name)
+            if sid is None and ent.name not in seg_resolved:
+                # 批式未覆盖 (异常防御) → 单条兜底, 协议不变。
+                sid = resolver.resolve_entity(
+                    ent.name, ent.type,
+                    aliases=getattr(ent, 'aliases', None) or None,
+                    providers=active_providers)
             if sid is not None:
                 name_to_id[ent.name] = sid
                 name_to_type[ent.name] = ent.type

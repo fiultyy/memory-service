@@ -61,6 +61,31 @@ class OpenAICompatEmbedding:
                 KeyError, IndexError):
             return []
 
+    def embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+        """一次 POST 批量 embed (OpenAI-compat ``input`` 数组; perf/vec-index)。
+        Passive: 失败 → None (调用方试下一 provider); 成功 → 按 index 对齐
+        的向量列表 (单项失败为 [])。"""
+        body = json.dumps({"model": self.model, "input": list(texts)}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/embeddings", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                doc = json.loads(resp.read().decode("utf-8", "replace"))
+            data = doc.get("data") or []
+            out: list[list[float]] = [[] for _ in texts]
+            for item in data:
+                try:
+                    i = int(item.get("index", 0))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= i < len(out):
+                    out[i] = list(item.get("embedding", []))
+            return out
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError,
+                KeyError, IndexError):
+            return None
+
 
 # 默认 provider 列表: LM Studio qwen3-embedding-4b(中文原生 4B, 实测 blind hit@5
 # 57.1% 碾压 nomic 14.3%)优先, Ollama qwen3 fallback(同模型容错)。
@@ -156,6 +181,53 @@ def embed(text: str, providers: list[EmbeddingProvider] | None = None) -> list[f
             _cache_store(text, v, getattr(p, "model", ""))
             return v
     return []
+
+
+def embed_batch(texts: list[str],
+                providers: list[EmbeddingProvider] | None = None) -> list[list[float]]:
+    """批量 embed (perf/vec-index: 一次 POST 打包, 解逐条 HTTP 往返)。
+
+    两级缓存批查 (L1/L2 命中不打网络); miss 子集按 provider 顺序批调
+    ``embed_batch`` (无该方法 → 逐条 embed 兜底); 单 provider 部分成功即收
+    (空项试下一 provider)。返回与输入等长对齐 (不可得 → [])。**注意**: 批量
+    结果逐条写 L1/L2 缓存 — 后续单条 embed() 走缓存, 语义与单条路径一致。
+    """
+    out: list[list[float]] = [[] for _ in texts]
+    pending: list[int] = []
+    for i, t in enumerate(texts):
+        cached = _cache_lookup(t)
+        if cached is not None:
+            out[i] = cached
+        else:
+            pending.append(i)
+    for p in (providers if providers is not None else default_providers()):
+        if not pending:
+            break
+        batch_fn = getattr(p, "embed_batch", None)
+        if batch_fn is not None:
+            vecs = batch_fn([texts[i] for i in pending])
+            if vecs is None:
+                continue  # provider 不可达 → 试下一个
+            got: list[int] = []
+            for j, i in enumerate(pending):
+                v = vecs[j] if j < len(vecs) else []
+                if v:
+                    out[i] = v
+                    _cache_store(texts[i], v, getattr(p, "model", ""))
+                    got.append(i)
+            pending = [i for i in pending if i not in set(got)]
+        else:
+            # provider 无批式 (自定义 EmbeddingProvider) → 逐条 (走单条缓存)。
+            still: list[int] = []
+            for i in pending:
+                v = p.embed(texts[i])
+                if v:
+                    out[i] = v
+                    _cache_store(texts[i], v, getattr(p, "model", ""))
+                else:
+                    still.append(i)
+            pending = still
+    return out
 
 
 def clear_cache() -> None:

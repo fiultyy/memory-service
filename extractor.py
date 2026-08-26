@@ -60,6 +60,10 @@ _RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
     # v21 双语对称扩充 (向量验证 0.851/0.822, 用户指令: 中英覆盖语义范围一致)
     (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:is\s+located\s+in|is\s+based\s+in)\s+(.+?)(?:\.|,|$)", re.I), "located_in"),
     (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:causes?|leads?\s+to|results?\s+in)\s+(.+?)(?:\.|,|$)", re.I), "causes"),
+    # v21b 高泛化原语集定版 (语料实测驱动: based_on 32次/prefers 26次/decided 20次 > implements 7次)
+    (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:is\s+based\s+on|derives?\s+from|builds?\s+on)\s+(.+?)(?:\.|,|$)", re.I), "based_on"),
+    (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:prefers?|likes?|favors?)\s+(.+?)(?:\.|,|$)", re.I), "prefers"),
+    (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:decided\s+to\s+(?:adopt|use|choose)|chose)\s+(.+?)(?:\.|,|$)", re.I), "decided"),
 ]
 
 # CJK synonym sets: subject/obj char class [一-龥A-Za-z0-9] stops at space/
@@ -70,7 +74,7 @@ _RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
 # located_in/causes 两门双侧同步新增 — 中英谓词覆盖语义范围一致。
 _CJK_RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*是(?:一个|一种|一款)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "is_a"),
-    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:使用|采用|基于|调用|利用)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "uses"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:使用|采用|调用|利用)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "uses"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:依赖|需要)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "depends_on"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:包含|包括)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "contains"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:属于|隶属于?)\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "belongs_to"),
@@ -78,6 +82,11 @@ _CJK_RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:连接到|对接|接入|集成(?:了)?)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "connected_to"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:位于|坐落于?)\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "located_in"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:导致|引发)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "causes"),
+    # v21b 原语集定版: 「基于」从 uses 拆出 (0.777 vs 0.768 向量难分, 模式硬分——兜底分工实证);
+    # prefers/decided 为记忆语料特有高频 (通用 IE 关系集无此门, 语料 26/20 次实据)
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:基于|参考了?|借鉴)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "based_on"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:喜欢|偏好|偏爱|首选)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "prefers"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:决定(?:采用|使用|选)|选定|选择了|拍板)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "decided"),
 ]
 
 MAX_ENTITIES = 20
@@ -150,6 +159,13 @@ def _demo() -> None:
     assert {"subject": "悉尼歌剧院", "predicate": "located_in", "object": "便利朗角"} in r7["facts"], r7
     r8 = extract("缓存失效导致线上故障")
     assert {"subject": "缓存失效", "predicate": "causes", "object": "线上故障"} in r8["facts"], r8
+    # v21b 原语集: 拆出 based_on + 记忆语料特有 prefers/decided。
+    r9 = extract("新方案基于向量索引")
+    assert {"subject": "新方案", "predicate": "based_on", "object": "向量索引"} in r9["facts"], r9
+    r10 = extract("用户偏好深色主题")
+    assert {"subject": "用户", "predicate": "prefers", "object": "深色主题"} in r10["facts"], r10
+    r11 = extract("团队决定采用智谱")
+    assert {"subject": "团队", "predicate": "decided", "object": "采用智谱"} in r11["facts"], r11
     print("ok")
 
 

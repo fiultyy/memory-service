@@ -61,7 +61,7 @@ def extract_channel() -> str:
 
 # ── prompt (资产版本化: docs/llm-extract-prompt.md 是唯一权威文本) ────
 
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 # 单段输入 token 预算 (chars): bootstrap CHUNK=4000 同量级; LLM 通道在
 # autodream 段级调用 (段已 ≤ 预算), 此处再设硬顶防 transcript 超长段。
@@ -86,11 +86,13 @@ _SYSTEM_PROMPT = """你是双语记忆抽取员, 从输入文本段抽取知识�
 
 ## 事实 (facts)
 - subject: 必须是 entities[].name 里出现过的名字 (原样引用, 不可改写)
-- predicate: 从 12 门枚举里选一个:
-  is_a(是/属于类别) | uses(使用/采用) | depends_on(依赖/需要) | contains(包含)
-  belongs_to(属于/隶属) | implements(实现/落地) | connected_to(连接/对接/集成)
-  located_in(位于) | causes(导致/引发) | based_on(基于/借鉴)
-  prefers(偏好/首选) | decided(决定采用/选定)
+- predicate: **开放词汇** — 小写 snake_case 英文动词短语, 精确表达原文关系语义。
+  优先使用核心谓词: is_a(是/属于类别) | uses(使用/采用) | depends_on(依赖/需要) | contains(包含)
+  | belongs_to(属于/隶属) | implements(实现/落地) | connected_to(连接/对接/集成) | located_in(位于)
+  | causes(导致/引发) | based_on(基于/借鉴) | prefers(偏好/首选) | decided(决定采用/选定)
+  核心集表达不了时**自造精确谓词**, 例: competitor_of(竞品) | runs_on(部署/运行于)
+  | triggers(触发) | owns(拥有/名下) | part_of(组成部分) | migrated_to(迁移至) | monitors(监控)
+  原则: 一词一义, 宁可具体不可笼统 (「有关联」才用 connected_to)
 - object: 另一个已声明实体的 name (原样引用); 若原文目标是字面值 (版本号/日期/数值), 用 object 引用最近的已声明实体并在 value 里放字面值
 - value: 可选字面值 (str), 仅当原文是字面量陈述 (如 "版本 0.1.9")
 - confidence: 0.0-1.0 浮点, 你对这条事实确实在原文中有依据的置信度
@@ -134,6 +136,29 @@ def _clamp01(v: Any) -> float:
     except (TypeError, ValueError):
         raise SchemaViolation(f"confidence 非数值: {v!r}")
     return max(0.0, min(1.0, f))
+
+
+def _norm_predicate(raw: Any) -> str:
+    """开放谓词归一 (batch 13): snake_case 化 + 长度门。
+
+    "Competes With" → competes_with; 空白/超长拒 (SchemaViolation)。
+    CJK 原样保留 (聚类层处理跨语并名), 拉丁部分统一小写下划线。"""
+    if not isinstance(raw, str):
+        raise SchemaViolation(f"predicate 非 str: {raw!r}")
+    s = raw.strip()
+    if not s:
+        raise SchemaViolation("predicate 空")
+    if len(s) > 64:
+        raise SchemaViolation(f"predicate 超长(>64): {s[:40]!r}…")
+    import re
+    if re.search(r"[\u4e00-\u9fff]", s):
+        return s  # CJK 谓词原样 (predgate 聚类并名)
+    s = re.sub(r"[\s\-]+", "_", s.lower())
+    s = re.sub(r"[^a-z0-9_]", "", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        raise SchemaViolation(f"predicate 归一后为空: {raw!r}")
+    return s
 
 
 def validate(doc: Any) -> tuple[list[EntityOut], list[EdgeOut], float]:
@@ -193,9 +218,10 @@ def validate(doc: Any) -> tuple[list[EntityOut], list[EdgeOut], float]:
         subj, obj = subj.strip(), obj.strip()
         if not subj or not obj:
             raise SchemaViolation(f"subject/object 空: {f!r}")
-        if pred not in PREDICATES:
-            raise SchemaViolation(
-                f"predicate 表外: {pred!r} (合法: {sorted(PREDICATES)})")
+        # batch 13 开放谓词: 枚举门撤 (用户裁决「开放」), 归一门接管
+        # (snake_case 化 + 长度门); 聚类归 canonical 由 predgate 在
+        # autodream 聚边步骤做 (此处不 embed — 保持提取层纯)。
+        pred = _norm_predicate(pred)
         if subj not in seen_names:
             raise SchemaViolation(f"subject 未声明: {subj!r}")
         if obj not in seen_names:
@@ -259,7 +285,7 @@ _TOOL_DEF: dict = {
                         "subject": {"type": "string",
                                     "description": "引用 entities[].name"},
                         "predicate": {"type": "string",
-                                      "enum": sorted(PREDICATES)},
+                                      "description": "小写 snake_case 动词短语; 优先核心集(is_a/uses/depends_on/contains/belongs_to/implements/connected_to/located_in/causes/based_on/prefers/decided), 不够精确时自造(competitor_of/runs_on/triggers/owns/part_of/...) — 一词一义, 宁具体不笼统"},
                         "object": {"type": "string",
                                    "description": "引用 entities[].name"},
                         "value": {"type": "string"},

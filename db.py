@@ -92,6 +92,19 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE upgrade_queue ADD COLUMN material_text TEXT")
     if "material_prov" not in uq_cols:
         conn.execute("ALTER TABLE upgrade_queue ADD COLUMN material_prov TEXT")
+    # batch 13 migration (开放谓词, 用户裁决 2026-08-27): fact 补 raw_predicate
+    # (LLM 原文谓词; predicate 列存聚类后 canonical) + predicate_registry
+    # 谓词注册表 (canonical/计数/embedding — 近似度词频统计机制)。
+    fact_cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
+    if "raw_predicate" not in fact_cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN raw_predicate TEXT")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS predicate_registry (
+               canonical TEXT PRIMARY KEY,
+               count INTEGER NOT NULL DEFAULT 0,
+               embedding TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+           )""")
     # perf/vec-index: sqlite-vec **硬依赖** (用户裁决 2026-08-26: 无降级 —
     # 失败响亮 raise VecIndexError 含可行动诊断, 不静默回退)。建 vec_entity/
     # vec_fact 两张 vec0 虚拟表 (cosine 度量)。

@@ -425,6 +425,7 @@ def put_fact(
     topic: str | None = None,
     provenance: str | None = None,
     veracity: float | None = None,
+    raw_predicate: str | None = None,
 ) -> str:
     """Insert a Fact (reified), return its id.
 
@@ -466,8 +467,8 @@ def put_fact(
             status, supersedes_id, created_at,
             lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
             access_count, last_accessed_at, seen_sessions, source_cwd, topic,
-            provenance, veracity)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            provenance, veracity, raw_predicate)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fid, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, frozen_lif, confidence,
@@ -478,6 +479,7 @@ def put_fact(
             json.dumps(seen_sessions or [], ensure_ascii=False),
             source_cwd, topic,
             provenance, veracity,
+            raw_predicate,
         ),
     )
     if value:

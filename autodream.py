@@ -414,6 +414,24 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     src_ref = f"session:{session_id}" if session_id else None
     added = updated = deleted = noop = 0
 
+    # batch 13 谓词聚边 (用户裁决 2026-08-27: 开放词汇 + 近似度聚类 + 词频
+    # 统计): 段提取完成后、Phase c 增量决策前 — 去重/supersede 比较必须发生
+    # 在 canonical 谓词上 (同义异名谓词一跑内互躲去重)。「最后」位置 = 最后
+    # 的提取后步骤 / 第一个持久化前步骤。fact.predicate=canonical,
+    # raw_predicate=原文; registry 计数 = 词频统计机制。
+    _raw_preds = [e.predicate for _p, _r in seg_results for e in _r.edges]
+    _canon_map: dict[str, str] = {}
+    if _raw_preds:
+        import predgate as predgate_mod
+        try:
+            _canon_map = predgate_mod.cluster(_raw_preds)
+        except Exception:
+            # 聚边失败不阻断 ingest (词频统计是增强面, 非正确性面) —
+            # 降级为恒等映射 (raw 即 canonical), 响亮 log。
+            print(f"AUTODREAM-WARN: predgate.cluster 失败, 谓词未聚边: "
+                  f"{_raw_preds[:3]}…", flush=True)
+            _canon_map = {}
+
     # Phase c — incremental decision per edge, per segment (M8: fact 继承段 provenance)。
     # R1 档 1: entities first (so declared types land), then edges. subject AND
     # object both resolve to entities → put_fact(object_id=...) 必非空.
@@ -487,6 +505,8 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
         for edge in result.edges:
             subject = (edge.subject or "").strip()
             predicate = (edge.predicate or "").strip()
+            raw_predicate = predicate
+            predicate = _canon_map.get(predicate, predicate)
             value = (edge.object or "").strip()
             if not subject or not predicate or not value:
                 continue
@@ -562,6 +582,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                     source_refs=[src_ref] if src_ref else [],
                     seen_sessions=[session_id] if session_id else [],
                     topic=topic,
+                    raw_predicate=raw_predicate,
                 )
                 for old in contradicting:
                     store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now(), reason="contradiction")  # M1: contradiction 必带 reason
@@ -584,6 +605,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 source_refs=[src_ref] if src_ref else [],
                 seen_sessions=[session_id] if session_id else [],
                 topic=topic,
+                raw_predicate=raw_predicate,
             )
             # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
             fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))

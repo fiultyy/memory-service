@@ -124,10 +124,17 @@ def test_extract_provider_timeout_raises():
 
 
 def test_schema_predicate_enum_enforced():
-    """predicate 表外 → SchemaViolation (整体拒, 不静默丢条)。"""
+    """batch 13 反转: predicate 开放 (枚举门撤, 用户裁决「开放」) — 表外
+    谓词现归一后通过; 空白/超长仍拒 (归一门)。"""
     doc = json.loads(json.dumps(_GOOD_DOC))
     doc["facts"][0]["predicate"] = "relates_to"
-    with pytest.raises(SchemaViolation, match="predicate 表外"):
+    _ents, edges, _ = validate(doc)
+    assert edges[0].predicate == "relates_to"  # 开放通过
+    doc["facts"][0]["predicate"] = "Competes With"
+    _ents, edges, _ = validate(doc)
+    assert edges[0].predicate == "competes_with"  # snake_case 归一
+    doc["facts"][0]["predicate"] = "   "
+    with pytest.raises(SchemaViolation, match="predicate 空"):
         validate(doc)
 
 

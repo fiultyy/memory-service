@@ -1,6 +1,6 @@
 # llm-extract prompt 资产 (batch 12)
 
-> 版本: **v2** (2026-08-27) · 代码: `llm_extract.py::_SYSTEM_PROMPT` (与本文逐字一致, 改动必须双同步 + bump 版本)
+> 版本: **v3** (2026-08-27) · 代码: `llm_extract.py::_SYSTEM_PROMPT` (与本文逐字一致, 改动必须双同步 + bump 版本)
 > 模型: glm-5-turbo (智谱 Anthropic 协议直连) · 调用 seam: `llm_provider.ZhipuAnthropicProvider.chat()`
 
 ## 迭代记录
@@ -9,8 +9,9 @@
 |---|---|---|---|
 | v1 | 2026-08-27 | 初版: 双语记忆抽取员角色 / 12 门谓词中英对照 / evidence 强制 / 停用词+自环硬规则 / 2 few-shot (claw 真实段) | T2 全量冷启动 regex 占位层垃圾产出 → 主径改 LLM 直抽 (用户指令) |
 | v2 | 2026-08-27 | 原生结构化: anthropic tool-use (emit_extraction 工具) — prompt 措辞改「调用工具」; tool_choice 修正为官方仅支持的 auto (docs.bigmodel.cn: 默认且仅支持 auto) | 用户指令「结构化!」+ 官方文档核实 |
+| v3 | 2026-08-27 | 谓词开放词汇: 枚举门撤, 归一门接管 (snake_case + 长度); 核心集降为优先参考, 允许自造精确谓词; 聚类归 canonical 由 predgate 聚边步骤做 | 用户裁决「开放」/「放掉按LLM提」(batch 13) |
 
-## System prompt 全文 (v2)
+## System prompt 全文 (v3)
 
 ```
 你是双语记忆抽取员, 从输入文本段抽取知识图谱实体与事实。必须通过调用 emit_extraction 工具报告结果, 不要输出解释、markdown 或自由文本 JSON。
@@ -23,11 +24,13 @@
 
 ## 事实 (facts)
 - subject: 必须是 entities[].name 里出现过的名字 (原样引用, 不可改写)
-- predicate: 从 12 门枚举里选一个:
-  is_a(是/属于类别) | uses(使用/采用) | depends_on(依赖/需要) | contains(包含)
-  belongs_to(属于/隶属) | implements(实现/落地) | connected_to(连接/对接/集成)
-  located_in(位于) | causes(导致/引发) | based_on(基于/借鉴)
-  prefers(偏好/首选) | decided(决定采用/选定)
+- predicate: **开放词汇** — 小写 snake_case 英文动词短语, 精确表达原文关系语义。
+  优先使用核心谓词: is_a(是/属于类别) | uses(使用/采用) | depends_on(依赖/需要) | contains(包含)
+  | belongs_to(属于/隶属) | implements(实现/落地) | connected_to(连接/对接/集成) | located_in(位于)
+  | causes(导致/引发) | based_on(基于/借鉴) | prefers(偏好/首选) | decided(决定采用/选定)
+  核心集表达不了时**自造精确谓词**, 例: competitor_of(竞品) | runs_on(部署/运行于)
+  | triggers(触发) | owns(拥有/名下) | part_of(组成部分) | migrated_to(迁移至) | monitors(监控)
+  原则: 一词一义, 宁可具体不可笼统 (「有关联」才用 connected_to)
 - object: 另一个已声明实体的 name (原样引用); 若原文目标是字面值 (版本号/日期/数值), 用 object 引用最近的已声明实体并在 value 里放字面值
 - value: 可选字面值 (str), 仅当原文是字面量陈述 (如 "版本 0.1.9")
 - confidence: 0.0-1.0 浮点, 你对这条事实确实在原文中有依据的置信度

@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS fact (
     seen_sessions   TEXT NOT NULL DEFAULT '[]',     -- JSON array: sessions that recalled this fact (drives lif_spread)
     source_cwd    TEXT,                             -- ADR-14: 来源 cwd(b 方案, 跨 cwd 隔离; NULL=老数据/未知, recall --cwd 过滤含 NULL)
     topic        TEXT,                              -- ADR-C: LLM 生成的一句话可读事实(投影 filename slug + index title + description)
+    supersede_reason TEXT,                          -- M1: contradiction|dedup|upgrade|confirm (update_fact_status reason 参写入; NULL=legacy 不回填)
+    provenance       TEXT,                          -- M2: user_prose|tool_obs|agent_assert|human|system (P21 出处轴; M8 块归因接线)
+    veracity         REAL,                          -- M3: P21 f(provenance) 权重标量 (DR-5 b / DR-6 REAL; NULL=legacy 不回填)
     created_at    TEXT NOT NULL,
     FOREIGN KEY (subject_id) REFERENCES entity(id),
     FOREIGN KEY (object_id)  REFERENCES entity(id),

@@ -41,6 +41,16 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     # ADR-C migration: 老 db fact 表无 topic 列 → ALTER ADD。
     if "topic" not in cols:
         conn.execute("ALTER TABLE fact ADD COLUMN topic TEXT")
+    # M1/M2/M3 migration (spec v2 schema 批): 老 db fact 表无 supersede_reason /
+    # provenance / veracity 三列 → ALTER ADD。存量行不回填 (writer 不可考不臆测,
+    # NULL=legacy — spec §1 v2·G11 默认); veracity 初值由 put_fact 按 provenance
+    # 映射写入 (store.PROVENANCE_VERACITY), 老行无 provenance 亦不可考 → 同不回填。
+    if "supersede_reason" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN supersede_reason TEXT")
+    if "provenance" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN provenance TEXT")
+    if "veracity" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN veracity REAL")
     # ADR-D7 migration: 老 db entity 表无 aliases/name_embedding 列 → ALTER ADD。
     ent_cols = {r[1] for r in conn.execute("PRAGMA table_info(entity)")}
     if "aliases" not in ent_cols:

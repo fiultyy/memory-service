@@ -238,13 +238,36 @@ def _check_trigger(state: dict, cwd: str) -> dict:
 # dreaming ≥ _DREAM_INTERVAL 才触发 dream.run_cycle() 六职责; 常量可调。
 _DREAM_INTERVAL = 86400  # s (≤1d cron 语义, spec M11)
 
+# M12 投影卫生 (零 LLM 三动作) 独立门控: 比 dream 高频 ([设] 可调)。
+# 时序铁律: KG 维护完成后才跑 — dream 到期的轮次卫生紧随同轮 (见 _maybe_dream),
+# 未到期时卫生按自身门控独立跑。
+_HYGIENE_INTERVAL = 3600  # s
+
+
+def _run_hygiene(state: dict, cwd: str) -> dict:
+    """M12 卫生轮: 异常不杀 daemon (try/except 记日志继续), last_run 恒推进。"""
+    try:
+        import hygiene
+        import projection
+        stats = hygiene.run(cwd, projection.cc_memory_dir(cwd))
+        _log(f"hygiene cycle → {stats}")
+    except Exception as exc:
+        _log(f"ERROR hygiene cycle: {exc} (continuing)")
+    state["_hygiene"] = {"last_run": time.time()}
+    return state
+
 
 def _maybe_dream(state: dict, cwd: str) -> dict:
     """Dreaming 阶段门控: 到期才跑, 单轮异常不杀 daemon (try/except 记日志继续)。
-    水位存 state["_dreaming"]["last_run"] (epoch s) — 与 transcript offset 同文件。"""
+    水位存 state["_dreaming"]["last_run"] (epoch s) — 与 transcript offset 同文件。
+    M12: dream 已跑 → 卫生同轮紧随 (KG 维护完成后才跑, 防复活); dream 未到期 →
+    卫生按 _HYGIENE_INTERVAL 独立门控。"""
     import dream  # 惰性 import (dream 拉起 adapter/embedding 全链)
     last = (state.get("_dreaming") or {}).get("last_run", 0)
     if time.time() - last < _DREAM_INTERVAL:
+        h_last = (state.get("_hygiene") or {}).get("last_run", 0)
+        if time.time() - h_last >= _HYGIENE_INTERVAL:
+            state = _run_hygiene(state, cwd)
         return state
     try:
         stats = dream.run_cycle(source_cwd=cwd)
@@ -252,7 +275,7 @@ def _maybe_dream(state: dict, cwd: str) -> dict:
     except Exception as exc:
         _log(f"ERROR dream cycle: {exc} (continuing)")
     state["_dreaming"] = {"last_run": time.time()}
-    return state
+    return _run_hygiene(state, cwd)  # M12 时序铁律: KG 维护后紧随同轮
 
 
 def run(cwd: str | None = None, interval: int = POLL_INTERVAL, once: bool = False) -> int:

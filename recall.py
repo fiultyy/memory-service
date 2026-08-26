@@ -36,6 +36,13 @@ import signals
 import store
 
 # ADR-13 向量层(use_vec): 候选扩展 + vec_sim 阈值/top-N。
+# M13 (G5 已裁决): BFS 扩展入场门槛 — seed/hop 邻居经扩展通道入场的 fact 需
+# lif_source ≥ _BFS_SOURCE_GATE (0.7): regex 0.4 档占位噪声拒、llm 0.7/vote
+# 0.85/human 0.9 过。BFS 是增益通道非主检索 — 字面 seed/向量/中心性路径不受
+# 门槛影响 (低 source fact 仍可被直接查询召回)。hop>0 绕 0.3 过滤的 §7 语义
+# 保留, 但只对过了本门槛入场的扩展 fact 生效 (低分邻居的边不因 bypass 入图
+# — 门槛在 append 点, 未入场者永不进 bfs_expanded_ids)。[设] 可调。
+_BFS_SOURCE_GATE = 0.7
 VEC_MIN = 0.30   # cosine ≥ 此的 active fact 入向量候选(避免全 noise 污染 top-k)
 VEC_TOP_N = 20   # 向量候选上限(扩展 entity/value 候选集)
 # ADR-4 bfs hint: direct-match 薄(候选 < 阈值)且 use_bfs=False 时 suggest_bfs。
@@ -345,6 +352,8 @@ def recall(
         neighbor_eids = [eid for eid in bfs_result if eid not in seed_ids]
         if neighbor_eids:
             for f in _facts_for_entities(neighbor_eids, as_of=as_of):
+                if float(f.get("lif_source") or 0.0) < _BFS_SOURCE_GATE:
+                    continue  # M13 G5: BFS 扩展入场门槛 lif_source≥0.7
                 fid = f["id"]
                 if fid not in seen_ids:
                     seen_ids.add(fid)

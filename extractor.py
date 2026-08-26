@@ -74,7 +74,7 @@ _RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
 # located_in/causes 两门双侧同步新增 — 中英谓词覆盖语义范围一致。
 _CJK_RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*是(?:一个|一种|一款)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "is_a"),
-    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:使用|采用|调用|利用)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "uses"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?<!决定)(?:使用|采用|调用|利用)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "uses"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:依赖|需要)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "depends_on"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:包含|包括)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "contains"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:属于|隶属于?)\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "belongs_to"),
@@ -165,7 +165,9 @@ def _demo() -> None:
     r10 = extract("用户偏好深色主题")
     assert {"subject": "用户", "predicate": "prefers", "object": "深色主题"} in r10["facts"], r10
     r11 = extract("团队决定采用智谱")
-    assert {"subject": "团队", "predicate": "decided", "object": "采用智谱"} in r11["facts"], r11
+    # decided 谓词吸收「采用」(谓语的一部分), object=智谱; uses 门负回顾防双重命中
+    assert {"subject": "团队", "predicate": "decided", "object": "智谱"} in r11["facts"], r11
+    assert not any(f["predicate"] == "uses" for f in r11["facts"]), r11
     print("ok")
 
 

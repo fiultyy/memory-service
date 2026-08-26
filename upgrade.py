@@ -44,7 +44,8 @@ def _now() -> str:
 def enqueue(material_ref: str, *, transcript_path: str | None = None,
             byte_offset: int | None = None, text: str = "",
             predicates: tuple[str, ...] = (),
-            entities: tuple[str, ...] = ()) -> str | None:
+            entities: tuple[str, ...] = (),
+            material_prov: str | None = None) -> str | None:
     """入队一项升级素材 (M9 surprise 入队时算)。同 material_ref 已在 → no-op
     返 None (幂等; done/dead 也不复活 — 冻结语义由人工/M11 重算路径接管)。"""
     conn = db.get_conn()
@@ -57,27 +58,32 @@ def enqueue(material_ref: str, *, transcript_path: str | None = None,
     conn.execute(
         """INSERT INTO upgrade_queue
            (id, material_ref, transcript_path, byte_offset, surprise, priority,
-            status, attempts, created_at, updated_at)
-           VALUES (?,?,?,?,?,?, 'pending', 0, ?, ?)""",
+            status, attempts, material_text, material_prov, created_at, updated_at)
+           VALUES (?,?,?,?,?,?, 'pending', 0, ?, ?, ?, ?)""",
         (qid, material_ref, transcript_path, byte_offset,
-         s["surprise"], s["priority"], now, now),
+         s["surprise"], s["priority"], text, material_prov, now, now),
     )
     conn.commit()
     return qid
 
 
-def enqueue_segment(transcript_path: str, seg_index: int, text: str) -> str | None:
-    """M8 wire 点: 超长段被截尾的段全文 ref 入队 (material_ref 记定位+段序)。"""
+def enqueue_segment(transcript_path: str, seg_index: int, text: str,
+                    provenance: str | None = None) -> str | None:
+    """M8 wire 点: 超长段被截尾的段全文 ref 入队 (material_ref 记定位+段序)。
+    material_text = 段全文 (M11 wings 升级的提取输入, 源不变式)。"""
     return enqueue(f"segment:{transcript_path}#seg{seg_index}",
                    transcript_path=transcript_path, byte_offset=seg_index,
-                   text=text)
+                   text=text, material_prov=provenance)
 
 
-def enqueue_fact(fact_id: str, *, subject: str, predicate: str, obj: str) -> str | None:
-    """M6 wire 点: 占位 fact (extractor='regex') 落库后待升级项入队。"""
+def enqueue_fact(fact_id: str, *, subject: str, predicate: str, obj: str,
+                 provenance: str | None = None) -> str | None:
+    """M6 wire 点: 占位 fact (extractor='regex') 落库后待升级项入队。
+    material_text = 入队时由 transcript 提取面转写的三元组文本 (非 KG 回读)。"""
     return enqueue(f"fact:{fact_id}",
                    text=f"{subject} {predicate} {obj}".strip(),
-                   predicates=(predicate,), entities=(subject, obj))
+                   predicates=(predicate,), entities=(subject, obj),
+                   material_prov=provenance)
 
 
 def dequeue(limit: int = DEFAULT_BATCH) -> list[dict[str, Any]]:
@@ -97,6 +103,21 @@ def dequeue(limit: int = DEFAULT_BATCH) -> list[dict[str, Any]]:
         )
         conn.commit()
     return [dict(r) for r in rows]
+
+
+def revert(item_ids: list[str]) -> int:
+    """in_flight → pending 批量回退, 不加 attempts (M11: LLM 不可达整轮跳过时
+    保住重试预算 — G3 attempts 只烧在真失败上)。返回回退行数。"""
+    if not item_ids:
+        return 0
+    conn = db.get_conn()
+    conn.executemany(
+        "UPDATE upgrade_queue SET status='pending', updated_at=? "
+        "WHERE id=? AND status='in_flight'",
+        [(_now(), i) for i in item_ids],
+    )
+    conn.commit()
+    return len(item_ids)
 
 
 def mark_done(item_id: str) -> None:

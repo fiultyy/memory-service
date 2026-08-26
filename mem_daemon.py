@@ -234,6 +234,27 @@ def _check_trigger(state: dict, cwd: str) -> dict:
 
 # ── Daemon loop ─────────────────────────────────────────────────────
 
+# M11 (DR-8 G8 已裁决: 扩展 mem_daemon 主循环作 dreaming 载体): 距上次
+# dreaming ≥ _DREAM_INTERVAL 才触发 dream.run_cycle() 六职责; 常量可调。
+_DREAM_INTERVAL = 86400  # s (≤1d cron 语义, spec M11)
+
+
+def _maybe_dream(state: dict, cwd: str) -> dict:
+    """Dreaming 阶段门控: 到期才跑, 单轮异常不杀 daemon (try/except 记日志继续)。
+    水位存 state["_dreaming"]["last_run"] (epoch s) — 与 transcript offset 同文件。"""
+    import dream  # 惰性 import (dream 拉起 adapter/embedding 全链)
+    last = (state.get("_dreaming") or {}).get("last_run", 0)
+    if time.time() - last < _DREAM_INTERVAL:
+        return state
+    try:
+        stats = dream.run_cycle(source_cwd=cwd)
+        _log(f"dream cycle → {stats}")
+    except Exception as exc:
+        _log(f"ERROR dream cycle: {exc} (continuing)")
+    state["_dreaming"] = {"last_run": time.time()}
+    return state
+
+
 def run(cwd: str | None = None, interval: int = POLL_INTERVAL, once: bool = False) -> int:
     """Run the daemon loop. Returns 0 (always — daemon is best-effort)."""
     watch_cwd = cwd or os.getcwd()
@@ -277,6 +298,7 @@ def run(cwd: str | None = None, interval: int = POLL_INTERVAL, once: bool = Fals
         try:
             state = _check_trigger(state, watch_cwd)
             state = _sweep(tdir, watch_cwd, state)
+            state = _maybe_dream(state, watch_cwd)  # M11: dreaming 阶段门控
             _save_state(state)
         except Exception as exc:
             _log(f"ERROR sweep cycle: {exc} (continuing)")

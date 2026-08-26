@@ -83,6 +83,13 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_uq_status_priority ON upgrade_queue(status, priority DESC)"
     )
+    # M11 migration: upgrade_queue 补 material_text/material_prov (源不变式:
+    # wings 升级的提取输入 = 入队时转写的素材原文, 永不读自家 KG 作提取输入)。
+    uq_cols = {r[1] for r in conn.execute("PRAGMA table_info(upgrade_queue)")}
+    if "material_text" not in uq_cols:
+        conn.execute("ALTER TABLE upgrade_queue ADD COLUMN material_text TEXT")
+    if "material_prov" not in uq_cols:
+        conn.execute("ALTER TABLE upgrade_queue ADD COLUMN material_prov TEXT")
     conn.commit()
     _conn = conn
     _conn_path = str(path)

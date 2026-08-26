@@ -305,7 +305,9 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     segments = _build_segments(blocks, truncated=truncated_segs)
     # M8→M4 wire: 超长段截尾的全文 ref 入升级队列 (wings 异步升级; M9 入队时算 surprise)。
     for seg_idx, full_text in truncated_segs:
-        upgrade.enqueue_segment(transcript_path, seg_idx, full_text)
+        prov_of_seg = segments[seg_idx][0] if seg_idx < len(segments) else None
+        upgrade.enqueue_segment(transcript_path, seg_idx, full_text,
+                                provenance=prov_of_seg)
     # M6: providers 仅供 contradiction judge (显式传入才生效); 主径提取零 LLM,
     # 不再 default_providers() 自取。
     active_providers = list(providers) if providers else []
@@ -442,7 +444,8 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 for old in contradicting:
                     store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now(), reason="contradiction")  # M1: contradiction 必带 reason
                 # M6→M4 wire: 占位 fact 落库后待升级项入队 (wings 异步升级)。
-                upgrade.enqueue_fact(new_id, subject=subject, predicate=predicate, obj=value)
+                upgrade.enqueue_fact(new_id, subject=subject, predicate=predicate, obj=value,
+                                    provenance=seg_provenance)
                 deleted += len(contradicting)
                 added += 1
                 continue
@@ -462,7 +465,8 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 topic=topic,
             )
             # M6→M4 wire: 占位 fact 落库后待升级项入队 (wings 异步升级)。
-            upgrade.enqueue_fact(new_id, subject=subject, predicate=predicate, obj=value)
+            upgrade.enqueue_fact(new_id, subject=subject, predicate=predicate, obj=value,
+                                provenance=seg_provenance)
             added += 1
 
     return {"added": added, "updated": updated, "deleted": deleted, "noop": noop}

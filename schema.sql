@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS upgrade_queue (
     status          TEXT NOT NULL DEFAULT 'pending'
                     CHECK(status IN ('pending','in_flight','done','failed','dead')),
     attempts        INTEGER NOT NULL DEFAULT 0,
+    material_text   TEXT,                          -- M11: 入队时转写的升级素材原文(源不变式: 提取输入=队列 material, 非 KG 读)
+    material_prov   TEXT,                          -- M11: 素材段 provenance (wings 升级产出继承)
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );

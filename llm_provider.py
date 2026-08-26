@@ -359,7 +359,9 @@ class ZhipuAnthropicProvider:
         # 模型回了非 JSON / 字段缺失 → 不抛, 默认不矛盾(不阻断 ingest)。
         return {"contradiction": False, "reason": "parse-failure"}
 
-    def chat(self, system: str, messages: list, max_tokens: int = 1500) -> str:
+    def chat(self, system: str, messages: list, max_tokens: int = 1500,
+             tools: list | None = None,
+             tool_choice: dict | None = None) -> str:
         """通用单轮结构化对话 (batch 12 llm_extract 专用 seam)。
 
         与 extract_facts/dedupe_entity 的 passive 语义**相反**: 失败**抛**
@@ -367,15 +369,24 @@ class ZhipuAnthropicProvider:
         需要「LLM 不可达 → skip + errors 记账, 绝不静默降级」的响亮语义,
         由调用方 (bootstrap 既有 except RuntimeError) 承接; 本类既有方法
         不受影响。返回首个 text block 原文 (解析/校验归调用方)。
+
+        tools/tool_choice (anthropic tool-use; 直连实测支持): 传入时响应
+        应为 tool_use block — 本方法返回其 input 的 JSON 串 (调用方按
+        schema 校验; 返回值类型不变, 存量调用无 tools 路径零影响)。
         """
         key = self.api_key or _load_zhipu_key()
         if not key:
             raise ProviderCallError(
                 "no api_key (set ZHIPU_API_KEY in .env)")
-        body = json.dumps({
+        body_d: dict = {
             "model": self.model, "max_tokens": max_tokens,
             "system": system, "messages": messages,
-        }).encode("utf-8")
+        }
+        if tools:
+            body_d["tools"] = tools
+            body_d["tool_choice"] = tool_choice or {"type": "tool",
+                                                    "name": tools[0]["name"]}
+        body = json.dumps(body_d).encode("utf-8")
         req = urllib.request.Request(
             f"{self.base_url}/v1/messages", data=body,
             headers={"Content-Type": "application/json",
@@ -387,11 +398,39 @@ class ZhipuAnthropicProvider:
                 raw = resp.read().decode("utf-8", "replace")
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
             raise ProviderCallError(f"network: {e!r}") from e
+        if tools:
+            block = _extract_tool_use(raw)
+            if block is not None:
+                return json.dumps(block, ensure_ascii=False)
+            # glm-5-turbo 对复杂抽取 prompt 可能无视 tool_choice 仍回 text
+            # (实测 2026-08-27): 若 text block 是合法 JSON 载体则透传 —
+            # 同一 schema 的两种载体, 非降级; 空坏 JSON 仍 ProviderCallError
+            # 响亮 (调用方 skip+errors, 绝不静默)。
+            content = _extract_text(raw)
+            if content is not None:
+                s = content.strip()
+                if s.startswith("{") or s.startswith("["):
+                    return s
+            raise ProviderCallError(
+                f"no tool_use/JSON-text block in response: {raw[:200]}")
         content = _extract_text(raw)
         if content is None:
             raise ProviderCallError(
                 f"no content block in response: {raw[:200]}")
         return content
+
+
+def _extract_tool_use(raw: str) -> dict | None:
+    """anthropic 响应 → 首个 tool_use block 的 input dict (无则 None)。"""
+    try:
+        doc = json.loads(raw)
+        for b in doc.get("content", []):
+            if b.get("type") == "tool_use":
+                inp = b.get("input")
+                return inp if isinstance(inp, dict) else None
+    except json.JSONDecodeError:
+        pass
+    return None
 
 
 def _load_zhipu_key() -> str:

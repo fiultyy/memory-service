@@ -61,8 +61,9 @@ class MockProvider:
         self.outcomes = list(outcomes)
         self.calls = []
 
-    def chat(self, system, messages, max_tokens=1500):
-        self.calls.append((system, messages))
+    def chat(self, system, messages, max_tokens=1500, tools=None,
+             tool_choice=None):
+        self.calls.append((system, messages, tools))
         out = self.outcomes.pop(0) if self.outcomes else "{}"
         if isinstance(out, Exception):
             raise out

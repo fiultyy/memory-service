@@ -61,7 +61,7 @@ def extract_channel() -> str:
 
 # ── prompt (资产版本化: docs/llm-extract-prompt.md 是唯一权威文本) ────
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 # 单段输入 token 预算 (chars): bootstrap CHUNK=4000 同量级; LLM 通道在
 # autodream 段级调用 (段已 ≤ 预算), 此处再设硬顶防 transcript 超长段。
@@ -76,7 +76,7 @@ def system_prompt() -> str:
     return _SYSTEM_PROMPT
 
 
-_SYSTEM_PROMPT = """你是双语记忆抽取员, 从输入文本段抽取知识图谱实体与事实。只输出纯 JSON, 不要任何解释或 markdown 代码围栏。
+_SYSTEM_PROMPT = """你是双语记忆抽取员, 从输入文本段抽取知识图谱实体与事实。必须通过调用 emit_extraction 工具报告结果, 不要输出解释、markdown 或自由文本 JSON。
 
 ## 实体 (entities)
 - name: 原文中的专有名词/技术术语/概念原样 (保留大小写/连字符/缩写原形, 如 A2A / pydantic-ai / 护理担保)
@@ -112,11 +112,11 @@ _SYSTEM_PROMPT = """你是双语记忆抽取员, 从输入文本段抽取知识�
 
 _USER_TEMPLATE = """## 示例 1 (中文段)
 输入: 2026-08-24 排查 WARP 卡顿: 问题出在 dais 编排循环, 它依赖 logseq-cli 的 node 子进程, 决定采用 pkill 方案兜底。
-输出: {{"entities": [{{"name": "dais", "type": "technical_term", "aliases": []}}, {{"name": "logseq-cli", "type": "technical_term", "aliases": []}}, {{"name": "node", "type": "technical_term", "aliases": ["node 子进程"]}}, {{"name": "pkill", "type": "technical_term", "aliases": ["pkill 方案"]}}], "facts": [{{"subject": "dais", "predicate": "depends_on", "object": "logseq-cli", "value": null, "confidence": 0.9, "evidence": "它依赖 logseq-cli 的 node 子进程"}}, {{"subject": "dais", "predicate": "decided", "object": "pkill", "value": null, "confidence": 0.85, "evidence": "决定采用 pkill 方案兜底"}}]}}
+输出(工具参数): {{"entities": [{{"name": "dais", "type": "technical_term", "aliases": []}}, {{"name": "logseq-cli", "type": "technical_term", "aliases": []}}, {{"name": "node", "type": "technical_term", "aliases": ["node 子进程"]}}, {{"name": "pkill", "type": "technical_term", "aliases": ["pkill 方案"]}}], "facts": [{{"subject": "dais", "predicate": "depends_on", "object": "logseq-cli", "value": null, "confidence": 0.9, "evidence": "它依赖 logseq-cli 的 node 子进程"}}, {{"subject": "dais", "predicate": "decided", "object": "pkill", "value": null, "confidence": 0.85, "evidence": "决定采用 pkill 方案兜底"}}]}}
 
 ## 示例 2 (英文段)
 输入: The smart-glasses project uses an Apollo510b MCU; the team prefers waveguide displays over prism optics for the final build.
-输出: {{"entities": [{{"name": "smart-glasses project", "type": "named_entity", "aliases": ["智能眼镜项目"]}}, {{"name": "Apollo510b", "type": "technical_term", "aliases": ["Apollo510b MCU"]}}, {{"name": "waveguide display", "type": "technical_term", "aliases": ["waveguide displays"]}}, {{"name": "prism optics", "type": "technical_term", "aliases": []}}], "facts": [{{"subject": "smart-glasses project", "predicate": "uses", "object": "Apollo510b", "value": null, "confidence": 0.95, "evidence": "The smart-glasses project uses an Apollo510b MCU"}}, {{"subject": "smart-glasses project", "predicate": "prefers", "object": "waveguide display", "value": null, "confidence": 0.9, "evidence": "the team prefers waveguide displays over prism optics"}}]}}
+输出(工具参数): {{"entities": [{{"name": "smart-glasses project", "type": "named_entity", "aliases": ["智能眼镜项目"]}}, {{"name": "Apollo510b", "type": "technical_term", "aliases": ["Apollo510b MCU"]}}, {{"name": "waveguide display", "type": "technical_term", "aliases": ["waveguide displays"]}}, {{"name": "prism optics", "type": "technical_term", "aliases": []}}], "facts": [{{"subject": "smart-glasses project", "predicate": "uses", "object": "Apollo510b", "value": null, "confidence": 0.95, "evidence": "The smart-glasses project uses an Apollo510b MCU"}}, {{"subject": "smart-glasses project", "predicate": "prefers", "object": "waveguide display", "value": null, "confidence": 0.9, "evidence": "the team prefers waveguide displays over prism optics"}}]}}
 
 ## 现在抽取以下输入段
 输入: {segment}"""
@@ -224,8 +224,65 @@ class ExtractFailed(RuntimeError):
     errors + skip 段 — **绝不静默降级 regex** (用户红线)。"""
 
 
+# ── 原生结构化 (anthropic tool-use; 用户指令「结构化!」2026-08-27) ──────
+
+_TOOL_NAME = "emit_extraction"
+
+_TOOL_DEF: dict = {
+    "name": _TOOL_NAME,
+    "description": "报告从输入段抽取的记忆实体与事实三元组",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "entities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string",
+                                 "description": "实体主名(原文主形)"},
+                        "type": {"type": "string",
+                                 "enum": ["technical_term", "named_entity",
+                                          "quoted_term", "identifier",
+                                          "concept"]},
+                        "aliases": {"type": "array", "items": {"type": "string"},
+                                    "description": "含跨语言同义形"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            "facts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string",
+                                    "description": "引用 entities[].name"},
+                        "predicate": {"type": "string",
+                                      "enum": sorted(PREDICATES)},
+                        "object": {"type": "string",
+                                   "description": "引用 entities[].name"},
+                        "value": {"type": "string"},
+                        "confidence": {"type": "number",
+                                       "description": "0-1"},
+                        "evidence": {"type": "string",
+                                     "description": "原文逐字引用片段"},
+                    },
+                    "required": ["subject", "predicate", "object",
+                                 "evidence"],
+                },
+            },
+        },
+        "required": ["entities", "facts"],
+    },
+}
+
+
 def _parse_json_block(content: str) -> Any:
-    """剥可能的 ```json 围栏后解析整块 JSON; 失败抛 SchemaViolation。"""
+    """剥可能的 ```json 围栏后解析整块 JSON; 失败抛 SchemaViolation。
+
+    tool-use 路径: provider.chat(tools=...) 已返回 tool_use input 的 JSON
+    串 — 本函数同样适用 (无围栏直过 json.loads)。"""
     s = content.strip()
     if s.startswith("```"):
         # ```json\n...\n``` → 取围栏体
@@ -272,15 +329,22 @@ def extract(segment: str, provider=None) -> Extraction:
                 {"role": "assistant", "content": "(上一轮输出未通过校验)"},
                 {"role": "user", "content": (
                     f"你上一轮的输出未通过 schema 校验, 原因: {last_err}。"
-                    "请严格按输出格式重新输出纯 JSON, 不要解释。")},
+                    "请调用 emit_extraction 工具并严格按其参数 schema 重新报告, 不要自由文本。")},
             ]
         try:
             # 输出上限随段长伸缩: 密集大段(月度摘要~2k字)的合法 JSON 可达
             # >1500 tok, 固定默认会在字符串中截断 → 坏 JSON 两轮败(梯度
             # 实测 2026-06/07-summary)。CJK≈1 tok/字, *3 余量, 上限 6000。
             out_cap = max(1500, min(6000, len(segment) * 3))
+            # 原生结构化: anthropic tool-use。**tool_choice 仅 auto 受支持**
+            # (官方文档: docs.bigmodel.cn 函数调用 — 默认且仅支持 auto;
+            # {"type":"tool"} 强制档是未定义行为, 实测被忽略)。prompt v2
+            # 以「必须调用 emit_extraction 工具」措辞引导; 客户端 validate()
+            # 保留双保险, provider 层双载体解析兜底自由文本 JSON。
             content = provider.chat(_SYSTEM_PROMPT, messages,
-                                    max_tokens=out_cap)
+                                    max_tokens=out_cap,
+                                    tools=[_TOOL_DEF],
+                                    tool_choice={"type": "auto"})
         except ProviderCallError as e:
             # 网络层失败重试无意义 (同一 provider 会再败; 且「LLM 不可达 =
             # skip」是既定语义) — 直接响亮抛出。

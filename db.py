@@ -63,6 +63,26 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_name_type ON entity(name, entity_type)"
     )
+    # M4 migration: 老 db 无 upgrade_queue 表(wings 异步升级队列) → CREATE IF NOT EXISTS
+    # (整表新增, 无 ALTER 需求; 重复 init 幂等)。
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS upgrade_queue (
+            id              TEXT PRIMARY KEY,
+            material_ref    TEXT NOT NULL UNIQUE,
+            transcript_path TEXT,
+            byte_offset     INTEGER,
+            surprise        REAL,
+            priority        REAL NOT NULL DEFAULT 0,
+            status          TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending','in_flight','done','failed','dead')),
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uq_status_priority ON upgrade_queue(status, priority DESC)"
+    )
     conn.commit()
     _conn = conn
     _conn_path = str(path)

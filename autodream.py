@@ -40,6 +40,7 @@ import db
 import gazetteer
 import store
 import resolver
+import upgrade
 
 
 def _read_transcript(transcript_path: str | Path) -> list[tuple[str, str]]:
@@ -169,13 +170,18 @@ def _block_provenance(block_type: str) -> str:
 
 
 def _build_segments(blocks: list[tuple[str, str]],
-                    budget: int | None = None) -> list[tuple[str, str]]:
+                    budget: int | None = None,
+                    truncated: list[tuple[int, str]] | None = None) -> list[tuple[str, str]]:
     """连续同 provenance 块合并为段 (M8-v2 G2), 段超预算截尾 (N4)。
 
     Returns ``[(provenance, segment_text), ...]`` in encounter order. 段内块以
     ``\\n`` 连接; 每段文本截尾到 ``budget`` 字符 (缺省
     :data:`_SEGMENT_BUDGET`) — 段预算替换旧 4000 平截断, tool 块入管道后
     长观测不再被整体丢弃, 但单段 LLM 调用有界。
+
+    ``truncated`` (M4 wire, 可选出参): 传入 list 时, 每个发生截尾的段 append
+    ``(seg_index, full_text)`` — 调用方 (autodream) 据此把全文 ref 送入
+    upgrade 队列 (M8→M4 wire 点)。
     """
     if budget is None:
         budget = _SEGMENT_BUDGET
@@ -184,11 +190,20 @@ def _build_segments(blocks: list[tuple[str, str]],
         if not text:
             continue
         prov = _block_provenance(block_type)
-        # N4 段预算截尾; TODO(M4): 被截掉的超长全文 ref 应入 upgrade 队列(wings 异步升级), M4 建表时接。
         if segments and segments[-1][0] == prov:
-            segments[-1] = (prov, (segments[-1][1] + "\n" + text)[:budget])
+            merged = segments[-1][1] + "\n" + text
+            seg_index = len(segments) - 1
+            extend = True
         else:
-            segments.append((prov, text[:budget]))
+            merged = text
+            seg_index = len(segments)
+            extend = False
+        if len(merged) > budget and truncated is not None:
+            truncated.append((seg_index, merged))  # N4 截尾 → M4 全文 ref
+        if extend:
+            segments[-1] = (prov, merged[:budget])
+        else:
+            segments.append((prov, merged[:budget]))
     return segments
 
 
@@ -284,9 +299,13 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     # 提取器 (词典+regex 三路, 零 LLM inline), fact 直接继承段 provenance
     # (M2 通道; veracity 由 M3 映射自动生成, 不另传)。wings (adapter LLM)
     # 退役为异步升级 — 主径 provider 断供不再 RuntimeError (反 ADR-5)。
-    # TODO(M4): 段/事实标记待升级 — gazetteer 占位产出应入 upgrade 队列供 wings 异步升级 (M4 建表时接)。
+    # TODO(M4) 已落地: 段/事实标记待升级 — 两个 wire 点接 upgrade 队列(下)。
     blocks = _read_transcript(transcript_path)
-    segments = _build_segments(blocks)
+    truncated_segs: list[tuple[int, str]] = []
+    segments = _build_segments(blocks, truncated=truncated_segs)
+    # M8→M4 wire: 超长段截尾的全文 ref 入升级队列 (wings 异步升级; M9 入队时算 surprise)。
+    for seg_idx, full_text in truncated_segs:
+        upgrade.enqueue_segment(transcript_path, seg_idx, full_text)
     # M6: providers 仅供 contradiction judge (显式传入才生效); 主径提取零 LLM,
     # 不再 default_providers() 自取。
     active_providers = list(providers) if providers else []
@@ -422,13 +441,15 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 )
                 for old in contradicting:
                     store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now(), reason="contradiction")  # M1: contradiction 必带 reason
+                # M6→M4 wire: 占位 fact 落库后待升级项入队 (wings 异步升级)。
+                upgrade.enqueue_fact(new_id, subject=subject, predicate=predicate, obj=value)
                 deleted += len(contradicting)
                 added += 1
                 continue
             # 多值共存 / 无矛盾 ⇒ 落到下方 brand-new ADD (不 continue)。
 
             # Brand new — ADD.
-            _put_new_fact(
+            new_id = _put_new_fact(
                 subject_id=subject_id,
                 predicate=predicate,
                 value=value,
@@ -440,6 +461,8 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 seen_sessions=[session_id] if session_id else [],
                 topic=topic,
             )
+            # M6→M4 wire: 占位 fact 落库后待升级项入队 (wings 异步升级)。
+            upgrade.enqueue_fact(new_id, subject=subject, predicate=predicate, obj=value)
             added += 1
 
     return {"added": added, "updated": updated, "deleted": deleted, "noop": noop}

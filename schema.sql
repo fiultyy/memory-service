@@ -59,3 +59,21 @@ CREATE INDEX IF NOT EXISTS idx_fact_object  ON fact(object_id);
 CREATE INDEX IF NOT EXISTS idx_fact_pred    ON fact(predicate);
 CREATE INDEX IF NOT EXISTS idx_fact_status  ON fact(status);
 CREATE INDEX IF NOT EXISTS idx_fact_source_cwd ON fact(source_cwd);  -- ADR-14 b 方案
+
+-- M4 (spec v2 §1): wings 异步升级队列 — 占位(regex)产出待 LLM 升级。
+-- status 流转: pending → in_flight → done | failed(→pending 重试) ; attempts≥3 → dead 冻结待人工。
+-- M9: surprise(复合惊喜) + priority(=|surprise|^α, D8 唯一采纳采样公式) 入队时算。
+CREATE TABLE IF NOT EXISTS upgrade_queue (
+    id              TEXT PRIMARY KEY,
+    material_ref    TEXT NOT NULL UNIQUE,      -- 升级素材定位: fact:<id> / segment:<path>#seg<n>
+    transcript_path TEXT,
+    byte_offset     INTEGER,
+    surprise        REAL,                      -- M9 复合惊喜; NULL=embedding 离线不可考
+    priority        REAL NOT NULL DEFAULT 0,   -- |surprise|^α, 出队按此降序
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','in_flight','done','failed','dead')),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_uq_status_priority ON upgrade_queue(status, priority DESC);

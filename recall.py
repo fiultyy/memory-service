@@ -22,6 +22,7 @@ centrality/lif/score) as a debug surface in lieu of a dedicated ``query`` cli.
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ import embedding
 import networkx as nx
 import projection
 import scoring
+import signals
 import store
 
 # ADR-13 向量层(use_vec): 候选扩展 + vec_sim 阈值/top-N。
@@ -390,7 +392,25 @@ def recall(
     # ponytail: linear refresh over the (already top_k-bounded) hit set; O(k)
     # UPDATEs, k typically ≤ top_k. Idempotent within a wall clock — refresh
     # recomputes from stored state, no compounding drift (cf. scoring contract).
-    if boost and scored:
+    #
+    # M10 (DR-1 D3 / DR-7 G7 已裁决): env 灰度 MEM_DELAYED_REINFORCE=1 时强化
+    # 改道 — 即时写回关闭 (等效 boost=False 纯读, recall 读路径无写争用),
+    # 每命中 fact 追加一条 recall_hits 信号 (M5 流, LIF 重算移入 dreaming 批量
+    # 消费 M11)。缺省/0 = 旧行为零变化 (即时 boost 路径原样)。显式
+    # boost=False 仍纯读零信号 (调用方已自弃强化, 无可改道事件)。
+    # refresh_lif_on_recall 函数保留不删 (spec M10 明示); CLI recall 子命令
+    # 同语义透传 (env 控制全局, 不加新 flag)。
+    delayed = os.environ.get("MEM_DELAYED_REINFORCE", "") == "1"
+    if boost and scored and delayed:
+        for s in scored:
+            signals.append("recall_hits", {
+                "fact_id": s["fact"]["id"],
+                "session_id": session_id,
+                "query": query,
+                "score": s["score"],
+                "source_cwd": cwd,
+            })
+    elif boost and scored:
         conn = db.get_conn()
         for s in scored:
             refreshed = scoring.refresh_lif_on_recall(

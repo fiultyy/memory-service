@@ -275,7 +275,12 @@ def extract(segment: str, provider=None) -> Extraction:
                     "请严格按输出格式重新输出纯 JSON, 不要解释。")},
             ]
         try:
-            content = provider.chat(_SYSTEM_PROMPT, messages)
+            # 输出上限随段长伸缩: 密集大段(月度摘要~2k字)的合法 JSON 可达
+            # >1500 tok, 固定默认会在字符串中截断 → 坏 JSON 两轮败(梯度
+            # 实测 2026-06/07-summary)。CJK≈1 tok/字, *3 余量, 上限 6000。
+            out_cap = max(1500, min(6000, len(segment) * 3))
+            content = provider.chat(_SYSTEM_PROMPT, messages,
+                                    max_tokens=out_cap)
         except ProviderCallError as e:
             # 网络层失败重试无意义 (同一 provider 会再败; 且「LLM 不可达 =
             # skip」是既定语义) — 直接响亮抛出。

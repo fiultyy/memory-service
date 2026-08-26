@@ -10,8 +10,9 @@ Architecture (poll-based, no inotify dep):
   2. Per-file byte-offset tracking (state file). On growth ≥ GROWTH_THRESHOLD:
      extract new **complete JSONL lines** (line-boundary aligned) → temp file.
   3. Feed temp file to ``autodream.autodream()`` (idempotent: ADD/UPDATE/DELETE/
-     NOOP). autodream truncates text to 4000 chars — incremental feeding keeps
-     each cycle under that ceiling (full long-session dream stays PreCompact's job).
+     NOOP). autodream applies a per-segment character budget (M8 N4, replaces
+     the old 4000-char flat truncation) — incremental feeding keeps each cycle
+     small (full long-session dream stays PreCompact's job).
   4. Update offset, loop.
 
 CC server-side flag ``tengu_onyx_plover`` gate:

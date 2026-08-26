@@ -131,10 +131,12 @@ def test_stats_json_contract():
 def test_skill_has_four_required_sections():
     """四要点 grep-able: 动词时机教学/查询策略/复述禁令/新实态段落。"""
     text = SKILL_PATH.read_text(encoding="utf-8")
-    # 1. 维护动词时机教学 (含「即将上线」防误用标注)。
+    # 1. 维护动词时机教学 (M16/M18 批后四动词已转正 — 命令形态在位,
+    #    「即将上线」标注被有意移除; 早期版本曾要求该标注, 意图随转正迁移)。
     assert "维护动词时机教学" in text
     assert "该记新事实" in text and "该确认" in text and "该建议失效" in text
-    assert "即将上线" in text, "预告命令形态必须标注即将上线防误用"
+    assert "mem write" in text and "mem confirm" in text
+    assert "mem invalidate" in text and "mem elevate" in text
     assert "无 delete" in text
     # 2. 查询策略 (flag 矩阵 + env 语义)。
     assert "查询策略" in text
@@ -156,5 +158,5 @@ def test_skill_existing_correct_content_kept():
     """不删既有仍正确内容: 触发条件/子命令契约/数据与状态等骨架仍在。"""
     text = SKILL_PATH.read_text(encoding="utf-8")
     for kw in ("触发条件", "子命令契约", "数据与状态", "何时不该用",
-               "synthesis-index", "PreCompact", "11 个子命令"):
+               "synthesis-index", "PreCompact", "个子命令"):
         assert kw in text, f"既有骨架内容被误删: {kw}"

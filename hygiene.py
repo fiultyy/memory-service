@@ -25,7 +25,51 @@ from pathlib import Path
 
 import db
 import projection
+import signals
+import store
 from projection import MEM_FILE_RE, read_fact_id
+
+
+def detect_human_proj_ops(mem_dir: Path | str) -> list[dict]:
+    """M18 投影 diff 检测: mem-*.md 被 human 删除/修改 (mismatch 期望态)
+    → human_proj_ops 信号 + 返回检出事件表。
+
+    期望态 = active fact 有投影文件 (recall/synthesis 建的)。mismatch 两类:
+    - deleted: active fact 的投影文件不存在 (human 删)
+    - modified: 投影文件 fact_id 缺失/不可读 (human 改坏 frontmatter)
+    顺序: **先记信号再由 run() 卫生重排** (期望态重写回, 持久写只发生在
+    KG 档 — human 编辑不直接改 KG)。信号供 dream.run_cycle 消费 →
+    human 档 invalidate/update 裁决 (provenance='human', veracity 0.9)。
+    """
+    mem_dir_p = Path(mem_dir)
+    events: list[dict] = []
+    if not mem_dir_p.is_dir():
+        return events
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT f.id AS fid, f.subject_id FROM fact f WHERE f.status='active'"
+    ).fetchall()
+    for r in rows:
+        # 期望文件名需 topic — 与 projection._mem_filename 同源推导。
+        fact = store.get_fact(r["fid"])
+        if fact is None:
+            continue
+        erow = conn.execute(
+            "SELECT name FROM entity WHERE id=?", (fact["subject_id"],)).fetchone()
+        subj = erow["name"] if erow else "?"
+        fname = projection._mem_filename(r["fid"], projection._fact_topic(fact, subj))
+        p = mem_dir_p / fname
+        if not p.exists():
+            events.append({"op": "deleted", "path": fname, "fact_id": r["fid"]})
+            signals.append("human_proj_ops", {
+                "op": "deleted", "path": fname, "fact_id": r["fid"],
+                "detail": "active fact projection missing (human delete?)"})
+        elif read_fact_id(p) is None:
+            events.append({"op": "modified", "path": fname, "fact_id": r["fid"]})
+            signals.append("human_proj_ops", {
+                "op": "modified", "path": fname, "fact_id": r["fid"],
+                "detail": "projection frontmatter unreadable (human edit?)"})
+    return events
 
 
 def run(cwd: str | None, mem_dir: Path | str) -> dict[str, int]:
@@ -35,6 +79,12 @@ def run(cwd: str | None, mem_dir: Path | str) -> dict[str, int]:
     """
     mem_dir_p = Path(mem_dir)
     stats = {"dedup_removed": 0, "prune_removed": 0, "resorted": 0}
+
+    # ── M18 投影 diff 检测 (先行): human 删/改投影 → 信号落流 (供 dream
+    #    消费 human 档裁决); 随后卫生按 KG 期望态重写回 (见 run 尾
+    #    synthesis_index — project_fact_md 由 recall 重建, 本轮至少保证
+    #    MEMORY [mem] 索引对账)。──
+    stats["human_proj_events"] = len(detect_human_proj_ops(mem_dir_p))
 
     # ── 扫投影文件 → (fact_id, path); 同 synthesis_index 扫描惯例。──
     found: list[tuple[str, Path]] = []

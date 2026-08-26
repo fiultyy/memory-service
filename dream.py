@@ -439,6 +439,56 @@ def _put_wings_fact(*, subject_id: str, predicate: str, value: str,
         lif_coherence=dims["lif_coherence"], lif_source=dims["lif_source"])
 
 
+# ── M18 human 投影操作消费 (human 档裁决) ─────────────────────────────
+
+def _consume_human_proj_ops(source_cwd: str | None) -> int:
+    """水位后新 human_proj_ops 信号 → human 档裁决:
+
+    - deleted (human 删投影 = 撤回意愿) → fact invalidate: status→superseded,
+      provenance='human', veracity 0.9 (M3 映射) — human 档裁决写入。
+    - modified (human 改投影) → 记 update 偏好: fact 的 LIF +0.05 微抬
+      (human 亲笔编辑是最强正信号之一; 不动 status)。
+
+    裁决后推进水位 (独立水位键, 与 recall_hits 互不干扰)。
+    """
+    lines = _stream_lines("human_proj_ops")
+    wm = _load_watermark()
+    last = wm.get("human_proj_ops", 0)
+    fresh = [(ln, r) for ln, r in lines if ln > last]
+    if not fresh:
+        return 0
+    conn = db.get_conn()
+    applied = 0
+    for _, rec in fresh:
+        if source_cwd is not None and rec.get("source_cwd") not in (None, source_cwd):
+            continue
+        fid = rec.get("fact_id")
+        op = rec.get("op")
+        if not fid or op not in ("deleted", "modified"):
+            continue
+        row = conn.execute(
+            "SELECT id, LIF FROM fact WHERE id = ? AND status='active'",
+            (fid,)).fetchone()
+        if row is None:
+            continue  # 已退场 (卫生/decay 先到) — 信号丢弃
+        if op == "deleted":
+            # human 撤回 → 复用 invalidate 语义: superseded + contradiction
+            # (时效标注), 通道档 = human (裁决证据链落在信号里)。
+            store.update_fact_status(fid, "superseded",
+                                     valid_to=store._now(),
+                                     reason="contradiction")
+            conn.execute("UPDATE fact SET provenance='human', veracity=0.9 "
+                         "WHERE id=?", (fid,))
+        else:  # modified — human 亲笔编辑微抬 LIF (update 偏好信号)。
+            conn.execute("UPDATE fact SET LIF = MIN(1.0, LIF + 0.05) "
+                         "WHERE id=?", (fid,))
+        applied += 1
+    conn.commit()
+    wm["human_proj_ops"] = lines[-1][0] if lines else last
+    _save_watermark(wm)
+    return applied
+
+
 # ── 一轮 dreaming ────────────────────────────────────────────────────
 
 def run_cycle(providers: list | None = None,
@@ -450,6 +500,7 @@ def run_cycle(providers: list | None = None,
     """
     stats: dict[str, int] = {}
     stats.update(_replay_recall_hits(source_cwd))            # ①
+    stats["human_proj_applied"] = _consume_human_proj_ops(source_cwd)  # M18
     stats["promoted"] = _promote_facts()                     # ② 上行
     stats["deprecated"] = consolidate_mod.decay()["deprecated"]  # ② 下行 (decay 语义)
     # ⑤ 在 decay 之后: 污染减半写复合 LIF 列, 若先跑会被 decay 的五维重算覆盖

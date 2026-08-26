@@ -36,6 +36,125 @@ import resolver
 from llm_provider import LLMProvider
 
 
+# ── M17/M18 通道判定 (DR-9 G10 已裁决) ──────────────────────────────
+
+def _channel(stdin_isatty: bool | None = None,
+             stdout_isatty: bool | None = None) -> str:
+    """调用通道判定: 物理 tty 且无 agent 自标 → 'human'; 否则 'agent'。
+
+    方向性铁律 (P38 权威梯度=通道梯度): env ``MEM_AGENT_CONTEXT`` 只能**降档**
+    (agent 自标 agent) — 升 human 档必须物理 tty, env 无法伪造 human。
+    参数可注入 isatty (测试); 缺省取当前进程实态。
+    """
+    sin = sys.stdin.isatty() if stdin_isatty is None else stdin_isatty
+    sout = sys.stdout.isatty() if stdout_isatty is None else stdout_isatty
+    if sin and sout and not os.environ.get("MEM_AGENT_CONTEXT"):
+        return "human"
+    return "agent"
+
+
+# ── M17 四动词 + M16 cite (P38 v16 补注映射; 无 delete/punish) ────────
+
+# 高危动词 (human 路径需交互确认; agent 路径免确认直接执行)。
+_HIGH_RISK_VERBS = ("invalidate", "elevate")
+
+
+def _human_confirm(verb: str, target: str) -> bool:
+    """human 路径高危动词交互确认: input y/N, 非 y 拒绝 (M18 梯度)。"""
+    try:
+        ans = input(f"[mem {verb}] 确认对 {target} 执行 {verb}? (y/N) ").strip().lower()
+    except EOFError:
+        return False
+    return ans in ("y", "yes")
+
+
+def mem_write(subject: str, predicate: str, value: str, *,
+              fact_type: str = "stable", source_cwd: str | None = None,
+              channel: str | None = None) -> dict[str, Any]:
+    """四动词 write: 新事实入库。provenance=通道档 (agent→agent_assert 0.5 /
+    human→human 0.9, veracity 走 M3 映射); 不可声明 provenance (无 flag,
+    杜绝伪造面)。信号 agent_crud{verb:write, via:通道}。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    prov = "human" if ch == "human" else "agent_assert"
+    sid = resolver.resolve_entity(subject, "concept", providers=[])
+    fid = store.put_fact(sid, predicate, value, extractor="human" if ch == "human" else "agent",
+                         fact_type=fact_type, provenance=prov,
+                         source_cwd=source_cwd)
+    signals.append("agent_crud", {
+        "verb": "write", "fact_id": fid, "subject": subject,
+        "predicate": predicate, "value": value, "via": ch,
+        "source_cwd": source_cwd})
+    return {"written": fid, "provenance": prov, "channel": ch}
+
+
+def mem_confirm(fact_id: str, *, channel: str | None = None) -> dict[str, Any]:
+    """四动词 confirm: 证实既有 fact — 记 confirm_arrivals 信号 (via=通道)。
+    P22 确认轴: 不动目标 fact 本体 (确认到达是 dreaming 消费的正信号,
+    若判需新版本由 dreaming 以 supersede_reason='confirm' 产生)。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    fact = store.get_fact(fact_id)
+    if fact is None:
+        return {"confirmed": None, "error": f"fact {fact_id} not found"}
+    signals.append("confirm_arrivals", {
+        "fact_id": fact_id, "via": ch,
+        "source_cwd": fact.get("source_cwd")})
+    return {"confirmed": fact_id, "channel": ch}
+
+
+def mem_invalidate(fact_id: str, note: str = "", *,
+                   channel: str | None = None) -> dict[str, Any]:
+    """四动词 invalidate: 失效建议 — 旧 fact status→superseded,
+    supersede_reason='contradiction' (时效标注, 复用 M1 通道); human 路径
+    高危需交互确认。信号 agent_crud{verb:invalidate, via:通道}。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    fact = store.get_fact(fact_id)
+    if fact is None:
+        return {"invalidated": None, "error": f"fact {fact_id} not found"}
+    if ch == "human" and not _human_confirm("invalidate", fact_id):
+        return {"invalidated": None, "declined": True, "channel": ch}
+    store.update_fact_status(fact_id, "superseded",
+                             valid_to=store._now(), reason="contradiction")
+    signals.append("agent_crud", {
+        "verb": "invalidate", "fact_id": fact_id, "via": ch,
+        "source_cwd": fact.get("source_cwd"), "note": note})
+    return {"invalidated": fact_id, "reason": "contradiction", "channel": ch}
+
+
+def mem_elevate(fact_id: str, *, channel: str | None = None) -> dict[str, Any]:
+    """四动词 elevate: 晋升提名 — **不动 fact** (无 supersede, 晋升裁决权在
+    dreaming 的 LIF 阈值), 仅记偏好信号; human 路径高危需交互确认。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    fact = store.get_fact(fact_id)
+    if fact is None:
+        return {"elevated": None, "error": f"fact {fact_id} not found"}
+    if ch == "human" and not _human_confirm("elevate", fact_id):
+        return {"elevated": None, "declined": True, "channel": ch}
+    signals.append("agent_crud", {
+        "verb": "elevate", "fact_id": fact_id, "via": ch,
+        "source_cwd": fact.get("source_cwd")})
+    return {"elevated": fact_id, "channel": ch}  # 信号已记, fact 未动
+
+
+def mem_cite(fact_id: str, output_ref: str = "", *,
+             channel: str | None = None) -> dict[str, Any]:
+    """M16 cite (DR-9 G9): 引用记账 — append citations 信号流
+    (fact_id/agent_output_ref/via=通道)。单向正奖励, 不碰 KG 写面
+    (cite 非权威动词, 不扩 P38 白名单)。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    fact = store.get_fact(fact_id)
+    if fact is None:
+        return {"cited": None, "error": f"fact {fact_id} not found"}
+    signals.append("citations", {
+        "fact_id": fact_id, "agent_output_ref": output_ref, "via": ch,
+        "source_cwd": fact.get("source_cwd")})
+    return {"cited": fact_id, "channel": ch}
+
+
 # ── .env 加载 (stdlib, 无依赖; 早于 provider 实例化) ─────────────────
 def _load_env() -> None:
     """从同目录 .env 加载环境变量到 os.environ (setdefault: 不覆盖已存在的)。
@@ -443,6 +562,25 @@ def _main(argv: list[str] | None = None) -> int:
                    help="只读 churn 快照 (ADR-5): entity/fact 计数 + supersede_rate/active_ratio")
     st = sub.add_parser("stats-json",
                         help="stats 的 M15a 稳定 JSON 契约输出 (同 stats 数据, 契约 shape)")
+
+    # ── M17 四动词 + M16 cite (P38 物化; 无 delete/punish) ──
+    wr = sub.add_parser("write", help="四动词 write: 新事实入库 (provenance=通道档)")
+    wr.add_argument("subject")
+    wr.add_argument("predicate")
+    wr.add_argument("value")
+    wr.add_argument("--fact-type", dest="fact_type", default="stable",
+                    choices=("ephemeral", "stable", "permanent"))
+    wr.add_argument("--cwd", default=None, help="ADR-14 source_cwd")
+    cf = sub.add_parser("confirm", help="四动词 confirm: 证实既有 fact (记信号)")
+    cf.add_argument("fact_id")
+    inv = sub.add_parser("invalidate", help="四动词 invalidate: 失效建议 (superseded+contradiction)")
+    inv.add_argument("fact_id")
+    inv.add_argument("--note", default="", help="失效说明 (入信号)")
+    el = sub.add_parser("elevate", help="四动词 elevate: 晋升提名 (不动 fact, 记偏好信号)")
+    el.add_argument("fact_id")
+    ct = sub.add_parser("cite", help="M16 引用记账 (citations 信号, 单向正奖励)")
+    ct.add_argument("fact_id")
+    ct.add_argument("--ref", default="", help="agent 输出引用 (output_ref)")
     dd = sub.add_parser("dream-daemon",
                         help="启动 autoDream daemon(常驻 autodream loop, operational #1)")
     dd.add_argument("--cwd", default=None, help="project cwd to watch(默认 $PWD)")
@@ -485,6 +623,20 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(embed_backfill(), ensure_ascii=False))
     elif args.cmd in ("stats", "stats-json"):
         print(json.dumps(stats(), ensure_ascii=False))
+    elif args.cmd == "write":
+        print(json.dumps(mem_write(args.subject, args.predicate, args.value,
+                                   fact_type=args.fact_type,
+                                   source_cwd=args.cwd), ensure_ascii=False))
+    elif args.cmd == "confirm":
+        print(json.dumps(mem_confirm(args.fact_id), ensure_ascii=False))
+    elif args.cmd == "invalidate":
+        print(json.dumps(mem_invalidate(args.fact_id, note=args.note),
+                         ensure_ascii=False))
+    elif args.cmd == "elevate":
+        print(json.dumps(mem_elevate(args.fact_id), ensure_ascii=False))
+    elif args.cmd == "cite":
+        print(json.dumps(mem_cite(args.fact_id, output_ref=args.ref),
+                         ensure_ascii=False))
     elif args.cmd == "dream-daemon":
         # daemon runs its own loop (blocking); returns exit code, not JSON.
         return dream_daemon(cwd=args.cwd, interval=args.interval, once=args.once)

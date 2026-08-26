@@ -58,7 +58,7 @@ cd /home/yy/projects/memory-service && python3 cli.py <subcommand> ...
 
 ## 子命令契约(严格对齐 cli.py)
 
-11 个子命令(详见 `cli.py _main`):`ingest` / `recall` / `consolidate` / `autodream` / `init-memory` / `re-ingest` / `synthesis-index` / `prune` / `embed-backfill` / `stats` / `dream-daemon`。
+16 个子命令(详见 `cli.py _main`):原 11 个 + 四动词 `write` / `confirm` / `invalidate` / `elevate` + `cite` + `stats-json`。
 
 CC 以 `mem` 为调用名(skill 名 = `mem`, 软链到 `~/.claude/skills/mem/`)。面向 CC 的调用 = `mem <subcommand>`,底层 = `cli.py <subcommand>`,两种写法等价:
 
@@ -150,6 +150,11 @@ mem consolidate
 | `synthesis-index [--scope <cwd>] [--memory-dir <dir>] [--session <id>]` | 散 mem-*.md 对账 → MEMORY 投影(ADR-15 P2,唯一写入口) |
 | `prune [--scope <cwd>] [--memory-dir <dir>]` | 删除 KG 中无对应 memory .md 的孤儿 fact |
 | `embed-backfill` | active fact value → L2 向量 cache |
+| `write <subject> <predicate> <value> [--fact-type] [--cwd]` | 四动词 write:新事实(provenance=通道档,信号 agent_crud) |
+| `confirm <fact_id>` | 四动词 confirm:证实(信号 confirm_arrivals,P22 确认轴) |
+| `invalidate <fact_id> [--note]` | 四动词 invalidate:失效建议(superseded+contradiction;human 路径交互确认) |
+| `elevate <fact_id>` | 四动词 elevate:晋升提名(不动 fact,仅信号;human 路径交互确认) |
+| `cite <fact_id> [--ref]` | M16 引用记账(citations 信号,单向正奖励,不碰 KG 写面) |
 | `stats` / `stats-json` | 只读 churn 快照(entity/fact 计数 + status 分布;stats-json 为契约 shape) |
 | `dream-daemon [--cwd] [--interval <s>] [--once]` | 常驻 autoDream loop(watch CC transcript 增长 → 增量 dream,operational #1) |
 
@@ -171,13 +176,15 @@ mem consolidate
 
 ## 维护动词时机教学(何时写记忆)
 
-KG 是增量演化的:写入 → 召回验证 → dreaming 日频整合(晋升/升级/卫生)。你(agent)在写入侧的时机判断:
+KG 是增量演化的:写入 → 召回验证 → dreaming 日频整合(晋升/升级/卫生)。你(agent)在写入侧的时机判断。**通道判定**(DR-9):物理 tty 且无 `MEM_AGENT_CONTEXT` env → human 档(provenance=human,veracity 0.9);否则 agent 档(agent_assert,0.5)——**agent 不可声明 human 档**(env 只能降档不能升档);invalidate/elevate 在 human 路径需交互确认(y/N)。
 
-- **该记新事实**: 用户陈述了可复用的偏好/决策/事实("以后 X 用 Y"/"项目 Z 依赖 W"),或会话中挖出了跨会话有价值的结构化信息。走 `mem ingest` 或让 PreCompact hook 自动抽取。
-- **该确认**: 召回结果被实际采用且被验证为真 → 表达"这个对"(确认会抬升信任档)。*命令形态 `mem confirm` 即将上线(M17);当前用自然语言确认即可,确认信号已入流。*
-- **该建议失效**: 发现召回内容已过时/错误 → 明确指出"X 已不成立,现在是 Y"(矛盾会被判 supersede,旧 fact 退场)。*命令形态 `mem invalidate` 即将上线(M17)。*
+- **该记新事实**: 用户陈述了可复用的偏好/决策/事实("以后 X 用 Y"/"项目 Z 依赖 W"),或会话中挖出了跨会话有价值的结构化信息。走 `mem write "<subject>" "<predicate>" "<value>"`(通道自动判档: agent 调用 provenance=agent_assert)或让 PreCompact hook 自动抽取。
+- **该确认**: 召回结果被实际采用且被验证为真 → `mem confirm <fact_id>`(确认信号入 confirm_arrivals 流,抬升信任档;P22 确认轴)。
+- **该建议失效**: 发现召回内容已过时/错误 → `mem invalidate <fact_id> [--note "<说明>"]`(旧 fact superseded+reason=contradiction 时效标注)。
+- **晋升提名**: 高价值事实值得长存 → `mem elevate <fact_id>`(不动 fact,仅记晋升偏好信号,裁决权在 dreaming LIF 阈值)。
+- **引用记账**: 输出中采用了某 fact → `mem cite <fact_id> --ref "<输出引用>"`(citations 流单向正奖励,不碰 KG 写面)。
 - **不该记**: 即时对话上下文、一次性操作细节、会被立即覆盖的临时状态——这些归 CC memory md,不进 KG。
-- **无 delete**: 物理删除不存在(P38)。过时内容走失效/取代(supersede 链保历史,bi-temporal 可回溯),删除是 human 专属的投影面操作。
+- **无 delete/punish**: 物理删除不存在(P38)。过时内容走失效/取代(supersede 链保历史,bi-temporal 可回溯),删除是 human 专属的投影面操作。
 
 ## 查询策略(何时用哪个 flag)
 

@@ -30,7 +30,24 @@ def _fresh(name: str) -> tuple[str, Path]:
     db.init(Path(tmp) / f"{name}.db")
     mem_dir = Path(tmp) / "memory"
     mem_dir.mkdir()
+    # 隔离信号目录 (M18 接线后 hygiene.run 首步跑投影 diff 检测 → 写
+    # human_proj_ops 流; 无 patch 会泄漏到默认 data/signals — 冒烟发现的
+    # 隔离缺口, 照 test_m16_m18_tools fixture 模式)。
+    global _SIG_RESTORE
+    import signals
+    _orig = signals._signals_dir
+    signals._signals_dir = lambda: Path(tmp) / "signals"
+    _SIG_RESTORE = lambda: setattr(signals, "_signals_dir", _orig)
     return tmp, mem_dir
+
+
+_SIG_RESTORE = None
+
+
+def _restore_signals():
+    if _SIG_RESTORE is not None:
+        _SIG_RESTORE()
+        globals()["_SIG_RESTORE"] = None
 
 
 def _project(fid: str, mem_dir: Path) -> Path:
@@ -62,6 +79,7 @@ def test_dedup_removes_superseded_projection():
     assert stats["dedup_removed"] == 1, stats
     assert not p_gone.exists(), "superseded fact 投影必须退场"
     assert p_keep.exists(), "active fact 投影保留"
+    _restore_signals()
 
 
 # ── 验收 2: M12 裁剪 + 重排 + 零 LLM ─────────────────────────────────
@@ -80,6 +98,7 @@ def test_prune_removes_deprecated_projection():
     assert stats["prune_removed"] == 1, stats
     assert not p_dead.exists(), "deprecated fact 投影退场 (出热区)"
     assert p_active.exists()
+    _restore_signals()
 
 
 def test_resort_mem_section_order_follows_current_values():
@@ -112,6 +131,7 @@ def test_resort_mem_section_order_follows_current_values():
               if projection._is_mem_index_line(l)]
     assert "low" in lines2[0] and "high" in lines2[1], (
         f"LIF 反转后段序应翻转: {lines2}")
+    _restore_signals()
 
 
 def test_hygiene_zero_llm():
@@ -141,6 +161,7 @@ def test_hygiene_zero_llm():
         adapter.extract_facts = orig_a
         gazetteer.extract = orig_g
     assert calls == {"adapter": 0, "gazetteer": 0}
+    _restore_signals()
 
 
 # ── 验收 3: M12 daemon 时序 ──────────────────────────────────────────
@@ -255,6 +276,7 @@ def test_bfs_gate_regex_rejected_llm_admitted():
     ids2 = {f["id"] for f in res2}
     assert f_bc2 in ids2 and f_cd2 in ids2, (
         f"llm 0.7 档应正常入场 (既有行为), got {ids2}")
+    _restore_signals()
 
 
 def test_bfs_gate_mixed_tiers():
@@ -266,6 +288,7 @@ def test_bfs_gate_mixed_tiers():
     ids = {f["id"] for f in res}
     assert f_bc in ids, "llm 档邻居 fact 应入场"
     assert f_cd not in ids, "regex 档邻居 fact 应拒"
+    _restore_signals()
 
 
 def test_bfs_bypass_only_within_gated_neighborhood():
@@ -294,6 +317,7 @@ def test_bfs_bypass_only_within_gated_neighborhood():
         f"llm 档扩展 fact 应享 hop>0 bypass (低 match 仍入场): {ids}")
     assert f_low_regex not in ids, (
         f"regex 档不得因 bypass 入图: {ids}")
+    _restore_signals()
 
 
 def test_main_retrieval_path_ungated():
@@ -316,3 +340,4 @@ def test_main_retrieval_path_ungated():
     res2 = recall_mod.recall("AnchorEnt", use_bfs=True, bfs_hops=2, boost=False)
     ids2 = {f["id"] for f in res2}
     assert f_regex not in ids2, "同 fact 经扩展通道必须被门槛拒"
+    _restore_signals()

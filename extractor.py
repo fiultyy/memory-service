@@ -57,15 +57,27 @@ _RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:belongs?\s+to)\s+(.+?)(?:\.|,|$)", re.I), "belongs_to"),
     (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:implements?)\s+(.+?)(?:\.|,|$)", re.I), "implements"),
     (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:connects?\s+to|links?\s+to)\s+(.+?)(?:\.|,|$)", re.I), "connected_to"),
+    # v21 双语对称扩充 (向量验证 0.851/0.822, 用户指令: 中英覆盖语义范围一致)
+    (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:is\s+located\s+in|is\s+based\s+in)\s+(.+?)(?:\.|,|$)", re.I), "located_in"),
+    (re.compile(r"(\w[\w\s]{1,40}?)\s+(?:causes?|leads?\s+to|results?\s+in)\s+(.+?)(?:\.|,|$)", re.I), "causes"),
 ]
 
 # CJK synonym sets: subject/obj char class [一-龥A-Za-z0-9] stops at space/
 # punctuation (防 obj 贪心吞散文 + 跨句粘连). subject ≤8, obj ≤10.
+# v21 双语对称补齐 (向量验证 belongs_to 0.892>is_a 0.806 → 「属于」拆出;
+# implements 0.853 / connected_to 0.851 / located_in 0.851 / causes 0.822):
+# EN 7 门 → CJK 侧补齐 belongs_to/implements/connected_to 三缺门,
+# located_in/causes 两门双侧同步新增 — 中英谓词覆盖语义范围一致。
 _CJK_RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:是|属于)(?:一个|一种|一款)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "is_a"),
-    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:使用|采用|基于|调用)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "uses"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*是(?:一个|一种|一款)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "is_a"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:使用|采用|基于|调用|利用)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "uses"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:依赖|需要)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "depends_on"),
     (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:包含|包括)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "contains"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:属于|隶属于?)\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "belongs_to"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:实现|落地)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "implements"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:连接到|对接|接入|集成(?:了)?)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "connected_to"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:位于|坐落于?)\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "located_in"),
+    (re.compile(r"([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:导致|引发)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})"), "causes"),
 ]
 
 MAX_ENTITIES = 20
@@ -127,6 +139,17 @@ def _demo() -> None:
     # so the object run is the whole phrase (deterministic; spec-correct).
     r3 = extract("FastAPI uses Pydantic.")
     assert {"subject": "FastAPI", "predicate": "uses", "object": "Pydantic"} in r3["facts"], r3
+    # v21 双语对称补齐: CJK 三缺门 + 双侧新增两门。
+    r4 = extract("该模块实现了重试协议")
+    assert {"subject": "该模块", "predicate": "implements", "object": "重试协议"} in r4["facts"], r4
+    r5 = extract("该项目属于智谱实验室")
+    assert {"subject": "该项目", "predicate": "belongs_to", "object": "智谱实验室"} in r5["facts"], r5
+    r6 = extract("网关连接到计费服务")
+    assert {"subject": "网关", "predicate": "connected_to", "object": "计费服务"} in r6["facts"], r6
+    r7 = extract("悉尼歌剧院位于便利朗角")
+    assert {"subject": "悉尼歌剧院", "predicate": "located_in", "object": "便利朗角"} in r7["facts"], r7
+    r8 = extract("缓存失效导致线上故障")
+    assert {"subject": "缓存失效", "predicate": "causes", "object": "线上故障"} in r8["facts"], r8
     print("ok")
 
 

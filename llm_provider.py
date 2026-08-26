@@ -56,6 +56,7 @@ class EdgeOut:
     predicate: str
     object: str
     topic: str = ""
+    confidence: float | None = None  # per-edge (batch 12 llm_extract; None=use aggregate)
 
 
 @dataclass
@@ -208,6 +209,11 @@ subject_type="{subject_type}" subject_name="{subject_name}" predicate="{predicat
 """
 
 # ── ZhipuAnthropicProvider — 智谱直连 Anthropic 协议(glm-5-turbo) ────────
+class ProviderCallError(RuntimeError):
+    """provider.chat 专用响亮失败 (batch 12): 网络/无 key/超时/空响应。
+    RuntimeError 子类 → bootstrap.init_memory 既有 except RuntimeError
+    记账路径直接承接 (errors += 1 + SKIP 行), 无需新机制。"""
+
 
 @dataclass
 class ZhipuAnthropicProvider:
@@ -352,6 +358,40 @@ class ZhipuAnthropicProvider:
                 pass
         # 模型回了非 JSON / 字段缺失 → 不抛, 默认不矛盾(不阻断 ingest)。
         return {"contradiction": False, "reason": "parse-failure"}
+
+    def chat(self, system: str, messages: list, max_tokens: int = 1500) -> str:
+        """通用单轮结构化对话 (batch 12 llm_extract 专用 seam)。
+
+        与 extract_facts/dedupe_entity 的 passive 语义**相反**: 失败**抛**
+        :class:`ProviderCallError` (网络/无 key/超时/空响应) — llm_extract
+        需要「LLM 不可达 → skip + errors 记账, 绝不静默降级」的响亮语义,
+        由调用方 (bootstrap 既有 except RuntimeError) 承接; 本类既有方法
+        不受影响。返回首个 text block 原文 (解析/校验归调用方)。
+        """
+        key = self.api_key or _load_zhipu_key()
+        if not key:
+            raise ProviderCallError(
+                "no api_key (set ZHIPU_API_KEY in .env)")
+        body = json.dumps({
+            "model": self.model, "max_tokens": max_tokens,
+            "system": system, "messages": messages,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/messages", data=body,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": key, "anthropic-version": "2023-06-01"},
+            method="POST")
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=self.timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            raise ProviderCallError(f"network: {e!r}") from e
+        content = _extract_text(raw)
+        if content is None:
+            raise ProviderCallError(
+                f"no content block in response: {raw[:200]}")
+        return content
 
 
 def _load_zhipu_key() -> str:

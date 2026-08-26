@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import db
 import vec_index
+
+# batch 12 §2.4 巨型实体护栏: 单实体 alias 上限 (超出拒新 alias 并 log)。
+MAX_ENTITY_ALIASES = 32
 
 
 def _now() -> str:
@@ -319,7 +323,11 @@ def upsert_entity_embedding(entity_id: str, name_embedding: list[float] | None) 
 
 
 def add_aliases(entity_id: str, new_aliases: list[str]) -> None:
-    """并入别名到 entity.aliases (去重保序, 供 resolver 合并用, ADR-D7)。"""
+    """并入别名到 entity.aliases (去重保序, 供 resolver 合并用, ADR-D7)。
+
+    batch 12 巨型实体护栏: 并入后超 ``MAX_ENTITY_ALIASES`` (32) 的新 alias
+    拒收 (既有别名不动 — 只拒增量; T2 实测「前一次」吸附 277 别名类吸尘器
+    实体防线)。"""
     conn = db.get_conn()
     row = conn.execute("SELECT aliases FROM entity WHERE id = ?", (entity_id,)).fetchone()
     if row is None:
@@ -328,6 +336,10 @@ def add_aliases(entity_id: str, new_aliases: list[str]) -> None:
     merged: list[str] = list(existing)
     for a in new_aliases:
         if a not in merged:
+            if len(merged) >= MAX_ENTITY_ALIASES:
+                print(f"  [store] alias cap {MAX_ENTITY_ALIASES} hit for entity "
+                      f"{entity_id}: drop {a!r}", file=sys.stderr)
+                continue  # 护栏: 拒新 alias (log 可观测)
             merged.append(a)
     if merged == existing:
         return  # no-op (perf: resolver step1 重复命中高频; 不写不失效代

@@ -265,6 +265,36 @@ def _has_active_for_predicate(subject_id: str, predicate: str) -> list[dict[str,
     ]
 
 
+# ── 实体卫生门 (batch 12 §2.4, LLM 通道落库前; regex 重开时同样受益) ──
+
+# 停用词黑名单起步集 (T2 垃圾产出实测: 虚词/状态词被 regex 通道当实体)。
+# 精确匹配 + 前缀拒 (「可能出现的」类衍生); 后续按报告迭代。
+_ENTITY_STOPWORDS = frozenset({
+    "可能", "的同时完成", "前一次", "确认者", "极简模式", "同进程",
+    "明早", "超时", "删除", "输出", "完成", "继续", "本次", "上次", "恢复",
+})
+
+# 巨型实体护栏 (§2.4): 单实体 alias 上限, 超出拒新 alias (吸尘器实体防线)。
+MAX_ENTITY_ALIASES = 32
+
+
+def _entity_hygiene_gate(name: str) -> bool:
+    """实体名卫生门: True=放行。CJK ≥2 字 / 拉丁 ≥3 字 / 停用词拒。"""
+    n = (name or "").strip()
+    if not n:
+        return False
+    if n in _ENTITY_STOPWORDS:
+        return False
+    has_cjk = any("\u4e00" <= c <= "\u9fff" for c in n)
+    if has_cjk:
+        # CJK 计 1/字, 拉丁混合按 CJK 规则 (语料主形)
+        cjk_len = sum(1 for c in n if "\u4e00" <= c <= "\u9fff" or c.isalnum())
+        if cjk_len < 2:
+            return False
+    elif len(n) < 3:
+        return False
+    return True
+
 def autodream(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable", source_cwd: str | None = None) -> dict[str, int]:
     """Incrementally整理 a session transcript into the KG (ADR-10) — 公共入口。
 
@@ -334,9 +364,21 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     # wings 判「无事实」→ 合法 done, attempts≥3 封顶防重复浪费。
     seg_results: list[tuple[str, Any]] = []
     seg_to_enqueue: list[tuple[int, str, Any]] = []
+    # batch 12 抽取通道门禁: MEM_EXTRACT_CHANNEL=llm (默认) → LLM 直抽主径
+    # (llm_extract, glm-5-turbo, 结构化 JSON + schema 校验, 失败响亮);
+    # =regex → 遗留占位通道 (词典+regex 三路, 暂闭但代码保留可开)。
+    # B 路语义链接与 resolver 不属于 regex 通道 — 两档下实体解析照常工作。
+    # LLM 通道零产出/失败语义: 提取异常上抛 (bootstrap 记 skip+errors,
+    # 绝不回落 regex); 提取成功但零 edges → 照走 A 层入队 (wings 异步)。
+    from llm_extract import extract_channel, CHANNEL_REGEX
+    use_regex_channel = extract_channel() == CHANNEL_REGEX
+    import llm_extract as llm_extract_mod
     for seg_idx, (seg_prov, seg_text) in enumerate(segments):
-        result = gazetteer.extract(seg_text)
-        if not result.entities and not result.edges:
+        if use_regex_channel:
+            result = gazetteer.extract(seg_text)
+        else:
+            result = llm_extract_mod.extract(seg_text)  # 失败 ExtractFailed 上抛 (无降级红线)
+        if use_regex_channel and not result.entities and not result.edges:
             # C 层: 语义兜底实体声明 (与 B 共用 _link_spans 管道)。防御性
             # 兜底 — B 路在 extract 内对可语义命中的段恒先命中 (FINDING
             # c9: 对可命中段本分支不可达; 保留作 B 未覆盖形态的保险)。
@@ -344,13 +386,13 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
             if c_ents:
                 result.entities = c_ents  # 实体声明接管; edges 保持空
         if not result.edges:
-            # A 层: 全文入队 — **与实体来源无关** (词典/regex/B/C 命中实体
-            # 但无数谓词边的段同样语义内容未提, 皆入 A; FINDING c9 根因:
-            # 原嵌在零产出分支内, B/词典实体命中段被结构性吞掉 A 入队)。
+            # A 层: 全文入队 — **与实体来源无关** (两档通道命中实体但无数
+            # 谓词边的段同样语义内容未提, 皆入 A; FINDING c9 根因修复)。
             # 幂等由 enqueue 的 material_ref 拒重保证 (c10)。
             seg_to_enqueue.append((seg_idx, seg_text, seg_prov))
         seg_results.append((seg_prov, result))
-    # perf 收尾批: A 入队延后批化 — novelty 采样向量 (surprise.novelty_sample
+
+    # perf/vec-index: A 入队延后批化 — novelty 采样向量 (surprise.novelty_sample
     # 截断) 一次 embed_batch 预热缓存, 再逐段 enqueue (novelty embed 全走
     # L1, 消逐段长文串行 HTTP; 段序/material_ref 不变)。
     if seg_to_enqueue:
@@ -430,6 +472,8 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
         for ent in result.entities:
             if not ent.name:
                 continue
+            if not _entity_hygiene_gate(ent.name):
+                continue  # 卫生门拒 (停用词/短名) — 不 resolve 不落库
             sid = seg_resolved.get(ent.name)
             if sid is None and ent.name not in seg_resolved:
                 # 批式未覆盖 (异常防御) → 单条兜底, 协议不变。
@@ -440,16 +484,21 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
             if sid is not None:
                 name_to_id[ent.name] = sid
                 name_to_type[ent.name] = ent.type
-
         for edge in result.edges:
             subject = (edge.subject or "").strip()
             predicate = (edge.predicate or "").strip()
             value = (edge.object or "").strip()
             if not subject or not predicate or not value:
                 continue
+            # 卫生门 + 自环禁止 (§2.4): 两档通道统一防线 (regex 通道 T2 实测
+            # 自环 6 条; schema 层 LLM 档已弃, 此处兜两档)。
+            if subject == value:
+                continue
             topic = (edge.topic or "").strip() or None  # ADR-C: 投影 slug/title/desc 源
 
             if subject not in name_to_id:
+                if not _entity_hygiene_gate(subject):
+                    continue
                 sid = resolver.resolve_entity(subject, name_to_type.get(subject, "concept"),
                                               providers=active_providers)
                 if sid is None:
@@ -459,6 +508,8 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
 
             # object is a declared entity reference (R1 §A2) — resolve + link.
             if value not in name_to_id:
+                if not _entity_hygiene_gate(value):
+                    continue
                 oid = resolver.resolve_entity(value, name_to_type.get(value, "concept"),
                                               providers=active_providers)
                 if oid is None:

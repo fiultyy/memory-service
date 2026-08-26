@@ -27,3 +27,6 @@ logs/
 
 # 研究笔记 (本地草稿, 不版本化)
 docs/research/
+
+# 测试样本目录 (如 openclaw claw-02 init 样本) — 本地测试数据不入库
+temp/

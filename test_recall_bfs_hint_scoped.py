@@ -246,8 +246,25 @@ def test_recall_use_bfs_scoped_on_excludes_other_cwd_neighbor():
 # embed 同向 → cos=1.0 ≥ VEC_MIN)。确保「仅向量路」与「仅 BFS 路」路径真隔离。
 
 def _setup_bfs_vec_db():
-    """构造 BFS+vec 双路场景, 返回 (tmp, seed, fid_a, fid_b, bravo, orphan, orig_embed)."""
+    """构造 BFS+vec 双路场景, 返回 (tmp, seed, fid_a, fid_b, bravo, orphan, orig_embed).
+
+    perf/vec-index: embed mock 在建库**前**挂 (put_fact 的 vec_fact 同步吃
+    mock 向量), orig_embed 返回给调用方 restore。"""
     tmp = _fresh_db()
+    import embedding
+    import vec_index as _vi
+    vec = [1.0, 0.0] + [0.0] * (_vi.VEC_DIM - 2)      # pad 到索引维度
+    ortho = [0.0, 1.0] + [0.0] * (_vi.VEC_DIM - 2)
+    orig_embed = embedding.embed
+
+    def fake_embed(text, providers=None):
+        if text == "SeedX":
+            return vec
+        if "germinate origin point" in (text or ""):
+            return vec
+        return ortho
+    embedding.embed = fake_embed
+
     seed = store.put_entity("SeedX", "concept")
     bravo = store.put_entity("BravoY", "concept")
     orphan = store.put_entity("OrphanZ", "concept")
@@ -263,17 +280,6 @@ def _setup_bfs_vec_db():
     fid_a = store.put_fact(orphan, "describes", "germinate origin point", extractor="llm",
                            fact_type="permanent", LIF=0.5, confidence=0.8,
                            source_refs=["s"], topic="orphan desc", object_id=None)
-    orig_embed = recall_mod.embedding.embed
-    vec = [1.0, 0.0]
-
-    def fake_embed(text, providers=None):
-        # query 与 orphan value 同向(高 cosine ≥ VEC_MIN); 其他正交(cos 0 < VEC_MIN)
-        if text == "SeedX":
-            return vec
-        if "germinate origin point" in (text or ""):
-            return vec
-        return [0.0, 1.0]
-    recall_mod.embedding.embed = fake_embed
     return tmp, seed, fid_a, fid_b, bravo, orphan, orig_embed
 
 

@@ -54,7 +54,8 @@ print(f"Test 3 (offline degrade): created '{ent['name']}' emb={ent['name_embeddi
 # ── 下面 mock-vector 测试: monkeypatch embedding.embed 返回固定向量 ──
 # (确定性, 不依赖 embeddings.db cache / 不触网络; resolver 在调用时查模块属性)
 _orig_embed = embedding.embed
-_VEC = [1.0, 0.0, 0.0]
+import vec_index as _vi
+_VEC = [1.0, 0.0, 0.0] + [0.0] * (_vi.VEC_DIM - 3)  # perf/vec-index: pad 到索引维度 (小维 fixture 不入 vec0)
 embedding.embed = lambda text, providers=None: list(_VEC)
 
 # ── providers=[] 跳过 LLM: 有候选也不 merge, 直接新建 ──────────────
@@ -155,16 +156,25 @@ assert store.count_entities() == 2, (
 print(f"Test 9 (phantom id rejected): 'PhantomProbeZ3' created (no crash), "
       f"count={store.count_entities()}")
 
-# ── T3(b): 维度不匹配 → _cosine_topk 跳过(不并入, 直接新建) ────────
+# ── T3(b): 维度不匹配 → heal 语义 (perf/vec-index 迁移) ────────────
+# 旧断言: dim-4 行被 _cosine_topk 跳过 → 新建孤儿。perf/vec-index 后语义
+# 升级: 覆盖缺口触发 heal_entities_if_pending — 老结构行 re-embed(当前模型
+# 维度) 落盘新结构并入索引 → 成正常候选 (D1 orphan 修复的维度不匹配推广;
+# 孤儿新建正是老实现的 bug)。embed 被 mock 为 _VEC → heal 后同向 cosine 1.0
+# → _FakeLLM 并入 (意图迁移: 维度异构不再造成孤儿)。
 _fresh_db()
 store.put_entity("DimMismatchEntity", "tool", name_embedding=[1.0, 0.0, 0.0, 0.0])  # dim=4
-eid = resolver.resolve_entity("DimProbeZ4", "tool", providers=[_FakeLLM()])  # _VEC dim=3
+eid = resolver.resolve_entity("DimProbeZ4", "tool", providers=[_FakeLLM()])
 mismatch = store.find_entity_exact("DimMismatchEntity")
-assert eid is not None and eid != mismatch["id"], (
-    "dim-mismatch candidate must be skipped → new entity, not merged")
-assert store.count_entities() == 2, (
-    f"dim-mismatch skipped → new entity, expected 2, got {store.count_entities()}")
-print(f"Test 10 (dim-mismatch skip): 'DimProbeZ4' created (dim-4 candidate skipped), "
+assert eid == mismatch["id"], (
+    f"dim-mismatch 行 heal 后应成候选并入 (不再孤儿新建), got {eid} vs {mismatch['id']}")
+assert store.count_entities() == 1, (
+    f"heal 语义: 1 entity (merged), got {store.count_entities()}")
+# heal 落盘: 老裸 dim-4 行已升级当前维度新结构。
+healed = store.get_entity(mismatch["id"])["name_embedding"]
+assert len(healed) == len(_VEC), (
+    f"heal 应 re-embed 落盘当前维度, got dim={len(healed)}")
+print(f"Test 10 (dim-mismatch heal): 'DimProbeZ4' merged into healed candidate, "
       f"count={store.count_entities()}")
 
 # ── D1 回填验证: step2 合并后, 候选 entity 的 emb 幂等不被覆盖 ─────

@@ -49,11 +49,14 @@ def resolve_entity(name, entity_type, aliases=None, providers=None,
     # Step 1 — 廉价闸: 大小写不敏感 name + alias 精确命中(无 LLM)。
     hit = store.find_entity_exact(name)
     if hit is not None:
-        # D7: 把 surface form 记入别名(与 step2 add_aliases(dup_id, [name]+aliases)
-        # 对称), 让 T1 能断言 step1 命中后 aliases 含异写。
-        store.add_aliases(hit["id"], [name] + (list(aliases) if aliases else []))
-        # ADR-2② GC: name 是 survivor 规范形(case-insensitive 命中)→ 不该作为自己的
-        # 别名重复(name 已在 .name); 去重 + 清掉等于 survivor.name 的别名。
+        # D7: 把 surface form 记入别名(与 step2 对称), 让 T1 能断言含异写。
+        # ADR-2② + perf: 等于 survivor 规范名 (case-sensitive) 的 surface 不加
+        # — 旧路径加了再被 _gc_aliases 清掉 (add/remove 乒乓, 每次全量失效
+        # exact 字典/代缓存; 预过滤净效果等价零写)。
+        _surfaces = [s for s in [name] + (list(aliases) if aliases else [])
+                     if s != hit["name"]]
+        if _surfaces:
+            store.add_aliases(hit["id"], _surfaces)
         _gc_aliases(hit["id"], survivor_name=hit["name"])
         # D1: 回填既有 entity 的 name_embedding(幂等只填空; emb 离线为 [] 则不回填)。
         store.backfill_entity_embedding(hit["id"], emb)
@@ -61,74 +64,68 @@ def resolve_entity(name, entity_type, aliases=None, providers=None,
 
     # Step 2 — 向量召回 top-k + LLM 判定。
     if emb:
-        # D1 orphan fix: 把 emb 透传 _cosine_topk — 它会用同一组 provider 惰性
-        # re-embed 既有 emb=[] 的实体(离线 Phase1 插入的), 让它们成为正常候选并
-        # 回填向量。否则 emb=[] 实体永远进不了 cosine, 同实体异写(如 JavaScript/JS)
-        # 在 step1 廉价闸(case-insensitive name) 不命中时 → 孤儿新建。
-        candidates = _cosine_topk(emb, _TOP_K, embedding_providers=embedding_providers)
-        if candidates and providers:
-            try:
-                dup = providers[0].dedupe_entity(name, entity_type, candidates)
-            except Exception:
-                # provider can't/won't dedupe (stub/test-fake/offline) → degrade
-                dup = None
-            dup_id = (dup or {}).get("duplicate_id")
-            # Guard: LLM may hallucinate an id absent from candidates (e.g.
-            # copy a few-shot example id). Reject it — a phantom id would sail
-            # past add_aliases (silent no-op) and crash put_fact on FK violation.
-            if dup_id and dup_id in {c["id"] for c in candidates}:
-                survivor = store.get_entity(dup_id)
-                store.add_aliases(dup_id, [name] + (list(aliases) if aliases else []))
-                # ADR-2② GC: 被合并的 name 若已是 survivor 别名(异写已记)→ 不重复;
-                # 清掉等于 survivor 规范名的别名(name 已在 .name)。
-                _gc_aliases(dup_id, survivor_name=survivor["name"] if survivor else None)
-                # D1: 把已为新 name 算好的 emb 回填到既有 entity(幂等只填空)。
-                store.backfill_entity_embedding(dup_id, emb)
-                return dup_id
+        # D1 orphan fix (perf/vec-index 语义承接): 有实体未入索引 (离线
+        # Phase1 插入 emb=[] / 老结构 / 维度不匹配) 时, heal_entities_if_pending
+        # 一次性 re-embed+落盘+入索引 — 否则 emb=[] 实体永远进不了 ANN,
+        # 同实体异写(JavaScript/JS)在 step1 不命中时 → 孤儿新建。无缺口时零成本。
+        import vec_index
+        vec_index.heal_entities_if_pending(embedding_providers)
+        # perf: providers 空 (init/占位主径) 时 LLM 判定不可达 → ANN 候选
+        # 查询是纯浪费 (~千次/全量 init, vec0 逐查 ~8ms); 移入 providers 门内
+        # (merge 路径唯一消费者)。heal 独立保留 (索引完整性, 与 LLM 无关)。
+        if providers:
+            candidates = _cosine_topk(emb, _TOP_K, embedding_providers=embedding_providers)
+            if candidates:
+                try:
+                    dup = providers[0].dedupe_entity(name, entity_type, candidates)
+                except Exception:
+                    # provider can't/won't dedupe (stub/test-fake/offline) → degrade
+                    dup = None
+                dup_id = (dup or {}).get("duplicate_id")
+                # Guard: LLM may hallucinate an id absent from candidates (e.g.
+                # copy a few-shot example id). Reject it — a phantom id would sail
+                # past add_aliases (silent no-op) and crash put_fact on FK violation.
+                if dup_id and dup_id in {c["id"] for c in candidates}:
+                    survivor = store.get_entity(dup_id)
+                    # ADR-2② + perf: 同 step1 预过滤 (等价旧 add+GC 净效果, 免乒乓)。
+                    _sname = survivor["name"] if survivor else None
+                    _surfaces = [s for s in [name] + (list(aliases) if aliases else [])
+                                 if s != _sname]
+                    if _surfaces:
+                        store.add_aliases(dup_id, _surfaces)
+                    _gc_aliases(dup_id, survivor_name=_sname)
+                    # D1: 把已为新 name 算好的 emb 回填到既有 entity(幂等只填空)。
+                    store.backfill_entity_embedding(dup_id, emb)
+                    return dup_id
 
     # Step 3 — 新建 (emb 可能为 []; put_entity 不做网络 I/O)。
     return store.put_entity(name, entity_type, aliases=aliases, name_embedding=emb)
 
 
 def _cosine_topk(emb, k=_TOP_K, embedding_providers=None):
-    """Scan all entities, return top-k by cosine similarity to ``emb``.
+    """top-k 近邻 by cosine (perf/vec-index: vec0 ANN, 唯一路径无降级)。
 
-    Returns ``[{"id","name","type","score"}]`` sorted desc.
-
-    D1 orphan fix + ADR-2③: 既有 ``name_embedding`` 为空([]/NULL)或维度不匹配
-    (老库裸 list + 模型升级维度变)的实体, 会用 ``embedding_providers`` 惰性 re-embed
-    (同一组 provider, 维度一致)并回填, 让它们成为正常候选。否则它们永远进不了 cosine,
-    同实体异写(step1 廉价闸 case-insensitive 不命中时)→ 孤儿新建。
-    re-embed 失败(provider 离线/无 key / 仍维度不一致) → 跳过(不崩, 不并入)。
-    ponytail: 惰性 re-embed 只对需升级行(空 / 维度不匹配)生效, 维度对的行零成本。
+    旧实现逐实体拉行+JSON 解码+Python 余弦 (D1 惰性 re-embed 升级空/维度
+    不匹配行)。新实现查 vec_entity 索引 — 写路径同步 (put_entity/
+    backfill/upsert) 保证新写行即时入索引; 存量空/老结构行跑一次
+    ``mem vec-backfill`` 升级入索引 (惰性 re-embed 语义由回填命令承接)。
+    返回 ``[{"id","name","type","score"}]`` 按 score 降序 (协议不变)。
     """
-    import embedding
-    n_a = math.sqrt(sum(x * x for x in emb)) or 1e-12
-    scored = []
+    import vec_index
+    hits = vec_index.entity_topk(list(emb), k)
+    if not hits:
+        return []
     conn = db.get_conn()
-    for row in conn.execute("SELECT * FROM entity ORDER BY created_at").fetchall():
-        ent = store._decode_entity(row)
-        vec = ent.get("name_embedding") or []
-        if not vec or len(vec) != len(emb):
-            # D1/ADR-2③: 空([]/NULL)或维度不匹配(老结构模型升级)→ 惰性 re-embed 升级。
-            if not embedding_providers:
-                continue  # 查询自身也是离线 → 无 provider 可算, 跳过
-            try:
-                re_vec = embedding.embed(ent["name"], providers=embedding_providers)
-            except Exception:
-                re_vec = []
-            if not re_vec or len(re_vec) != len(emb):
-                continue  # re-embed 仍离线 / 维度不一致 → 跳过(不并入, 不崩)
-            store.upsert_entity_embedding(ent["id"], re_vec)  # 无条件落盘新结构(B2: backfill WHERE 漏老裸list行)
-            vec = re_vec
-        n_b = math.sqrt(sum(x * x for x in vec)) or 1e-12
-        dot = sum(a * b for a, b in zip(emb, vec))
-        scored.append({
-            "id": ent["id"], "name": ent["name"],
-            "type": ent["entity_type"], "score": dot / (n_a * n_b),
-        })
-    scored.sort(key=lambda c: c["score"], reverse=True)
-    return scored[:k]
+    out = []
+    for eid, sim in hits:
+        row = conn.execute(
+            "SELECT id, name, entity_type FROM entity WHERE id = ?",
+            (eid,)).fetchone()
+        if row is None:
+            continue  # vec 行残留而主表无 (理论不至, 双保险)
+        out.append({"id": row["id"], "name": row["name"],
+                    "type": row["entity_type"], "score": sim})
+    return out
 
 
 def _gc_aliases(entity_id: str, survivor_name: str | None = None) -> None:
@@ -155,4 +152,46 @@ def _gc_aliases(entity_id: str, survivor_name: str | None = None) -> None:
         store.set_aliases(entity_id, clean)
 
 
-__all__ = ["resolve_entity"]
+__all__ = ["resolve_entity", "resolve_entities_batch"]
+
+
+def resolve_entities_batch(names, entity_types=None, aliases_map=None,
+                           providers=None, embedding_providers=None):
+    """批式实体消解 (perf/vec-index): 一次 embed 批 (本地模型一次 POST) +
+    逐名走**同 resolve_entity 三步协议** (step1 字典廉价闸 / step2 vec0 ANN /
+    step3 新建)。
+
+    实现路径: ``embedding.embed_batch(names)`` 先把全部 name 向量算好并写
+    L1/L2 缓存 → 逐名 ``resolve_entity`` 复用缓存向量 (零额外 HTTP) — 单实体
+    协议语义零重复代码 (aliases 合并/GC/backfill 全保留)。
+
+    Args:
+        names: 实体名列表。
+        entity_types: 每名类型 (None → 全 "concept"; 单值 → 广播)。
+        aliases_map: ``{name: [alias, ...]}`` 透传单条同参语义 (可选)。
+        providers: LLM dedupe judge (None → 单条同参语义)。
+        embedding_providers: 向量 provider 覆盖。
+
+    Returns:
+        ``{"name": entity_id | None}`` — None 仅当名为空 (协议同单条)。
+    """
+    import embedding
+    names = list(names or [])
+    if not names:
+        return {}
+    if entity_types is None:
+        types = ["concept"] * len(names)
+    elif isinstance(entity_types, str):
+        types = [entity_types] * len(names)
+    else:
+        types = [entity_types[i] if i < len(entity_types) else "concept"
+                 for i in range(len(names))]
+    aliases_map = aliases_map or {}
+    # 一次批 embed 预热 L1/L2 (miss 子集打包单次 POST); 随后单条 resolve 复用。
+    embedding.embed_batch(names, providers=embedding_providers)
+    out = {}
+    for name, etype in zip(names, types):
+        out[name] = resolve_entity(
+            name, etype, aliases=aliases_map.get(name), providers=providers,
+            embedding_providers=embedding_providers)
+    return out

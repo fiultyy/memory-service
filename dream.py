@@ -170,7 +170,6 @@ def _replay_recall_hits(source_cwd: str | None) -> dict[str, int]:
              dims["lif_coherence"], dims["lif_source"],
              access_count, last_hit, json.dumps(sessions, ensure_ascii=False), fid))
         replayed += 1
-    conn.commit()
     wm["recall_hits"] = lines[-1][0] if lines else last_line
     _save_watermark(wm)
     return {"signals_consumed": len(fresh), "lif_facts": replayed}
@@ -191,7 +190,6 @@ def _promote_facts() -> int:
             conn.execute("UPDATE fact SET fact_type = ? WHERE id = ?",
                          (nxt, row["id"]))
             promoted += 1
-    conn.commit()
     return promoted
 
 
@@ -298,7 +296,6 @@ def _suppress_reflux() -> int:
                 "priority = priority * ? WHERE id = ?",
                 (REFLUX_DEMOTION, REFLUX_DEMOTION, row["id"]))
             suppressed += 1
-    conn.commit()
     return suppressed
 
 
@@ -318,7 +315,6 @@ def _demote_self_pollution() -> int:
                 "UPDATE fact SET fact_type='ephemeral', LIF = LIF * 0.5 "
                 "WHERE id = ?", (row["id"],))
             demoted += 1
-    conn.commit()
     return demoted
 
 
@@ -483,7 +479,6 @@ def _consume_human_proj_ops(source_cwd: str | None) -> int:
             conn.execute("UPDATE fact SET LIF = MIN(1.0, LIF + 0.05) "
                          "WHERE id=?", (fid,))
         applied += 1
-    conn.commit()
     wm["human_proj_ops"] = lines[-1][0] if lines else last
     _save_watermark(wm)
     return applied

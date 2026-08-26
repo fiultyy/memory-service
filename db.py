@@ -7,6 +7,7 @@ The connection is shared with the store module via :data:`_conn`.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -27,7 +28,8 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     if _conn is not None and _conn_path == str(path):
         return _conn
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn = sqlite3.connect(str(path), check_same_thread=False,
+                           isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -90,9 +92,17 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE upgrade_queue ADD COLUMN material_text TEXT")
     if "material_prov" not in uq_cols:
         conn.execute("ALTER TABLE upgrade_queue ADD COLUMN material_prov TEXT")
-    conn.commit()
+    # perf/vec-index: sqlite-vec **硬依赖** (用户裁决 2026-08-26: 无降级 —
+    # 失败响亮 raise VecIndexError 含可行动诊断, 不静默回退)。建 vec_entity/
+    # vec_fact 两张 vec0 虚拟表 (cosine 度量)。
+    import vec_index
+    vec_index.init_conn(conn)
     _conn = conn
     _conn_path = str(path)
+    # 连接切换 (含首建) → store 派生缓存 (exact 字典/gaz 词典键代) 重置,
+    # 防跨库陈旧索引 (增量注册写入旧库 id)。
+    import store as _store_mod
+    _store_mod._reset_derived_caches()
     return conn
 
 
@@ -102,3 +112,33 @@ def get_conn() -> sqlite3.Connection:
         init()
     assert _conn is not None
     return _conn
+
+
+_txn_depth = 0  # 重入防护: 嵌套 transaction() 只最外层 BEGIN/COMMIT
+
+
+@contextmanager
+def transaction():
+    """批量写事务 (perf/vec-index: 消逐语句 fsync commit — sub10 profile
+    561 次 commit 2.1s)。
+
+    连接是 autocommit (isolation_level=None): 无事务时每语句即时落盘
+    (与旧逐写 commit 语义等价); 批量入口 (autodream/init_memory) 包本
+    上下文 — 全批共享一个事务, 收尾一次 commit。嵌套只计深度, 最外层
+    收尾; ``conn.commit()`` 收尾而非 ``execute("COMMIT")`` — 若嵌套代码
+    已提前 commit (活动事务已无), commit() 是 no-op 不炸。异常路径也
+    commit (匹配旧逐语句持久语义 — 已执行语句不回滚)。
+    """
+    global _txn_depth
+    conn = get_conn()
+    started = False
+    if _txn_depth == 0 and not conn.in_transaction:
+        conn.execute("BEGIN")
+        started = True
+    _txn_depth += 1
+    try:
+        yield
+    finally:
+        _txn_depth -= 1
+        if _txn_depth == 0 and started:
+            conn.commit()

@@ -444,7 +444,6 @@ def refresh_lif_on_recall(
             fact_id,
         ),
     )
-    conn.commit()
     return dims
 
 

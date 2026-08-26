@@ -23,7 +23,7 @@ import hashlib
 import json
 import os
 import sqlite3
-import urllib.error
+import struct
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +60,31 @@ class OpenAICompatEmbedding:
         except (urllib.error.URLError, TimeoutError, OSError, ValueError,
                 KeyError, IndexError):
             return []
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+        """一次 POST 批量 embed (OpenAI-compat ``input`` 数组; perf/vec-index)。
+        Passive: 失败 → None (调用方试下一 provider); 成功 → 按 index 对齐
+        的向量列表 (单项失败为 [])。"""
+        body = json.dumps({"model": self.model, "input": list(texts)}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/embeddings", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                doc = json.loads(resp.read().decode("utf-8", "replace"))
+            data = doc.get("data") or []
+            out: list[list[float]] = [[] for _ in texts]
+            for item in data:
+                try:
+                    i = int(item.get("index", 0))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= i < len(out):
+                    out[i] = list(item.get("embedding", []))
+            return out
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError,
+                KeyError, IndexError):
+            return None
 
 
 # 默认 provider 列表: LM Studio qwen3-embedding-4b(中文原生 4B, 实测 blind hit@5
@@ -119,24 +144,49 @@ def _cache_lookup(text: str) -> list[float] | None:
             "SELECT vector FROM embed_cache WHERE text_hash=?", (_cache_key(text),)
         ).fetchone()
         if row:
-            v = json.loads(row[0])
+            raw = row[0]
+            if isinstance(raw, bytes):  # f32 blob (perf/vec-index 新写)
+                v = list(struct.unpack(f"<{len(raw) // 4}f", raw))
+            else:  # 老 JSON 行 (双认过渡)
+                v = json.loads(raw)
             _cache[text] = v   # 提升 L1(同进程后续命中免 SQLite 查)
             return v
-    except (sqlite3.Error, json.JSONDecodeError):
+    except (sqlite3.Error, json.JSONDecodeError, struct.error):
         pass
     return None
 
 
 def _cache_store(text: str, vector: list[float], model: str = "") -> None:
-    """写 L1 + L2(INSERT OR REPLACE 即时持久)。"""
+    """写 L1 + L2(INSERT OR REPLACE 即时持久; 向量列 f32 blob)。"""
     _cache[text] = vector
     try:
         _cache_get_conn().execute(
             "INSERT OR REPLACE INTO embed_cache (text_hash, text, vector, model, created_at) "
             "VALUES (?,?,?,?,?)",
-            (_cache_key(text), text, json.dumps(vector), model, ""),
+            (_cache_key(text), text,
+             struct.pack(f"<{len(vector)}f", *vector), model, ""),
         )
         _cache_get_conn().commit()
+    except sqlite3.Error:
+        pass
+
+
+def _cache_store_batch(entries: list[tuple[str, list[float], str]]) -> None:
+    """批写 L1 + L2 (perf/vec-index: embed_batch 逐条 _cache_store 每条
+    commit → executemany + 单次 commit; 语义同逐条 INSERT OR REPLACE)。"""
+    if not entries:
+        return
+    for text, vector, model in entries:
+        _cache[text] = vector
+    try:
+        conn = _cache_get_conn()
+        conn.executemany(
+            "INSERT OR REPLACE INTO embed_cache (text_hash, text, vector, model, created_at) "
+            "VALUES (?,?,?,?,?)",
+            [(_cache_key(t), t, struct.pack(f"<{len(v)}f", *v), m, "")
+             for t, v, m in entries],
+        )
+        conn.commit()
     except sqlite3.Error:
         pass
 
@@ -156,6 +206,58 @@ def embed(text: str, providers: list[EmbeddingProvider] | None = None) -> list[f
             _cache_store(text, v, getattr(p, "model", ""))
             return v
     return []
+
+
+def embed_batch(texts: list[str],
+                providers: list[EmbeddingProvider] | None = None) -> list[list[float]]:
+    """批量 embed (perf/vec-index: 一次 POST 打包, 解逐条 HTTP 往返)。
+
+    两级缓存批查 (L1/L2 命中不打网络); miss 子集按 provider 顺序批调
+    ``embed_batch`` (无该方法 → 逐条 embed 兜底); 单 provider 部分成功即收
+    (空项试下一 provider)。返回与输入等长对齐 (不可得 → [])。**注意**: 批量
+    结果**返前批写** L1/L2 缓存 (executemany 单 commit) — 后续单条 embed()
+    走缓存, 语义与单条路径一致。
+    """
+    out: list[list[float]] = [[] for _ in texts]
+    pending: list[int] = []
+    for i, t in enumerate(texts):
+        cached = _cache_lookup(t)
+        if cached is not None:
+            out[i] = cached
+        else:
+            pending.append(i)
+    # perf/vec-index: 缓存写收集后批落 (executemany + 单 commit; 逐条
+    # _cache_store 每条 commit 是 sub10 profile 热点 — L2 在本地盘)。
+    to_cache: list[tuple[str, list[float], str]] = []
+    for p in (providers if providers is not None else default_providers()):
+        if not pending:
+            break
+        batch_fn = getattr(p, "embed_batch", None)
+        if batch_fn is not None:
+            vecs = batch_fn([texts[i] for i in pending])
+            if vecs is None:
+                continue  # provider 不可达 → 试下一个
+            got: list[int] = []
+            for j, i in enumerate(pending):
+                v = vecs[j] if j < len(vecs) else []
+                if v:
+                    out[i] = v
+                    to_cache.append((texts[i], v, getattr(p, "model", "")))
+                    got.append(i)
+            pending = [i for i in pending if i not in set(got)]
+        else:
+            # provider 无批式 (自定义 EmbeddingProvider) → 逐条 (走单条缓存)。
+            still: list[int] = []
+            for i in pending:
+                v = p.embed(texts[i])
+                if v:
+                    out[i] = v
+                    to_cache.append((texts[i], v, getattr(p, "model", "")))
+                else:
+                    still.append(i)
+            pending = still
+    _cache_store_batch(to_cache)
+    return out
 
 
 def clear_cache() -> None:

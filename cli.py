@@ -558,6 +558,8 @@ def _main(argv: list[str] | None = None) -> int:
                     help="只报不删(预览将 prune 的孤儿 fact)")
     sub.add_parser("embed-backfill",
                    help="回填 active fact value → L2 embedding cache (ADR-13 向量通电)")
+    sub.add_parser("vec-backfill",
+                   help="存量回填 vec0 向量索引(vec_entity/vec_fact; perf/vec-index, 幂等可重跑)")
     sub.add_parser("stats",
                    help="只读 churn 快照 (ADR-5): entity/fact 计数 + supersede_rate/active_ratio")
     st = sub.add_parser("stats-json",
@@ -621,6 +623,9 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir, dry_run=args.dry_run), ensure_ascii=False))
     elif args.cmd == "embed-backfill":
         print(json.dumps(embed_backfill(), ensure_ascii=False))
+    elif args.cmd == "vec-backfill":
+        import vec_index
+        print(json.dumps(vec_index.backfill_all(), ensure_ascii=False))
     elif args.cmd in ("stats", "stats-json"):
         print(json.dumps(stats(), ensure_ascii=False))
     elif args.cmd == "write":

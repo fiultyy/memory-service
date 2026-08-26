@@ -283,8 +283,9 @@ def _patch_embed_deterministic(recall_mod):
     ponytail: save/restore 闭包 < monkeypatch fixture 依赖, 4 个测试共用。
     """
     import embedding
+    import vec_index as _vi
     orig = embedding.embed
-    vec = [1.0, 0.0]
+    vec = [1.0, 0.0] + [0.0] * (_vi.VEC_DIM - 2)  # perf/vec-index: pad 到索引维度
 
     def fake_embed(text, providers=None):
         if text == "SeedAlpha":
@@ -300,8 +301,8 @@ def _patch_embed_deterministic(recall_mod):
 def test_bfs_plus_vec_dual_path_union():
     """BFS 路(B)与向量路(A)双候选并入, union 不丢任一路。"""
     import recall as recall_mod
+    restore = _patch_embed_deterministic(recall_mod)  # perf/vec-index: patch 先于建库 (vec_fact 同步 mock 向量)
     tmp, seed, fid_a, fid_b, bravo = _setup_bfs_vec_db()
-    restore = _patch_embed_deterministic(recall_mod)
     try:
         res = recall_mod.recall("SeedAlpha", use_bfs=True, use_vec=True,
                                 bfs_hops=2, boost=False, verbose=True)
@@ -321,8 +322,8 @@ def test_bfs_plus_vec_score_fusion():
     """score 融合: BFS_WEIGHT·bfs_proximity(fid_b) + DELTA_VEC·vec_sim(fid_a) 各自贡献。"""
     import recall as recall_mod
     import scoring
+    restore = _patch_embed_deterministic(recall_mod)  # perf/vec-index: patch 先于建库 (vec_fact 同步 mock 向量)
     tmp, seed, fid_a, fid_b, bravo = _setup_bfs_vec_db()
-    restore = _patch_embed_deterministic(recall_mod)
     try:
         res = {s["fact"]["id"]: s for s in recall_mod.recall(
             "SeedAlpha", use_bfs=True, use_vec=True, bfs_hops=2, boost=False, verbose=True)}
@@ -385,8 +386,8 @@ def test_bfs_plus_vec_score_fusion():
 def test_bfs_plus_vec_no_vec_path_when_only_bfs():
     """门控对称: use_vec=False 时 fid_a(孤立, 仅向量可达)不召回(向量路关闭)。"""
     import recall as recall_mod
+    restore = _patch_embed_deterministic(recall_mod)  # perf/vec-index: patch 先于建库 (vec_fact 同步 mock 向量)
     tmp, seed, fid_a, fid_b, bravo = _setup_bfs_vec_db()
-    restore = _patch_embed_deterministic(recall_mod)
     try:
         # use_vec=False: 向量路关闭 → fid_a 无任何路径可达(孤立 + 无字面 match)
         res = recall_mod.recall("SeedAlpha", use_bfs=True, use_vec=False,
@@ -406,8 +407,8 @@ def test_bfs_plus_vec_no_vec_path_when_only_bfs():
 def test_bfs_plus_vec_no_bfs_path_when_only_vec():
     """门控对称: use_bfs=False 时 fid_b(图近, hop>0)不召回(BFS 路关闭)。"""
     import recall as recall_mod
+    restore = _patch_embed_deterministic(recall_mod)  # perf/vec-index: patch 先于建库 (vec_fact 同步 mock 向量)
     tmp, seed, fid_a, fid_b, bravo = _setup_bfs_vec_db()
-    restore = _patch_embed_deterministic(recall_mod)
     try:
         # use_bfs=False: BFS 路关闭 → fid_b(hop>0, 无字面 match)不召回
         res = recall_mod.recall("SeedAlpha", use_bfs=False, use_vec=True,

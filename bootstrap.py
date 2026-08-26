@@ -105,8 +105,8 @@ def init_memory(
     For each ``*.md`` in ``memory_dir`` (sorted by name): read text → write a
     synthetic one-record transcript JSONL (``{type:user, message:{content:text}}``)
     → ``autodream.autodream(session_id="memory:<file>", ..., fact_type=fact_type)``
-    →累加 counts. ``providers=None`` → autodream default (LLM 蝴蝶翼 直连 Zhipu;
-    无 regex 降级, LLM 不可用即 raise block)。
+    →累加 counts. 提取走 M6/M7 占位通道 (gazetteer 词典+regex 三路, 零 LLM
+    inline — provider 断供不中断写入; wings LLM 为 M4 队列异步升级侧)。
 
     Idempotent: a re-run on an unchanged dir yields NOOP/UPDATE (autodream 增量
     decision), not duplicate ADDs — safe to re-run after editing memory files.
@@ -231,7 +231,10 @@ def prune_deleted(
         conn.executemany(
             "UPDATE fact SET status='deleted' WHERE id=?",
             [(fid,) for fid in to_prune])
-        conn.commit()
+        # perf/vec-index: 软删同步删 vec_fact 行 (与 update_fact_status 同纪律)。
+        import vec_index
+        for fid in to_prune:
+            vec_index.delete_fact(fid)
     return {"checked": len(rows), "pruned": len(to_prune),
             "pruned_ids": to_prune, "native_md_present": sorted(existing),
             "dry_run": dry_run}

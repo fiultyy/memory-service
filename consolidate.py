@@ -95,7 +95,6 @@ def _ensure_schema() -> None:
     if "seen_sessions" not in cols:
         conn.execute("ALTER TABLE fact ADD COLUMN seen_sessions TEXT NOT NULL DEFAULT '[]'")
 
-    conn.commit()
     _schema_migrated = True
 
 
@@ -235,8 +234,6 @@ def decay() -> dict[str, int]:
         if deprecate:
             store.update_fact_status(f["id"], "deprecated", valid_to=store._now())
             deprecated += 1
-    if decayed:
-        conn.commit()
     return {"decayed": decayed, "deprecated": deprecated}
 
 
@@ -312,7 +309,6 @@ def _merge_group(group: list[dict[str, Any]]) -> int:
             json.dumps(new_refs, ensure_ascii=False), survivor_id,
         ),
     )
-    conn.commit()
     return merged
 
 

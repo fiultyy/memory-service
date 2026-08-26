@@ -31,6 +31,18 @@ import db
 
 DEFAULT_THRESHOLD = 0.75
 
+# 核心谓词白名单 (batch 13 收获跑实测修正): qwen3-embedding 对孤立谓词
+# 短语的区分度不足 — uses↔allows cos 0.794 / uses↔causes 0.761 / 核心集
+# 两两间距仅 0.55-0.73, 单阈值聚类必误并核心语义。核心集 (12 门 +
+# prompt v3 自造示例高频) 直通不聚类; 自造谓词间才做近似度归并。
+CORE_PREDICATES = frozenset({
+    "is_a", "uses", "depends_on", "contains", "belongs_to", "implements",
+    "connected_to", "located_in", "causes", "based_on", "prefers", "decided",
+    "part_of", "runs_on", "competitor_of", "owns", "triggers", "monitors",
+    "requires", "targets", "blocked_by", "fixes", "replaces", "provides",
+    "generates", "removes", "makes", "exempts_from",
+})
+
 
 def _threshold() -> float:
     """聚类阈值 (env MEM_PRED_CLUSTER_THRESHOLD 可调, 默认 0.75)。"""
@@ -109,10 +121,26 @@ def cluster(raws: list[str],
         vectors = [[0.0]] * len(uniq)  # 零向量 cosine=0 → 永不并 (安全侧)
 
     reg = _load_registry()
-    mapping: dict[str, str] = {}
-    for raw, vec in zip(uniq, vectors):
+    # 白名单谓词直通: 不查 registry 不 embed, 恒等 canonical (计数仍累计)。
+    pass_through: dict[str, str] = {}
+    to_cluster: list[str] = []
+    for r in uniq:
+        if r in CORE_PREDICATES:
+            pass_through[r] = r
+        else:
+            to_cluster.append(r)
+
+    mapping: dict[str, str] = dict(pass_through)
+    for raw in pass_through:  # registry 计数照常累计 (词频统计完整性)
+        c, v = reg.get(raw, (0, [1.0]))
+        reg[raw] = (c + counts[raw], v)
+
+    for raw, vec in zip(to_cluster, [v for r, v in zip(uniq, vectors)
+                                     if r not in CORE_PREDICATES]):
         best_canon, best_sim = None, -1.0
         for canon, (_cnt, cvec) in reg.items():
+            if canon in CORE_PREDICATES:
+                continue  # 核心谓词不吸收自造谓词 (直通, 不参与聚类)
             sim = _cos(vec, cvec)
             if sim > best_sim:
                 best_canon, best_sim = canon, sim

@@ -48,31 +48,44 @@ def test_validate_open_predicate_passes():
 
 
 def test_cluster_merges_near_synonyms(tmp_db):
-    # 两近义 raw (同向量) + 一无关 raw (正交向量)
+    # 两近义自造谓词 (同向量) + 一无关 (正交) — 核心谓词直通不参与聚类
     v1 = [1.0, 0.0]
     v2 = [0.9, 0.1]   # cos(v1,v2) ≈ 0.994 ≥ 0.75
     v3 = [0.0, 1.0]   # cos(v1,v3) = 0 < 0.75
-    m = predgate.cluster(["competes_with", "competitor_of", "runs_on"],
+    m = predgate.cluster(["competes_with", "rivalizes", "deploys_at"],
                          vectors=[v1, v2, v3])
     assert m["competes_with"] == "competes_with"       # 先到成 canonical
-    assert m["competitor_of"] == "competes_with"       # 近义并入
-    assert m["runs_on"] == "runs_on"                   # 无关自成
-    # 计数: 各出现 1 次
+    assert m["rivalizes"] == "competes_with"           # 近义并入
+    assert m["deploys_at"] == "deploys_at"             # 无关自成
     rows = {r["canonical"]: r["count"] for r in
             db.get_conn().execute("SELECT canonical, count FROM predicate_registry")}
-    assert rows == {"competes_with": 2, "runs_on": 1}
+    assert rows == {"competes_with": 2, "deploys_at": 1}
+
+
+def test_core_predicates_pass_through(tmp_db):
+    """白名单直通: 核心谓词即使与既有自造 canonical 近义也不并, 且不 embed。"""
+    v_uses = [1.0, 0.0, 0.0]
+    # 先立一个与 uses 向量完全相同的自造 canonical
+    predgate.cluster(["zcustom"], vectors=[v_uses])
+    # uses 直通 → 映射到自身, 不并 zcustom
+    m = predgate.cluster(["uses"], vectors=[[9.9]])  # 长度都不齐也不该被用
+    assert m["uses"] == "uses"
+    rows = {r["canonical"]: r["count"] for r in
+            db.get_conn().execute("SELECT canonical, count FROM predicate_registry")}
+    assert rows["zcustom"] == 1
+    assert rows["uses"] == 1
 
 
 def test_cluster_accumulates_across_runs(tmp_db):
     v = [1.0, 0.0]
-    predgate.cluster(["uses"], vectors=[v])
-    # uniq=["uses","utilizes"] → 向量数须对齐 (不齐触发防御分支零向量)
-    m2 = predgate.cluster(["uses", "uses", "utilizes"],
+    predgate.cluster(["zutilizes"], vectors=[v])
+    # uniq=["zutilizes","zuses"] → 向量数须对齐 (不齐触发防御分支零向量)
+    m2 = predgate.cluster(["zutilizes", "zuses", "zuses"],
                           vectors=[v, [0.95, 0.05]])
-    assert m2["uses"] == "uses" and m2["utilizes"] == "uses"
+    assert m2["zuses"] == "zutilizes"
     rows = {r["canonical"]: r["count"] for r in
             db.get_conn().execute("SELECT canonical, count FROM predicate_registry")}
-    assert rows["uses"] == 4  # 1 (前轮) + 2 (uses) + 1 (utilizes 并入) — 词频=聚类总出现次数
+    assert rows["zutilizes"] == 4  # 1 (前轮) + 1 (zutilizes 本轮) + 2 (zuses 并入)
 
 
 def test_cluster_threshold_env(tmp_db, monkeypatch):

@@ -231,7 +231,6 @@ def prune_deleted(
         conn.executemany(
             "UPDATE fact SET status='deleted' WHERE id=?",
             [(fid,) for fid in to_prune])
-        conn.commit()
         # perf/vec-index: 软删同步删 vec_fact 行 (与 update_fact_status 同纪律)。
         import vec_index
         for fid in to_prune:

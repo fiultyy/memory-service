@@ -453,7 +453,6 @@ def test_semantic_link_e2e_via_autodream():
 
 # ── 验收 9/10/11 (追加 C): 空提取段三级时序兜底 ──────────────────────
 
-@pytest.mark.skip(reason='TODO(handoff): 语义链接 e2e 断言组合待下任 worker 修 (C 层/入队手动复现均通过, 见 WIP 报告已知问题节)')
 def test_c_layer_entity_declaration_no_predicate_edges():
     """C 断言: 零命中段 (含「护理担保」, KG 有 aged care guarantee) → C 层
     链接产出**实体声明**且不新建重复实体; 无关注联 span 不产出; C 命中后

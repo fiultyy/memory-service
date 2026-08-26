@@ -63,7 +63,6 @@ def enqueue(material_ref: str, *, transcript_path: str | None = None,
         (qid, material_ref, transcript_path, byte_offset,
          s["surprise"], s["priority"], text, material_prov, now, now),
     )
-    conn.commit()
     return qid
 
 
@@ -101,7 +100,6 @@ def dequeue(limit: int = DEFAULT_BATCH) -> list[dict[str, Any]]:
             "UPDATE upgrade_queue SET status='in_flight', updated_at=? WHERE id=?",
             [(now, i) for i in ids],
         )
-        conn.commit()
     return [dict(r) for r in rows]
 
 
@@ -116,7 +114,6 @@ def revert(item_ids: list[str]) -> int:
         "WHERE id=? AND status='in_flight'",
         [(_now(), i) for i in item_ids],
     )
-    conn.commit()
     return len(item_ids)
 
 
@@ -127,7 +124,6 @@ def mark_done(item_id: str) -> None:
         "UPDATE upgrade_queue SET status='done', updated_at=? WHERE id=?",
         (_now(), item_id),
     )
-    conn.commit()
 
 
 def mark_failed(item_id: str) -> str:
@@ -144,5 +140,4 @@ def mark_failed(item_id: str) -> str:
         "UPDATE upgrade_queue SET attempts=?, status=?, updated_at=? WHERE id=?",
         (attempts, status, _now(), item_id),
     )
-    conn.commit()
     return status

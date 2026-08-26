@@ -379,12 +379,23 @@ def recall(
                 prev = bfs_fact_min_hop.get(fid)
                 if prev is None or min_h < prev:
                     bfs_fact_min_hop[fid] = min_h
+    # perf/vec-index: 候选 vec_sim 批量化 — 一次 vec0 全量 MATCH (C 端扫描,
+    # 千行 ~20ms) 取全部 fact 距离映射, 替代逐候选 Python _cosine (千 fact
+    # 字面候选 ~1.7s)。vec0 点查 (fact_id IN) 实测 ~2ms/行不可用。无 vec
+    # 行的候选 (ingest 时 embed 失败) → sim 0 (同旧 fv 空语义)。embedding
+    # 离线 qv=[] 时整块跳过 (同旧)。规模注: LIMIT=表行数 → 全扫描, MVP
+    # 单机千~万 fact 量级设计 (与字面线性扫描天花板同量级)。
+    sim_by_id: dict[str, float] = {}
+    if qv:
+        import vec_index
+        conn = db.get_conn()
+        total = conn.execute("SELECT COUNT(*) FROM vec_fact").fetchone()[0]
+        if total:
+            for fid, sim in vec_index.fact_topk(qv, total):
+                sim_by_id[fid] = sim
     scored = []
     for f in candidates:
-        vs = 0.0
-        if qv and f.get("value"):
-            fv = embedding.embed(f["value"])  # cache hit(向量候选扩展已 embed)
-            vs = _cosine(qv, fv) if fv else 0.0
+        vs = sim_by_id.get(f["id"], 0.0)
         bfs_prox = _hop_decay(bfs_fact_min_hop.get(f["id"], -1)) if use_bfs else 0.0
         scored.append(scoring.score_fact(
             f, query,

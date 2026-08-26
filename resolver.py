@@ -49,11 +49,14 @@ def resolve_entity(name, entity_type, aliases=None, providers=None,
     # Step 1 — 廉价闸: 大小写不敏感 name + alias 精确命中(无 LLM)。
     hit = store.find_entity_exact(name)
     if hit is not None:
-        # D7: 把 surface form 记入别名(与 step2 add_aliases(dup_id, [name]+aliases)
-        # 对称), 让 T1 能断言 step1 命中后 aliases 含异写。
-        store.add_aliases(hit["id"], [name] + (list(aliases) if aliases else []))
-        # ADR-2② GC: name 是 survivor 规范形(case-insensitive 命中)→ 不该作为自己的
-        # 别名重复(name 已在 .name); 去重 + 清掉等于 survivor.name 的别名。
+        # D7: 把 surface form 记入别名(与 step2 对称), 让 T1 能断言含异写。
+        # ADR-2② + perf: 等于 survivor 规范名 (case-sensitive) 的 surface 不加
+        # — 旧路径加了再被 _gc_aliases 清掉 (add/remove 乒乓, 每次全量失效
+        # exact 字典/代缓存; 预过滤净效果等价零写)。
+        _surfaces = [s for s in [name] + (list(aliases) if aliases else [])
+                     if s != hit["name"]]
+        if _surfaces:
+            store.add_aliases(hit["id"], _surfaces)
         _gc_aliases(hit["id"], survivor_name=hit["name"])
         # D1: 回填既有 entity 的 name_embedding(幂等只填空; emb 离线为 [] 则不回填)。
         store.backfill_entity_embedding(hit["id"], emb)
@@ -67,26 +70,33 @@ def resolve_entity(name, entity_type, aliases=None, providers=None,
         # 同实体异写(JavaScript/JS)在 step1 不命中时 → 孤儿新建。无缺口时零成本。
         import vec_index
         vec_index.heal_entities_if_pending(embedding_providers)
-        candidates = _cosine_topk(emb, _TOP_K, embedding_providers=embedding_providers)
-        if candidates and providers:
-            try:
-                dup = providers[0].dedupe_entity(name, entity_type, candidates)
-            except Exception:
-                # provider can't/won't dedupe (stub/test-fake/offline) → degrade
-                dup = None
-            dup_id = (dup or {}).get("duplicate_id")
-            # Guard: LLM may hallucinate an id absent from candidates (e.g.
-            # copy a few-shot example id). Reject it — a phantom id would sail
-            # past add_aliases (silent no-op) and crash put_fact on FK violation.
-            if dup_id and dup_id in {c["id"] for c in candidates}:
-                survivor = store.get_entity(dup_id)
-                store.add_aliases(dup_id, [name] + (list(aliases) if aliases else []))
-                # ADR-2② GC: 被合并的 name 若已是 survivor 别名(异写已记)→ 不重复;
-                # 清掉等于 survivor 规范名的别名(name 已在 .name)。
-                _gc_aliases(dup_id, survivor_name=survivor["name"] if survivor else None)
-                # D1: 把已为新 name 算好的 emb 回填到既有 entity(幂等只填空)。
-                store.backfill_entity_embedding(dup_id, emb)
-                return dup_id
+        # perf: providers 空 (init/占位主径) 时 LLM 判定不可达 → ANN 候选
+        # 查询是纯浪费 (~千次/全量 init, vec0 逐查 ~8ms); 移入 providers 门内
+        # (merge 路径唯一消费者)。heal 独立保留 (索引完整性, 与 LLM 无关)。
+        if providers:
+            candidates = _cosine_topk(emb, _TOP_K, embedding_providers=embedding_providers)
+            if candidates:
+                try:
+                    dup = providers[0].dedupe_entity(name, entity_type, candidates)
+                except Exception:
+                    # provider can't/won't dedupe (stub/test-fake/offline) → degrade
+                    dup = None
+                dup_id = (dup or {}).get("duplicate_id")
+                # Guard: LLM may hallucinate an id absent from candidates (e.g.
+                # copy a few-shot example id). Reject it — a phantom id would sail
+                # past add_aliases (silent no-op) and crash put_fact on FK violation.
+                if dup_id and dup_id in {c["id"] for c in candidates}:
+                    survivor = store.get_entity(dup_id)
+                    # ADR-2② + perf: 同 step1 预过滤 (等价旧 add+GC 净效果, 免乒乓)。
+                    _sname = survivor["name"] if survivor else None
+                    _surfaces = [s for s in [name] + (list(aliases) if aliases else [])
+                                 if s != _sname]
+                    if _surfaces:
+                        store.add_aliases(dup_id, _surfaces)
+                    _gc_aliases(dup_id, survivor_name=_sname)
+                    # D1: 把已为新 name 算好的 emb 回填到既有 entity(幂等只填空)。
+                    store.backfill_entity_embedding(dup_id, emb)
+                    return dup_id
 
     # Step 3 — 新建 (emb 可能为 []; put_entity 不做网络 I/O)。
     return store.put_entity(name, entity_type, aliases=aliases, name_embedding=emb)

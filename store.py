@@ -79,13 +79,13 @@ def put_entity(name: str, entity_type: str, properties: dict[str, Any] | None = 
         # perf/vec-index: 写路径同步 vec_entity (数据条件跳过: 空/维度不匹配
         # 无可索引向量; SQL 失败传播 — 硬依赖无降级)。
         vec_index.sync_entity(eid, name_embedding)
-        conn.commit()
-        _invalidate_exact_index()  # step1 字典写时失效
+        _register_entity_surfaces(eid, name, aliases)  # 增量 (first-wins 不变)
         return eid
     except sqlite3.IntegrityError:
         # UNIQUE(name, entity_type) 冲突 — 并发 re-ingest 同实体。复用既有行, 不建孤儿。
-        # 回滚未提交的 INSERT(防事务脏状态影响后续查询)。
-        conn.rollback()
+        # 语句级原子: 约束失败的 INSERT 无残留, 无需 rollback (批事务下
+        # rollback 会误伤同批未提交写入 — db.transaction 语义; SQLite 语句
+        # 原子性使失败语句不产生部分效果)。
         # 先 find_entity_exact(与 resolver step1 同语义: case-insensitive name+alias),
         # 命中且 type 一致 → 复用; 否则按 (name, entity_type) 精确查(约束保证存在)。
         hit = find_entity_exact(name)
@@ -200,15 +200,41 @@ def _decode_entity(row: Any) -> dict[str, Any]:
         "created_at": _r["created_at"],
     }
 
-
 # perf/vec-index: step1 进程内 name/alias 小写→id 字典 (消全表扫)。
-# 一次构建写时失效: put_entity/add_aliases/set_aliases/remove_aliases 置 None。
+# 增量维护 (perf 收尾批): put_entity/add_aliases 热路径增量 setdefault
+# (新行 created_at 最新, 既有键 first-wins 语义不变); set_aliases/
+# remove_aliases 涉键删除, 归属回退需全量重建 → 置 None。O(N²) 全量重建
+# (101 库实测 4135 次重建 78s) 由热路径增量消解。
 _exact_index: dict[str, str] | None = None
+_exact_index_gen = 0  # 实体表面变更代计数 (gazetteer 词典/span 缓存共用)
 
 
 def _invalidate_exact_index() -> None:
-    global _exact_index
+    """全量失效 (键删除类变更: set_aliases/remove_aliases)。"""
+    global _exact_index, _exact_index_gen
     _exact_index = None
+    _exact_index_gen += 1
+
+
+def _reset_derived_caches() -> None:
+    """连接切换时全量重置派生缓存 (db.init 调; gaz/span 缓存随 gen 失效)。"""
+    global _exact_index, _exact_index_gen
+    _exact_index = None
+    _exact_index_gen += 1
+
+
+def _register_entity_surfaces(eid: str, name: str | None,
+                              aliases: list[str] | None) -> None:
+    """热路径增量注册: 表面变更代失效 + 字典 setdefault (既有键 first-wins
+    与全量重建 created_at 序一致; 字典未建时只 bump 代)。"""
+    global _exact_index_gen
+    _exact_index_gen += 1
+    if _exact_index is None:
+        return
+    for surface in ([name] if name else []) + list(aliases or []):
+        key = (surface or "").strip().lower()
+        if key:
+            _exact_index.setdefault(key, eid)
 
 
 def _build_exact_index() -> dict[str, str]:
@@ -266,7 +292,6 @@ def backfill_entity_embedding(entity_id: str, name_embedding: list[float] | None
         "AND (name_embedding IS NULL OR name_embedding = '[]')",
         (_encode_embedding(name_embedding), entity_id),
     )
-    conn.commit()
     if cur.rowcount:
         vec_index.sync_entity(entity_id, name_embedding)  # vec 行同步
     return cur.rowcount
@@ -288,7 +313,6 @@ def upsert_entity_embedding(entity_id: str, name_embedding: list[float] | None) 
         "UPDATE entity SET name_embedding = ? WHERE id = ?",
         (_encode_embedding(name_embedding), entity_id),
     )
-    conn.commit()
     if cur.rowcount:
         vec_index.sync_entity(entity_id, name_embedding)  # vec 行同步
     return cur.rowcount
@@ -305,29 +329,36 @@ def add_aliases(entity_id: str, new_aliases: list[str]) -> None:
     for a in new_aliases:
         if a not in merged:
             merged.append(a)
+    if merged == existing:
+        return  # no-op (perf: resolver step1 重复命中高频; 不写不失效代
+                # — span/gaz 缓存与 exact 字典保持, 消级联重建)
     conn.execute(
         "UPDATE entity SET aliases = ? WHERE id = ?",
         (json.dumps(merged, ensure_ascii=False), entity_id),
     )
-    conn.commit()
-    _invalidate_exact_index()  # alias 增量影响 step1 字典
+    _register_entity_surfaces(entity_id, None, new_aliases)  # 增量
 
 
 def set_aliases(entity_id: str, aliases: list[str]) -> None:
     """全量替换 entity.aliases (ADR-2② GC 用: resolver 合并 survivor 时清理无效/重复别名)。
 
-    保序去重(None → []);entity 不存在 → no-op。区别 add_aliases(并入增量)。
     """
     conn = db.get_conn()
     clean: list[str] = []
     for a in (aliases or []):
         if a and a not in clean:
             clean.append(a)
+    row = conn.execute(
+        "SELECT aliases FROM entity WHERE id = ?", (entity_id,)).fetchone()
+    existing = json.loads(row["aliases"]) if row and row["aliases"] else []
+    if clean == existing:
+        return  # no-op (perf: 同 add_aliases; _gc_aliases 高频调用)
+    if row is None:
+        return
     conn.execute(
         "UPDATE entity SET aliases = ? WHERE id = ?",
         (json.dumps(clean, ensure_ascii=False), entity_id),
     )
-    conn.commit()
     _invalidate_exact_index()  # alias 全量替换影响 step1 字典
 
 
@@ -343,11 +374,12 @@ def remove_aliases(entity_id: str, to_remove: list[str]) -> None:
     existing = json.loads(row["aliases"]) if row["aliases"] else []
     rm = set(to_remove or [])
     kept = [a for a in existing if a not in rm]
+    if kept == existing:
+        return  # no-op (perf: 同 add_aliases)
     conn.execute(
         "UPDATE entity SET aliases = ? WHERE id = ?",
         (json.dumps(kept, ensure_ascii=False), entity_id),
     )
-    conn.commit()
     _invalidate_exact_index()  # alias 移除影响 step1 字典
 
 # ── Fact ────────────────────────────────────────────────────────────
@@ -436,7 +468,6 @@ def put_fact(
             provenance, veracity,
         ),
     )
-    conn.commit()
     if value:
         try:
             import embedding
@@ -481,7 +512,6 @@ def update_fact_status(fact_id: str, status: str, supersedes_id: str | None = No
         "WHERE id = ?",
         (status, supersedes_id, valid_to, reason, fact_id),
     )
-    conn.commit()
     if status != "active":
         # perf/vec-index: 非活跃 (superseded/deprecated/deleted) → 删 vec_fact
         # 行保持一致 (查询面另有 active 过滤兜底, 双保险)。

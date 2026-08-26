@@ -93,11 +93,20 @@ def _blank(line: str) -> str:
 
 # ── ① 词典源: KG entity.name + aliases ───────────────────────────────
 
+_gaz_cache: dict[str, tuple[str, str]] | None = None
+_gaz_cache_gen: int = -1
+
 def _load_gazetteer() -> dict[str, tuple[str, str]]:
     """surface(lower) → (canonical_name, entity_type)。空 KG / 未 init → {}。
 
-    ponytail: 每次调用全量加载 (单机 KG ≤ 1e5, MVP 可承受; 越用越准的代价)。
+    ponytail: 全量加载 + **代计数缓存** (perf 收尾批: 101 库 397 次重建
+    7.7s → 实体表面变更代 (store._exact_index_gen) 不变时复用; put_entity/
+    add_aliases 等写后首次调用重建一次, 同批后续段全命中)。
     """
+    import store
+    global _gaz_cache, _gaz_cache_gen
+    if _gaz_cache is not None and _gaz_cache_gen == store._exact_index_gen:
+        return _gaz_cache
     try:
         conn = db.get_conn()
         rows = conn.execute(
@@ -121,25 +130,50 @@ def _load_gazetteer() -> dict[str, tuple[str, str]]:
                 gaz[a] = (canonical, etype)
                 if len(gaz) >= MAX_GAZETTEER_SURFACES:
                     break
+    _gaz_cache = gaz
+    _gaz_cache_gen = store._exact_index_gen
     return gaz
 
 
 def _dict_entity_hits(masked: str, gaz: dict[str, tuple[str, str]]
                       ) -> dict[str, EntityOut]:
     """词典命中 → canonical EntityOut (别名 surface 折入 aliases 供 resolver
-    step1 命中)。同 canonical 多 surface 命中只出一个实体。"""
+    step1 命中)。同 canonical 多 surface 命中只出一个实体。
+
+    perf/vec-index: 纯 str.find + 手写词边界判断 (替代逐 surface 动态
+    ``re.compile`` — 2560 维 profile 热点 ②: CJK 范围 charset 编译
+    ~1s/sub10)。语义等价旧 ``(?<![\\w一-龥])surface(?![\\w一-龥])``
+    IGNORECASE (一-龥 ⊂ \\w; \\w == '_' or isalnum): 大小写不敏感经
+    ``hay = masked.lower()`` 达成, 边界判 ``not is_word``。1200 随机样本
+    零差异对照验证。
+    """
     hits: dict[str, EntityOut] = {}
+    hay = masked.lower()
+    n = len(hay)
     for surface, (canonical, etype) in gaz.items():
-        if len(surface) < 2 or not re.search(
-                rf"(?<![\w一-龥]){re.escape(surface)}(?![\w一-龥])",
-                masked, re.IGNORECASE):
+        s = surface.lower()
+        if len(s) < 2:
             continue
-        if canonical in hits:
-            hits[canonical].aliases.append(surface)  # 归一 surface 供参考
-        else:
-            hits[canonical] = EntityOut(
-                name=canonical, type=etype, aliases=[surface])
+        sl = len(s)
+        i = hay.find(s)
+        while i >= 0:
+            j = i + sl
+            if not ((i > 0 and _is_word(hay[i - 1]))
+                    or (j < n and _is_word(hay[j]))):
+                # 词边界命中 → 记录 (首中即出; 后续出现不增信息)
+                if canonical in hits:
+                    hits[canonical].aliases.append(surface)
+                else:
+                    hits[canonical] = EntityOut(
+                        name=canonical, type=etype, aliases=[surface])
+                break
+            i = hay.find(s, i + 1)
     return hits
+
+
+def _is_word(ch: str) -> bool:
+    """\\w 等价 (unicode): '_' 或字母/数字 (CJK 汉字属字母 → 已覆盖一-龥)。"""
+    return ch == "_" or ch.isalnum()
 
 
 # ── ①+ 语义优先实体匹配 (追加任务 B: 词典①路升级为表面+语义双路) ────
@@ -153,6 +187,8 @@ _SEMANTIC_LINK_THRESHOLD = 0.45
 
 # 语义候选容量闸 (单段 span 上限; ponytail MVP)。
 _MAX_SEMANTIC_SPANS = 16
+_span_cache: dict[str, tuple[str, str] | None] = {}
+_span_cache_gen: int = -1
 
 
 def _semantic_entity_hits(masked: str, gaz: dict[str, tuple[str, str]],
@@ -187,41 +223,58 @@ def _link_spans(spans: list[str],
     跨语言同义投影 (「护理担保」→ "aged care guarantee", 实测 0.53–0.81;
     无关对照 0.31–0.39 被阈值拦)。embedding 离线 ([]) / 索引不可用 →
     静默跳过 (降级不 crash, 循 resolver 红线; 主径不受影响)。
+
+    perf 收尾批: **span 级缓存** (实体表面变更代 + 阈值键控) — 段循环内
+    重复 span 命中缓存零 embed 零 ANN; 代/阈值变更后清空重算。
     """
+    import store as store_mod
+    global _span_cache, _span_cache_gen
+    cache_key = (store_mod._exact_index_gen, _SEMANTIC_LINK_THRESHOLD)
+    if _span_cache_gen != cache_key:
+        _span_cache = {}
+        _span_cache_gen = cache_key
     semantic_map: dict[str, str] = {}
     if not spans:
         return semantic_map
+    pending: list[str] = []
+    for s in spans:
+        if s not in _span_cache:
+            pending.append(s)
     try:
         import embedding
-        vecs = embedding.embed_batch(spans)
+        if pending:
+            vecs = embedding.embed_batch(pending)
     except Exception:
         return semantic_map
     import vec_index
     conn = db.get_conn()
-    for span, vec in zip(spans, vecs):
+    for span, vec in zip(pending, vecs if pending else []):
         if not vec:
+            _span_cache[span] = None
             continue
         try:
             top = vec_index.entity_topk(vec, 1)
         except Exception:
             return semantic_map
-        if not top:
+        if not top or top[0][1] < _SEMANTIC_LINK_THRESHOLD:
+            _span_cache[span] = None  # 无关注联 (< 0.45) 不误链
             continue
-        eid, sim = top[0]
-        if sim < _SEMANTIC_LINK_THRESHOLD:
-            continue  # 无关注联 (< 0.45) 不误链
+        eid = top[0][0]
         row = conn.execute(
             "SELECT name, entity_type FROM entity WHERE id = ?",
             (eid,)).fetchone()
-        if row is None:
+        _span_cache[span] = (row["name"], row["entity_type"]) if row else None
+    for span in spans:
+        hit = _span_cache.get(span)
+        if not hit:
             continue
-        canonical = row["name"]
+        canonical, etype = hit
         semantic_map[span.lower()] = canonical
         if canonical in dict_hits:
             dict_hits[canonical].aliases.append(span)  # 语义 surface 参考归一
         else:
             dict_hits[canonical] = EntityOut(
-                name=canonical, type=row["entity_type"], aliases=[span])
+                name=canonical, type=etype, aliases=[span])
     return semantic_map
 
 

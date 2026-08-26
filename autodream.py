@@ -266,6 +266,19 @@ def _has_active_for_predicate(subject_id: str, predicate: str) -> list[dict[str,
 
 
 def autodream(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable", source_cwd: str | None = None) -> dict[str, int]:
+    """Incrementally整理 a session transcript into the KG (ADR-10) — 公共入口。
+
+    perf/vec-index: 批量写包单事务 (``db.transaction()`` — 消逐语句 commit
+    fsync; autodream 是 PreCompact hook 单写者, 失败整段回滚, 幂等重跑可
+    重入)。实际管道在 :func:`_autodream_inner`。
+    """
+    db.get_conn()  # ensure schema initialised on first call
+    with db.transaction():
+        return _autodream_inner(session_id, transcript_path, providers,
+                                fact_type, source_cwd)
+
+
+def _autodream_inner(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable", source_cwd: str | None = None) -> dict[str, int]:
     """Incrementally整理 a session transcript into the KG (ADR-10).
 
     Pipeline (ADR-10 Decision (a)/(b)/(c)):
@@ -320,18 +333,34 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     # 幂等: 同 material_ref 拒重; M9 novelty (embedding 语言中立) 定优先级,
     # wings 判「无事实」→ 合法 done, attempts≥3 封顶防重复浪费。
     seg_results: list[tuple[str, Any]] = []
+    seg_to_enqueue: list[tuple[int, str, Any]] = []
     for seg_idx, (seg_prov, seg_text) in enumerate(segments):
         result = gazetteer.extract(seg_text)
         if not result.entities and not result.edges:
-            # C 层: 语义兜底实体声明 (与 B 共用 _link_spans 管道)。
+            # C 层: 语义兜底实体声明 (与 B 共用 _link_spans 管道)。防御性
+            # 兜底 — B 路在 extract 内对可语义命中的段恒先命中 (FINDING
+            # c9: 对可命中段本分支不可达; 保留作 B 未覆盖形态的保险)。
             c_ents = gazetteer.semantic_fallback_hits(seg_text)
             if c_ents:
                 result.entities = c_ents  # 实体声明接管; edges 保持空
-            if not result.edges:
-                # A 层: 全文入队 (C 命中实体但无边也入 — 语义内容待 wings)。
-                upgrade.enqueue_segment(transcript_path, seg_idx, seg_text,
-                                        provenance=seg_prov)
+        if not result.edges:
+            # A 层: 全文入队 — **与实体来源无关** (词典/regex/B/C 命中实体
+            # 但无数谓词边的段同样语义内容未提, 皆入 A; FINDING c9 根因:
+            # 原嵌在零产出分支内, B/词典实体命中段被结构性吞掉 A 入队)。
+            # 幂等由 enqueue 的 material_ref 拒重保证 (c10)。
+            seg_to_enqueue.append((seg_idx, seg_text, seg_prov))
         seg_results.append((seg_prov, result))
+    # perf 收尾批: A 入队延后批化 — novelty 采样向量 (surprise.novelty_sample
+    # 截断) 一次 embed_batch 预热缓存, 再逐段 enqueue (novelty embed 全走
+    # L1, 消逐段长文串行 HTTP; 段序/material_ref 不变)。
+    if seg_to_enqueue:
+        import embedding as embedding_mod
+        import surprise as surprise_mod
+        embedding_mod.embed_batch(
+            [surprise_mod.novelty_sample(t) for _, t, _ in seg_to_enqueue])
+        for seg_idx, seg_text, seg_prov in seg_to_enqueue:
+            upgrade.enqueue_segment(transcript_path, seg_idx, seg_text,
+                                    provenance=seg_prov)
 
     # Initial 5-dim LIF at ingest (ADR-8v2): distinct_sessions=1 when session_id
     # present (fact's seen_sessions starts with it). coherence=1.0 (no siblings
@@ -351,6 +380,18 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     # cross-call cache needed).
     name_to_id: dict[str, str] = {}
     name_to_type: dict[str, str] = {}
+    fact_enqueues: list[tuple[str, str, str, str, str | None]] = []
+    # perf 收尾批: 新 fact value 预热批 — put_fact 内嵌 embed(value) 逐条
+    # 串行 HTTP (~120 次/全量 init); 边集 upfront 已知, 一次批预热后全走 L1。
+    _edge_values: list[str] = []
+    for _seg_prov, _result in seg_results:
+        for _edge in _result.edges:
+            _v = (_edge.object or "").strip()
+            if _v and _v not in _edge_values:
+                _edge_values.append(_v)
+    if _edge_values:
+        import embedding as _embedding_mod
+        _embedding_mod.embed_batch(_edge_values)
     for seg_provenance, result in seg_results:
         ext_label = result.source_meta.get("extractor_label", "llm")
         lif_dims = scoring_mod.compute_lif(
@@ -473,9 +514,8 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 )
                 for old in contradicting:
                     store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now(), reason="contradiction")  # M1: contradiction 必带 reason
-                # M6→M4 wire: 占位 fact 落库后待升级项入队 (wings 异步升级)。
-                upgrade.enqueue_fact(new_id, subject=subject, predicate=predicate, obj=value,
-                                    provenance=seg_provenance)
+                # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
+                fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
                 deleted += len(contradicting)
                 added += 1
                 continue
@@ -494,10 +534,21 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 seen_sessions=[session_id] if session_id else [],
                 topic=topic,
             )
-            # M6→M4 wire: 占位 fact 落库后待升级项入队 (wings 异步升级)。
-            upgrade.enqueue_fact(new_id, subject=subject, predicate=predicate, obj=value,
-                                provenance=seg_provenance)
+            # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
+            fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
             added += 1
+
+    # perf 收尾批: fact 入队批化 — 三元组文本 novelty 采样一次 embed_batch
+    # 预热后逐条 enqueue (同 seg 批化; material_ref=fact:<id> 幂等不变)。
+    if fact_enqueues:
+        import embedding as embedding_mod
+        import surprise as surprise_mod
+        embedding_mod.embed_batch(
+            [surprise_mod.novelty_sample(f"{s} {p} {o}".strip())
+             for _, s, p, o, _ in fact_enqueues])
+        for fid, s_, p_, o_, prov in fact_enqueues:
+            upgrade.enqueue_fact(fid, subject=s_, predicate=p_, obj=o_,
+                                 provenance=prov)
 
     return {"added": added, "updated": updated, "deleted": deleted, "noop": noop}
 
@@ -558,7 +609,6 @@ def _refresh_fact_meta(fact_id: str, seen_sessions: list[str], source_refs: list
             fact_id,
         ),
     )
-    conn.commit()
 
 
 __all__ = ["autodream"]

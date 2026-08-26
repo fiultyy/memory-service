@@ -59,14 +59,42 @@ def known_predicates() -> set[str]:
     return preds
 
 
+def novelty_sample(text: str) -> str:
+    """novelty embedding 的采样文本: 前缀截断 (perf/vec-index)。
+
+    段全文可达数千字符 (101 库 p90=4000) — novelty 是优先级启发信号而非
+    语义精确度量, 全文 embed 的 GPU 代价 (~390k chars/全量 init) 不成比例;
+    前缀 150 字符 (全量 init 段样本 84k→21k chars), 截断只影响超长段 (采样代表性充分)。测试
+    文本均短 → 零影响。
+    """
+    return text[:_NOVELTY_TEXT_CAP]
+
+
+_NOVELTY_TEXT_CAP = 150
+
+
 def _novelty(text: str) -> float | None:
-    """1 − max cosine(候选, 既有 active fact value 向量)。离线 → None。"""
+    """1 − max cosine(候选采样, 既有 active fact value 向量)。离线 → None。
+
+    perf/vec-index: 主路径走 vec_fact ANN (单查询取 top-1 = max cosine,
+    替代逐 fact embed+Python 余弦扫描 — 千 fact 级扫描 O(N) 字典+余弦)。
+    vec_fact 为空 (测试 fake 向量维度不匹配 / 全库离线创建) → 回退旧扫描
+    路径 (语义同旧实现)。ANN 集合不含 ingest 时 embed 失败的 fact →
+    max 可能略低 → novelty 略高 (更保守的入队优先级, 可接受漂移)。
+    """
     try:
-        vec = embedding.embed(text)
+        vec = embedding.embed(novelty_sample(text))
     except Exception:
         vec = []
     if not vec:
         return None
+    try:
+        import vec_index
+        top = vec_index.fact_topk(vec, 1)
+    except Exception:
+        top = []
+    if top:
+        return 1.0 - top[0][1]
     try:
         conn = db.get_conn()
         rows = conn.execute(

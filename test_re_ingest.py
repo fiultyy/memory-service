@@ -5,17 +5,17 @@ from pathlib import Path
 
 import db
 import bootstrap
+import gazetteer
 from llm_provider import EdgeOut, EntityOut, Extraction
 
-# mock provider (复用 _demo 模式)
-class _Fake:
-    base_url = None
-    def extract_facts(self, text: str):
-        # 固定返回 (用户, uses, rust, topic)
-        return Extraction(
-            entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
-            edges=[EdgeOut("用户", "uses", "rust", topic="用户使用 rust")],
-            confidence=0.7, source_meta={"provider": "fake"})
+# M6 seam 迁移: 提取主径 adapter(wings LLM)→gazetteer(占位)。本测锁的契约是
+# EdgeOut.topic → fact.topic 落库管道 (ADR-C), 故 patch gazetteer.extract 返回
+# 带 topic 的固定 Extraction (providers 不再喂提取, 占位径零 LLM)。
+def _fake_gaz(text: str) -> Extraction:
+    return Extraction(
+        entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
+        edges=[EdgeOut("用户", "uses", "rust", topic="用户使用 rust")],
+        confidence=0.7, source_meta={"provider": "fake", "extractor_label": "regex"})
 
 # db.init(tmp) 隔离
 tmpdir = tempfile.mkdtemp()
@@ -23,9 +23,14 @@ tmppath = Path(tmpdir) / "mem.db"
 db.init(tmppath)  # 直接传新路径,强制重建连接
 
 # 1. 造 native.md('用户使用 rust') → re-ingest → KG 有 (用户,uses,rust), added>=1
-native_md = Path(tmpdir) / "native.md"
-native_md.write_text("用户使用 rust 进行开发", encoding="utf-8")
-r1 = bootstrap.re_ingest_file(native_md, source_cwd="/test", providers=[_Fake()])
+_orig_gaz = gazetteer.extract
+gazetteer.extract = _fake_gaz
+try:
+    native_md = Path(tmpdir) / "native.md"
+    native_md.write_text("用户使用 rust 进行开发", encoding="utf-8")
+    r1 = bootstrap.re_ingest_file(native_md, source_cwd="/test")
+finally:
+    gazetteer.extract = _orig_gaz
 print(f"Test 1 (native.md): {r1}")
 assert r1.get("added", 0) >= 1, f"Expected added>=1, got {r1}"
 
@@ -54,7 +59,12 @@ assert len(rows2) == len(rows), "Expected no new facts"
 
 # 3. 重跑 native.md → UPDATE/NOOP(幂等,不重复)
 rows_before = conn.execute("SELECT * FROM fact").fetchall()
-r3 = bootstrap.re_ingest_file(native_md, source_cwd="/test")
+_orig_gaz = gazetteer.extract
+gazetteer.extract = _fake_gaz
+try:
+    r3 = bootstrap.re_ingest_file(native_md, source_cwd="/test")
+finally:
+    gazetteer.extract = _orig_gaz
 print(f"Test 3 (native.md re-run): {r3}")
 rows_after = conn.execute("SELECT * FROM fact").fetchall()
 print(f"  KG facts after test3: {len(rows_after)} rows")

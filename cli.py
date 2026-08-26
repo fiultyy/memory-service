@@ -36,6 +36,125 @@ import resolver
 from llm_provider import LLMProvider
 
 
+# ── M17/M18 通道判定 (DR-9 G10 已裁决) ──────────────────────────────
+
+def _channel(stdin_isatty: bool | None = None,
+             stdout_isatty: bool | None = None) -> str:
+    """调用通道判定: 物理 tty 且无 agent 自标 → 'human'; 否则 'agent'。
+
+    方向性铁律 (P38 权威梯度=通道梯度): env ``MEM_AGENT_CONTEXT`` 只能**降档**
+    (agent 自标 agent) — 升 human 档必须物理 tty, env 无法伪造 human。
+    参数可注入 isatty (测试); 缺省取当前进程实态。
+    """
+    sin = sys.stdin.isatty() if stdin_isatty is None else stdin_isatty
+    sout = sys.stdout.isatty() if stdout_isatty is None else stdout_isatty
+    if sin and sout and not os.environ.get("MEM_AGENT_CONTEXT"):
+        return "human"
+    return "agent"
+
+
+# ── M17 四动词 + M16 cite (P38 v16 补注映射; 无 delete/punish) ────────
+
+# 高危动词 (human 路径需交互确认; agent 路径免确认直接执行)。
+_HIGH_RISK_VERBS = ("invalidate", "elevate")
+
+
+def _human_confirm(verb: str, target: str) -> bool:
+    """human 路径高危动词交互确认: input y/N, 非 y 拒绝 (M18 梯度)。"""
+    try:
+        ans = input(f"[mem {verb}] 确认对 {target} 执行 {verb}? (y/N) ").strip().lower()
+    except EOFError:
+        return False
+    return ans in ("y", "yes")
+
+
+def mem_write(subject: str, predicate: str, value: str, *,
+              fact_type: str = "stable", source_cwd: str | None = None,
+              channel: str | None = None) -> dict[str, Any]:
+    """四动词 write: 新事实入库。provenance=通道档 (agent→agent_assert 0.5 /
+    human→human 0.9, veracity 走 M3 映射); 不可声明 provenance (无 flag,
+    杜绝伪造面)。信号 agent_crud{verb:write, via:通道}。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    prov = "human" if ch == "human" else "agent_assert"
+    sid = resolver.resolve_entity(subject, "concept", providers=[])
+    fid = store.put_fact(sid, predicate, value, extractor="human" if ch == "human" else "agent",
+                         fact_type=fact_type, provenance=prov,
+                         source_cwd=source_cwd)
+    signals.append("agent_crud", {
+        "verb": "write", "fact_id": fid, "subject": subject,
+        "predicate": predicate, "value": value, "via": ch,
+        "source_cwd": source_cwd})
+    return {"written": fid, "provenance": prov, "channel": ch}
+
+
+def mem_confirm(fact_id: str, *, channel: str | None = None) -> dict[str, Any]:
+    """四动词 confirm: 证实既有 fact — 记 confirm_arrivals 信号 (via=通道)。
+    P22 确认轴: 不动目标 fact 本体 (确认到达是 dreaming 消费的正信号,
+    若判需新版本由 dreaming 以 supersede_reason='confirm' 产生)。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    fact = store.get_fact(fact_id)
+    if fact is None:
+        return {"confirmed": None, "error": f"fact {fact_id} not found"}
+    signals.append("confirm_arrivals", {
+        "fact_id": fact_id, "via": ch,
+        "source_cwd": fact.get("source_cwd")})
+    return {"confirmed": fact_id, "channel": ch}
+
+
+def mem_invalidate(fact_id: str, note: str = "", *,
+                   channel: str | None = None) -> dict[str, Any]:
+    """四动词 invalidate: 失效建议 — 旧 fact status→superseded,
+    supersede_reason='contradiction' (时效标注, 复用 M1 通道); human 路径
+    高危需交互确认。信号 agent_crud{verb:invalidate, via:通道}。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    fact = store.get_fact(fact_id)
+    if fact is None:
+        return {"invalidated": None, "error": f"fact {fact_id} not found"}
+    if ch == "human" and not _human_confirm("invalidate", fact_id):
+        return {"invalidated": None, "declined": True, "channel": ch}
+    store.update_fact_status(fact_id, "superseded",
+                             valid_to=store._now(), reason="contradiction")
+    signals.append("agent_crud", {
+        "verb": "invalidate", "fact_id": fact_id, "via": ch,
+        "source_cwd": fact.get("source_cwd"), "note": note})
+    return {"invalidated": fact_id, "reason": "contradiction", "channel": ch}
+
+
+def mem_elevate(fact_id: str, *, channel: str | None = None) -> dict[str, Any]:
+    """四动词 elevate: 晋升提名 — **不动 fact** (无 supersede, 晋升裁决权在
+    dreaming 的 LIF 阈值), 仅记偏好信号; human 路径高危需交互确认。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    fact = store.get_fact(fact_id)
+    if fact is None:
+        return {"elevated": None, "error": f"fact {fact_id} not found"}
+    if ch == "human" and not _human_confirm("elevate", fact_id):
+        return {"elevated": None, "declined": True, "channel": ch}
+    signals.append("agent_crud", {
+        "verb": "elevate", "fact_id": fact_id, "via": ch,
+        "source_cwd": fact.get("source_cwd")})
+    return {"elevated": fact_id, "channel": ch}  # 信号已记, fact 未动
+
+
+def mem_cite(fact_id: str, output_ref: str = "", *,
+             channel: str | None = None) -> dict[str, Any]:
+    """M16 cite (DR-9 G9): 引用记账 — append citations 信号流
+    (fact_id/agent_output_ref/via=通道)。单向正奖励, 不碰 KG 写面
+    (cite 非权威动词, 不扩 P38 白名单)。"""
+    import signals
+    ch = channel if channel is not None else _channel()
+    fact = store.get_fact(fact_id)
+    if fact is None:
+        return {"cited": None, "error": f"fact {fact_id} not found"}
+    signals.append("citations", {
+        "fact_id": fact_id, "agent_output_ref": output_ref, "via": ch,
+        "source_cwd": fact.get("source_cwd")})
+    return {"cited": fact_id, "channel": ch}
+
+
 # ── .env 加载 (stdlib, 无依赖; 早于 provider 实例化) ─────────────────
 def _load_env() -> None:
     """从同目录 .env 加载环境变量到 os.environ (setdefault: 不覆盖已存在的)。
@@ -186,7 +305,8 @@ def recall(query: str, verbose: bool = False,
            with_tag: bool = False,
            use_bfs: bool = False, bfs_hops: int = 2,
            as_of: str | None = None,
-           use_bfs_scoped: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
+           use_bfs_scoped: bool = False,
+           as_json: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
     Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
@@ -197,11 +317,45 @@ def recall(query: str, verbose: bool = False,
     为 UTC +00:00(ADR-3 ②, 杜绝非 UTC 字典序错序; naive 按 UTC 解释)。
     ``use_bfs_scoped=True`` (ADR-4) 限 BFS 图构建为本 cwd(source_cwd 过滤, 图更精确
     更小); default off 保持全局图(ADR-14 单体 KG 跨 cwd 共享)。
+    ``as_json=True`` (M15a) 输出稳定 JSON 契约 shape: ``{"query", "facts":
+    [structured...]}`` — 见 :func:`_json_contract_facts` (字段名即 ABI)。
     """
-    return recall_mod.recall(query, verbose=verbose, session_id=session_id,
-                             boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
-                             with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops,
-                             as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped)
+    result = recall_mod.recall(query, verbose=verbose, session_id=session_id,
+                               boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
+                               with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops,
+                               as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped)
+    if as_json:
+        facts = result["results"] if isinstance(result, dict) and "results" in result \
+            else result
+        return {"query": query, "facts": _json_contract_facts(facts)}
+    return result
+
+
+# M15a --json 稳定输出契约 (D5'): 字段名即 ABI — 变更须留 changelog。
+# 结构化 fact 投影: 供 agent/脚本消费; 列表序 = recall 输出序 (score 降序)。
+_JSON_FACT_FIELDS = (
+    "id", "subject_id", "predicate", "object_id", "value",
+    "fact_type", "LIF", "status", "provenance", "veracity", "topic",
+    "extractor", "supersede_reason", "supersedes_id",
+    "valid_from", "valid_to", "created_at",
+    "access_count", "last_accessed_at",
+)
+
+
+def _json_contract_fact(fact: dict[str, Any]) -> dict[str, Any]:
+    """单 fact → 契约投影 (verbose dict 取 .fact; 固定字段序, 缺列投 None)。"""
+    src = fact.get("fact", fact) if isinstance(fact, dict) else {}
+    out: dict[str, Any] = {}
+    for k in _JSON_FACT_FIELDS:
+        out[k] = src.get(k)
+    # score: verbose/with_tag shape 携带 (list shape 的 _snaptag 不透出)。
+    if isinstance(fact, dict) and "score" in fact:
+        out["score"] = fact["score"]
+    return out
+
+
+def _json_contract_facts(facts: list[Any]) -> list[dict[str, Any]]:
+    return [_json_contract_fact(f) for f in (facts or [])]
 
 
 # ── consolidate ────────────────────────────────────────────────────
@@ -355,6 +509,8 @@ def _main(argv: list[str] | None = None) -> int:
                      help="BFS 遍历跳数(默认 2)")
     rec.add_argument("--bfs-scoped", dest="bfs_scoped", action="store_true",
                      help="限 BFS 图构建为本 cwd(source_cwd 过滤; 默认 off 全局图 ADR-14)")
+    rec.add_argument("--json", dest="json", action="store_true",
+                     help="M15a 稳定 JSON 契约输出 {query, facts:[…]} (字段名即 ABI; 缺省行为不变)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -404,6 +560,27 @@ def _main(argv: list[str] | None = None) -> int:
                    help="回填 active fact value → L2 embedding cache (ADR-13 向量通电)")
     sub.add_parser("stats",
                    help="只读 churn 快照 (ADR-5): entity/fact 计数 + supersede_rate/active_ratio")
+    st = sub.add_parser("stats-json",
+                        help="stats 的 M15a 稳定 JSON 契约输出 (同 stats 数据, 契约 shape)")
+
+    # ── M17 四动词 + M16 cite (P38 物化; 无 delete/punish) ──
+    wr = sub.add_parser("write", help="四动词 write: 新事实入库 (provenance=通道档)")
+    wr.add_argument("subject")
+    wr.add_argument("predicate")
+    wr.add_argument("value")
+    wr.add_argument("--fact-type", dest="fact_type", default="stable",
+                    choices=("ephemeral", "stable", "permanent"))
+    wr.add_argument("--cwd", default=None, help="ADR-14 source_cwd")
+    cf = sub.add_parser("confirm", help="四动词 confirm: 证实既有 fact (记信号)")
+    cf.add_argument("fact_id")
+    inv = sub.add_parser("invalidate", help="四动词 invalidate: 失效建议 (superseded+contradiction)")
+    inv.add_argument("fact_id")
+    inv.add_argument("--note", default="", help="失效说明 (入信号)")
+    el = sub.add_parser("elevate", help="四动词 elevate: 晋升提名 (不动 fact, 记偏好信号)")
+    el.add_argument("fact_id")
+    ct = sub.add_parser("cite", help="M16 引用记账 (citations 信号, 单向正奖励)")
+    ct.add_argument("fact_id")
+    ct.add_argument("--ref", default="", help="agent 输出引用 (output_ref)")
     dd = sub.add_parser("dream-daemon",
                         help="启动 autoDream daemon(常驻 autodream loop, operational #1)")
     dd.add_argument("--cwd", default=None, help="project cwd to watch(默认 $PWD)")
@@ -421,7 +598,7 @@ def _main(argv: list[str] | None = None) -> int:
         ))
     elif args.cmd == "recall":
         session_id = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
-        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped)
+        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped, as_json=args.json)
         # ADR-4 bfs hint: direct-match 薄且未开 --bfs → stderr 提示(不污染 stdout 机器输出)。
         # 结果数 < 阈值代理 direct-match 薄(候选少 → 命中少); suggest_bfs 字段在 envelope
         # (with_tag) 里有, 但 cli 走结果数自判覆盖 list/verbose 全 path。
@@ -444,8 +621,22 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir, dry_run=args.dry_run), ensure_ascii=False))
     elif args.cmd == "embed-backfill":
         print(json.dumps(embed_backfill(), ensure_ascii=False))
-    elif args.cmd == "stats":
+    elif args.cmd in ("stats", "stats-json"):
         print(json.dumps(stats(), ensure_ascii=False))
+    elif args.cmd == "write":
+        print(json.dumps(mem_write(args.subject, args.predicate, args.value,
+                                   fact_type=args.fact_type,
+                                   source_cwd=args.cwd), ensure_ascii=False))
+    elif args.cmd == "confirm":
+        print(json.dumps(mem_confirm(args.fact_id), ensure_ascii=False))
+    elif args.cmd == "invalidate":
+        print(json.dumps(mem_invalidate(args.fact_id, note=args.note),
+                         ensure_ascii=False))
+    elif args.cmd == "elevate":
+        print(json.dumps(mem_elevate(args.fact_id), ensure_ascii=False))
+    elif args.cmd == "cite":
+        print(json.dumps(mem_cite(args.fact_id, output_ref=args.ref),
+                         ensure_ascii=False))
     elif args.cmd == "dream-daemon":
         # daemon runs its own loop (blocking); returns exit code, not JSON.
         return dream_daemon(cwd=args.cwd, interval=args.interval, once=args.once)

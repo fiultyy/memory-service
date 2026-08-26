@@ -58,7 +58,7 @@ cd /home/yy/projects/memory-service && python3 cli.py <subcommand> ...
 
 ## 子命令契约(严格对齐 cli.py)
 
-11 个子命令(详见 `cli.py _main`):`ingest` / `recall` / `consolidate` / `autodream` / `init-memory` / `re-ingest` / `synthesis-index` / `prune` / `embed-backfill` / `stats` / `dream-daemon`。
+16 个子命令(详见 `cli.py _main`):原 11 个 + 四动词 `write` / `confirm` / `invalidate` / `elevate` + `cite` + `stats-json`。
 
 CC 以 `mem` 为调用名(skill 名 = `mem`, 软链到 `~/.claude/skills/mem/`)。面向 CC 的调用 = `mem <subcommand>`,底层 = `cli.py <subcommand>`,两种写法等价:
 
@@ -95,10 +95,11 @@ mem recall "<query>" [--verbose] [--vector] [--bfs] [--as-of <ts>] [--cwd <cwd>]
 - 加权召回(ADR-4v2): `score = α·match + β·centrality + γ·LIF + δ·vec_sim`——字面匹配 + PageRank 中心性 + LIF 信任标量 + 向量相似度
 - `query` 经分词后 `entity.name LIKE %token%` 定位 seed 实体 → 其 subject/object 的 Fact 为候选集
 - `--vector`: 向量召回融合(ADR-13,解同义/改写/字面盲区)
-- `--bfs`: BFS 图遍历召回(D5,召回图近但字面/向量远的 fact);`--bfs-hops`(默认 2)/`--bfs-scoped`(限本 cwd 图)
+- `--bfs`: BFS 图遍历召回(D5,召回图近但字面/向量远的 fact);`--bfs-hops`(默认 2)/`--bfs-scoped`(限本 cwd 图)。**入图门槛**: BFS 扩展通道入场的 fact 需 `lif_source≥0.7`(占位 regex 0.4 档不进扩展;主检索路径不受影响)
 - `--as-of`: 点时召回(bi-temporal,只返回 `valid_from<=t<valid_to` 的 fact)
 - `--cwd`: ADR-14 过滤 source_cwd(本 cwd fact + NULL 老数据;默认全 cwd)
 - `--verbose`: 每条 Fact 追加 `_scored`/`_subject_name`/`_object_name` 调试字段
+- `--json`: M15a 稳定 JSON 契约输出 `{"query", "facts":[…]}`(见下)
 - `--session`: 可选 session id(默认 `CLAUDE_CODE_SESSION_ID` env),用于 LIF 刷新记录 `seen_sessions`/access_count
 - stdout: JSON Fact 数组
 
@@ -109,7 +110,24 @@ $ python3 cli.py recall "rust"
 
 $ python3 cli.py recall "rust语言" --vector   # 向量召回解同义
 $ python3 cli.py recall "rust" --verbose      # 带 _scored/_subject_name/_object_name
+$ python3 cli.py recall "rust" --json         # 稳定契约 shape(见 §JSON 契约)
 ```
+
+#### `--json` 稳定输出契约(M15a,字段名即 ABI——变更须留 changelog)
+
+```json
+{"query": "<原查询>", "facts": [
+  {"id","subject_id","predicate","object_id","value",
+   "fact_type","LIF","status","provenance","veracity","topic",
+   "extractor","supersede_reason","supersedes_id",
+   "valid_from","valid_to","created_at",
+   "access_count","last_accessed_at","score"}
+]}
+```
+
+- `facts` 列表序 = recall 输出序(score 降序);缺列投 `null`(老数据 NULL=legacy)
+- `provenance`(出处轴): user_prose|tool_obs|agent_assert|human|system;`veracity`(权威标量)随出处自动映射
+- 供 agent/脚本消费;`stats-json` 同为契约 shape
 
 ### 3. `consolidate` / `mem consolidate` — decay + 去重
 
@@ -132,7 +150,12 @@ mem consolidate
 | `synthesis-index [--scope <cwd>] [--memory-dir <dir>] [--session <id>]` | 散 mem-*.md 对账 → MEMORY 投影(ADR-15 P2,唯一写入口) |
 | `prune [--scope <cwd>] [--memory-dir <dir>]` | 删除 KG 中无对应 memory .md 的孤儿 fact |
 | `embed-backfill` | active fact value → L2 向量 cache |
-| `stats` | 只读 churn 快照(entity/fact 计数 + status 分布) |
+| `write <subject> <predicate> <value> [--fact-type] [--cwd]` | 四动词 write:新事实(provenance=通道档,信号 agent_crud) |
+| `confirm <fact_id>` | 四动词 confirm:证实(信号 confirm_arrivals,P22 确认轴) |
+| `invalidate <fact_id> [--note]` | 四动词 invalidate:失效建议(superseded+contradiction;human 路径交互确认) |
+| `elevate <fact_id>` | 四动词 elevate:晋升提名(不动 fact,仅信号;human 路径交互确认) |
+| `cite <fact_id> [--ref]` | M16 引用记账(citations 信号,单向正奖励,不碰 KG 写面) |
+| `stats` / `stats-json` | 只读 churn 快照(entity/fact 计数 + status 分布;stats-json 为契约 shape) |
 | `dream-daemon [--cwd] [--interval <s>] [--once]` | 常驻 autoDream loop(watch CC transcript 增长 → 增量 dream,operational #1) |
 
 ---
@@ -151,8 +174,52 @@ mem consolidate
 
 ---
 
+## 维护动词时机教学(何时写记忆)
+
+KG 是增量演化的:写入 → 召回验证 → dreaming 日频整合(晋升/升级/卫生)。你(agent)在写入侧的时机判断。**通道判定**(DR-9):物理 tty 且无 `MEM_AGENT_CONTEXT` env → human 档(provenance=human,veracity 0.9);否则 agent 档(agent_assert,0.5)——**agent 不可声明 human 档**(env 只能降档不能升档);invalidate/elevate 在 human 路径需交互确认(y/N)。
+
+- **该记新事实**: 用户陈述了可复用的偏好/决策/事实("以后 X 用 Y"/"项目 Z 依赖 W"),或会话中挖出了跨会话有价值的结构化信息。走 `mem write "<subject>" "<predicate>" "<value>"`(通道自动判档: agent 调用 provenance=agent_assert)或让 PreCompact hook 自动抽取。
+- **该确认**: 召回结果被实际采用且被验证为真 → `mem confirm <fact_id>`(确认信号入 confirm_arrivals 流,抬升信任档;P22 确认轴)。
+- **该建议失效**: 发现召回内容已过时/错误 → `mem invalidate <fact_id> [--note "<说明>"]`(旧 fact superseded+reason=contradiction 时效标注)。
+- **晋升提名**: 高价值事实值得长存 → `mem elevate <fact_id>`(不动 fact,仅记晋升偏好信号,裁决权在 dreaming LIF 阈值)。
+- **引用记账**: 输出中采用了某 fact → `mem cite <fact_id> --ref "<输出引用>"`(citations 流单向正奖励,不碰 KG 写面)。
+- **不该记**: 即时对话上下文、一次性操作细节、会被立即覆盖的临时状态——这些归 CC memory md,不进 KG。
+- **无 delete/punish**: 物理删除不存在(P38)。过时内容走失效/取代(supersede 链保历史,bi-temporal 可回溯),删除是 human 专属的投影面操作。
+
+## 查询策略(何时用哪个 flag)
+
+| 场景 | 用法 |
+|---|---|
+| 精确知道实体名 | `mem recall "<name>"`(字面 seed,主路径) |
+| 同义/改写/中英混排查不到 | 加 `--vector`(向量融合解字面盲区) |
+| 知道 A 想找关联的 B(图近字面远) | 加 `--bfs`(可能 `--bfs-hops 2`);跨 cwd 噪声大时 `--bfs-scoped` |
+| "当时我以为什么"(历史状态) | `--as-of <ISO ts>`(bi-temporal 点时召回) |
+| agent/脚本程序化消费 | `--json`(稳定契约,字段名即 ABI) |
+
+**env 语义**: `MEM_DELAYED_REINFORCE=1` 时 recall 是**纯读**(不即时写回强化),命中记入 `data/signals/recall_hits` 流,由 dreaming 日频批量补回 LIF——对调用方透明,输出 shape 不变;缺省(0/未设)为旧行为即时写回。
+
+## 复述禁令(输出纪律)
+
+**勿在输出中复述召回内容原文。** 复述回流是已知污染路径:被复述的召回文本若再次进入 transcript,会被提取管道重新捕获,dreaming 的回流检测(U7)将压降其升级优先级,并可能产生自述污染回声(「我记得…」类 fact)。
+
+正确姿势:
+- **转述 + 引用**: 用自己的话重述,并引用 `fact_id`(`kg://fact/<id>`)供溯源
+- 摘要式消费,不整段照抄 `value`
+- 引用记账(M16)将把被采用的事实记入 citations 流(单向正奖励)
+
+---
+
 ## 实现边界(见 Spec §3/§9)
 
-**已实现**:LLM 蝴蝶翼抽取(ADR-5b)+ `α·match+β·centrality+γ·LIF+δ·vec` 召回(ADR-4v2)+ 向量召回 `--vector`(ADR-13)+ PreCompact autoDream hook(ADR-10/11)+ type-aware decay(ADR-8v2)+ 多值谓词共存 + KG→CC 投影 `synthesis-index`(ADR-15 P2)+ BFS 图召回(D5)+ bi-temporal 点时召回(D4)+ autoDream daemon `dream-daemon`(operational #1)。
+**已实现**:LLM 蝴蝶翼抽取(ADR-5b)+ `α·match+β·centrality+γ·LIF+δ·vec` 召回(ADR-4v2)+ 向量召回 `--vector`(ADR-13)+ PreCompact autoDream hook(ADR-10/11)+ type-aware decay(ADR-8v2)+ 多值谓词共存 + KG→CC 投影 `synthesis-index`(ADR-15 P2)+ BFS 图召回(D5,入图门槛 lif_source≥0.7)+ bi-temporal 点时召回(D4)+ autoDream daemon `dream-daemon`(operational #1)。
+
+**新实态(2026-08 统一记忆系统改造后)**:
+
+- **占位-升级时序(M6/M7/M4/M9)**: autodream 主径用 **gazetteer 占位提取器**(KG 词典+regex 三路,零 LLM inline,`extractor='regex'` 0.4 档即时入库,provider 断供不中断写入);wings LLM 退役为**异步升级**——待升级素材入 `upgrade_queue` 表按惊喜度排队,dreaming 日频消费。ingest 子命令仍走 wings 直连。
+- **块文法提取(M8)**: transcript 按 (block_type, text) 序列读取,tool_use/tool_result 不再丢弃;fact 继承源块 `provenance`(user_prose/tool_obs/agent_assert/human/system),`veracity` 随出处自动映射(user_prose 1.0 / tool_obs·human 0.9 / agent_assert·system 0.5)。
+- **延迟强化(M5/M10)**: `MEM_DELAYED_REINFORCE=1` 时 recall 纯读+信号落盘(`data/signals/*.jsonl` 五流 append-only),LIF 重算移入 dreaming 批量补回;缺省旧行为不变。
+- **dreaming 期(M11)**: `dream-daemon` 主循环日频(86400s 可调)跑 `dream.run_cycle()` 六职责——信号重放 LIF 补回 / fact_type 晋升降级 / D9 参数提案(只落 diff 供人审) / 复述回流压档 / 自述污染降档 / 队列 wings 升级(`supersede_reason='upgrade'`)。
+- **投影卫生(M12)**: 卫生轮(3600s 可调)succeeded dreaming 同轮或独立跑:superseded/deprecated 投影退场、MEMORY [mem] 段按现值重排(零 LLM)。
+- **源不变式**: 提取/升级数据源 = transcript 原文/队列素材,永不读自家 KG 作提取输入。
 
 仍 defer:冷层类聚 / query 独立 cli / 跨 scope 向量联邦 / BFS_WEIGHT 调参(需 eval)。

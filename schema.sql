@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS fact (
     seen_sessions   TEXT NOT NULL DEFAULT '[]',     -- JSON array: sessions that recalled this fact (drives lif_spread)
     source_cwd    TEXT,                             -- ADR-14: 来源 cwd(b 方案, 跨 cwd 隔离; NULL=老数据/未知, recall --cwd 过滤含 NULL)
     topic        TEXT,                              -- ADR-C: LLM 生成的一句话可读事实(投影 filename slug + index title + description)
+    supersede_reason TEXT,                          -- M1: contradiction|dedup|upgrade|confirm (update_fact_status reason 参写入; NULL=legacy 不回填)
+    provenance       TEXT,                          -- M2: user_prose|tool_obs|agent_assert|human|system (P21 出处轴; M8 块归因接线)
+    veracity         REAL,                          -- M3: P21 f(provenance) 权重标量 (DR-5 b / DR-6 REAL; NULL=legacy 不回填)
     created_at    TEXT NOT NULL,
     FOREIGN KEY (subject_id) REFERENCES entity(id),
     FOREIGN KEY (object_id)  REFERENCES entity(id),
@@ -56,3 +59,23 @@ CREATE INDEX IF NOT EXISTS idx_fact_object  ON fact(object_id);
 CREATE INDEX IF NOT EXISTS idx_fact_pred    ON fact(predicate);
 CREATE INDEX IF NOT EXISTS idx_fact_status  ON fact(status);
 CREATE INDEX IF NOT EXISTS idx_fact_source_cwd ON fact(source_cwd);  -- ADR-14 b 方案
+
+-- M4 (spec v2 §1): wings 异步升级队列 — 占位(regex)产出待 LLM 升级。
+-- status 流转: pending → in_flight → done | failed(→pending 重试) ; attempts≥3 → dead 冻结待人工。
+-- M9: surprise(复合惊喜) + priority(=|surprise|^α, D8 唯一采纳采样公式) 入队时算。
+CREATE TABLE IF NOT EXISTS upgrade_queue (
+    id              TEXT PRIMARY KEY,
+    material_ref    TEXT NOT NULL UNIQUE,      -- 升级素材定位: fact:<id> / segment:<path>#seg<n>
+    transcript_path TEXT,
+    byte_offset     INTEGER,
+    surprise        REAL,                      -- M9 复合惊喜; NULL=embedding 离线不可考
+    priority        REAL NOT NULL DEFAULT 0,   -- |surprise|^α, 出队按此降序
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','in_flight','done','failed','dead')),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    material_text   TEXT,                          -- M11: 入队时转写的升级素材原文(源不变式: 提取输入=队列 material, 非 KG 读)
+    material_prov   TEXT,                          -- M11: 素材段 provenance (wings 升级产出继承)
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_uq_status_priority ON upgrade_queue(status, priority DESC);

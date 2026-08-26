@@ -298,7 +298,7 @@ def _merge_group(group: list[dict[str, Any]]) -> int:
         # ponytail: no transaction — single-writer cli, crash leaves at worst a
         # half-merged group re-runnable on next consolidate (idempotent: already
         # superseded dups fall out of the active group next pass).
-        store.update_fact_status(dup["id"], "superseded", supersedes_id=survivor_id, valid_to=store._now())
+        store.update_fact_status(dup["id"], "superseded", supersedes_id=survivor_id, valid_to=store._now(), reason="dedup")  # M1: dedup 必带 reason
         merged += 1
 
     conn = db.get_conn()

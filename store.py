@@ -27,6 +27,18 @@ def _uid() -> str:
     return uuid.uuid4().hex
 
 
+# M3 (DR-5 b / DR-6, P21 出处权重函数): provenance → veracity 初值映射。
+# put_fact 未显式传 veracity 时按此表映射; provenance 缺省/表外值 → veracity
+# 留 NULL (出处不可考不臆测 — 与存量行不回填 NULL=legacy 同一纪律)。
+PROVENANCE_VERACITY: dict[str, float] = {
+    "user_prose": 1.0,
+    "tool_obs": 0.9,
+    "human": 0.9,
+    "agent_assert": 0.5,
+    "system": 0.5,
+}
+
+
 # ── Entity ──────────────────────────────────────────────────────────
 
 def put_entity(name: str, entity_type: str, properties: dict[str, Any] | None = None,
@@ -326,6 +338,8 @@ def put_fact(
     seen_sessions: list[str] | None = None,
     source_cwd: str | None = None,
     topic: str | None = None,
+    provenance: str | None = None,
+    veracity: float | None = None,
 ) -> str:
     """Insert a Fact (reified), return its id.
 
@@ -341,6 +355,14 @@ def put_fact(
 
     ``topic`` (ADR-C): LLM 生成的一句话可读事实, 投影 filename slug + index
     title + description 的唯一来源。None/空 → 投影回退到三元组拼接。
+
+    ``provenance`` (M2, P21 出处轴): user_prose|tool_obs|agent_assert|human|
+    system。本批只铺列与写入通道 (块级归因接线是 M8)。
+
+    ``veracity`` (M3, DR-5 b/DR-6): 权威标量 REAL。None 时按
+    :data:`PROVENANCE_VERACITY` 由 provenance 自动映射 (user_prose 1.0 /
+    tool_obs 0.9 / human 0.9 / agent_assert 0.5 / system 0.5); provenance
+    亦缺省/表外 → NULL (不可考不臆测, legacy 档)。
     """
     conn = db.get_conn()
     fid = fact_id or _uid()
@@ -350,14 +372,17 @@ def put_fact(
     if lif_source is None:
         from consolidate import SOURCE_WEIGHT
         lif_source = SOURCE_WEIGHT.get(extractor, 0.4)
+    if veracity is None and provenance is not None:
+        veracity = PROVENANCE_VERACITY.get(provenance)
     conn.execute(
         """INSERT INTO fact
            (id, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, original_lif, confidence, source_refs, extractor,
             status, supersedes_id, created_at,
             lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
-            access_count, last_accessed_at, seen_sessions, source_cwd, topic)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            access_count, last_accessed_at, seen_sessions, source_cwd, topic,
+            provenance, veracity)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fid, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, frozen_lif, confidence,
@@ -367,6 +392,7 @@ def put_fact(
             access_count, last_accessed_at,
             json.dumps(seen_sessions or [], ensure_ascii=False),
             source_cwd, topic,
+            provenance, veracity,
         ),
     )
     conn.commit()
@@ -398,12 +424,19 @@ def get_facts_by_subject(subject_id: str, status: str | None = "active") -> list
         ).fetchall()
     return [_decode_fact(r) for r in rows]
 
-def update_fact_status(fact_id: str, status: str, supersedes_id: str | None = None, valid_to: str | None = None) -> None:
-    """Lifecycle transition (active→deprecated/superseded). No-op if missing."""
+def update_fact_status(fact_id: str, status: str, supersedes_id: str | None = None, valid_to: str | None = None, reason: str | None = None) -> None:
+    """Lifecycle transition (active→deprecated/superseded). No-op if missing.
+
+    ``reason`` (M1): supersede 理由 contradiction|dedup|upgrade|confirm →
+    supersede_reason 列。COALESCE 语义 (与 valid_to 同): 不传不动已设值 —
+    老调用点/decay deprecated 路径不写 reason, 历史行 NULL=legacy 不回填。
+    """
     conn = db.get_conn()
     conn.execute(
-        "UPDATE fact SET status = ?, supersedes_id = COALESCE(?, supersedes_id), valid_to = COALESCE(?, valid_to) WHERE id = ?",
-        (status, supersedes_id, valid_to, fact_id),
+        "UPDATE fact SET status = ?, supersedes_id = COALESCE(?, supersedes_id), "
+        "valid_to = COALESCE(?, valid_to), supersede_reason = COALESCE(?, supersede_reason) "
+        "WHERE id = ?",
+        (status, supersedes_id, valid_to, reason, fact_id),
     )
     conn.commit()
 
@@ -437,4 +470,8 @@ def _decode_fact(row: Any) -> dict[str, Any]:
         "seen_sessions": json.loads(row["seen_sessions"]) if row["seen_sessions"] else [],
         "source_cwd": row["source_cwd"] if "source_cwd" in row.keys() else None,
         "topic": row["topic"] if "topic" in row.keys() else None,
+        # M1/M2/M3 (spec v2 schema 批): NULL=legacy 不回填。
+        "supersede_reason": row["supersede_reason"] if "supersede_reason" in row.keys() else None,
+        "provenance": row["provenance"] if "provenance" in row.keys() else None,
+        "veracity": row["veracity"] if "veracity" in row.keys() else None,
     }

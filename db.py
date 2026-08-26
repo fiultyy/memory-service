@@ -41,6 +41,16 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     # ADR-C migration: 老 db fact 表无 topic 列 → ALTER ADD。
     if "topic" not in cols:
         conn.execute("ALTER TABLE fact ADD COLUMN topic TEXT")
+    # M1/M2/M3 migration (spec v2 schema 批): 老 db fact 表无 supersede_reason /
+    # provenance / veracity 三列 → ALTER ADD。存量行不回填 (writer 不可考不臆测,
+    # NULL=legacy — spec §1 v2·G11 默认); veracity 初值由 put_fact 按 provenance
+    # 映射写入 (store.PROVENANCE_VERACITY), 老行无 provenance 亦不可考 → 同不回填。
+    if "supersede_reason" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN supersede_reason TEXT")
+    if "provenance" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN provenance TEXT")
+    if "veracity" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN veracity REAL")
     # ADR-D7 migration: 老 db entity 表无 aliases/name_embedding 列 → ALTER ADD。
     ent_cols = {r[1] for r in conn.execute("PRAGMA table_info(entity)")}
     if "aliases" not in ent_cols:
@@ -53,6 +63,33 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_name_type ON entity(name, entity_type)"
     )
+    # M4 migration: 老 db 无 upgrade_queue 表(wings 异步升级队列) → CREATE IF NOT EXISTS
+    # (整表新增, 无 ALTER 需求; 重复 init 幂等)。
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS upgrade_queue (
+            id              TEXT PRIMARY KEY,
+            material_ref    TEXT NOT NULL UNIQUE,
+            transcript_path TEXT,
+            byte_offset     INTEGER,
+            surprise        REAL,
+            priority        REAL NOT NULL DEFAULT 0,
+            status          TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending','in_flight','done','failed','dead')),
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uq_status_priority ON upgrade_queue(status, priority DESC)"
+    )
+    # M11 migration: upgrade_queue 补 material_text/material_prov (源不变式:
+    # wings 升级的提取输入 = 入队时转写的素材原文, 永不读自家 KG 作提取输入)。
+    uq_cols = {r[1] for r in conn.execute("PRAGMA table_info(upgrade_queue)")}
+    if "material_text" not in uq_cols:
+        conn.execute("ALTER TABLE upgrade_queue ADD COLUMN material_text TEXT")
+    if "material_prov" not in uq_cols:
+        conn.execute("ALTER TABLE upgrade_queue ADD COLUMN material_prov TEXT")
     conn.commit()
     _conn = conn
     _conn_path = str(path)

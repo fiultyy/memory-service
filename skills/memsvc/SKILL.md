@@ -25,7 +25,7 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 | 直接写一条事实 | `python3 …/cli.py write "<subject>" "<predicate>" "<value>" [--fact-type stable\|permanent\|ephemeral]` |
 | 证实/失效/晋升/引用 | `confirm\|invalidate\|elevate\|cite <fact_id>`（invalidate 可加 `--note`，cite 可加 `--ref`） |
 | 库况 | `python3 …/cli.py stats-json` |
-| **看图谱实时生长** | `python3 …/cli.py graph-live`（默认 http://127.0.0.1:8765/，前台阻塞；`--port`/`--db` 可调。inotify 盯 wal 零轮询，入库即推） |
+| **看图谱实时生长** | `python3 …/cli.py graph-live --port 8766`（**必须 --port 8766**：默认 8765 被 rt_gateway 语音面板占用；前台阻塞 Ctrl-C 退，无状态秒起。inotify 盯 wal 零轮询，入库即推；页面 http://127.0.0.1:8766/） |
 | 导出图谱给外部工具 | `python3 …/cli.py graph-export --json <path>`（快照含 rowid 游标）或 `--csv <dir>`（nodes.csv+edges.csv，边带 created_at 时间列 → **Cosmograph** 时间轴回放原生可识别；Gephi Lite 同吃） |
 
 `…` = `/home/yy/projects/memory-service`（下同）。

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -70,9 +71,38 @@ _CONFLICT_PREDICATE_PAIRS: set[tuple[str, str]] = {
 }
 
 
+# CJK 统一表意文字区间 (基本区 + 扩A)。用于 query_tokens 的 bigram 切分 —
+# 中文无空格, 纯 whitespace split 会把整句变成一个巨型 token, LIKE/substring
+# 永不命中 (P2 UserPromptSubmit 注入对中文 prompt 完全失效的根因)。
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
+
+
 def query_tokens(query: str) -> list[str]:
-    """Case-folded tokenization (mirrors weighted_recall.query_tokens)."""
-    return [t for t in (query or "").lower().split() if t]
+    """Case-folded tokenization + CJK bigram 切分 (harness P2)。
+
+    whitespace chunk 原样保留 (ASCII/混合 chunk 的 substring 语义不变, 已有
+    英文行为零回归); chunk 内每个连续 CJK run 追加其 bigram (单字 run 追加
+    单字)。中文实体名普遍 2-4 字, bigram 是最小可命中粒度: "数据库锁住了"
+    → 数据/据库/库锁/锁住/住了 — LIKE %数据% 命中 entity「数据库」,
+    value 扫描同理。噪声 bigram (跨词边) LIKE 不命中即无害。去重保序。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(tok: str) -> None:
+        if tok and tok not in seen:
+            seen.add(tok)
+            out.append(tok)
+
+    for chunk in (query or "").lower().split():
+        _add(chunk)
+        for run in _CJK_RE.findall(chunk):
+            if len(run) == 1:
+                _add(run)
+            else:
+                for i in range(len(run) - 1):
+                    _add(run[i : i + 2])
+    return out
 
 
 def match_item(

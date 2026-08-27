@@ -306,7 +306,8 @@ def recall(query: str, verbose: bool = False,
            use_bfs: bool = False, bfs_hops: int = 2,
            as_of: str | None = None,
            use_bfs_scoped: bool = False,
-           as_json: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
+           as_json: bool = False,
+           min_score: float | None = None) -> list[dict[str, Any]] | dict[str, Any]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
     Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
@@ -323,7 +324,8 @@ def recall(query: str, verbose: bool = False,
     result = recall_mod.recall(query, verbose=verbose, session_id=session_id,
                                boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
                                with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops,
-                               as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped)
+                               as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped,
+                               min_score=min_score)
     if as_json:
         facts = result["results"] if isinstance(result, dict) and "results" in result \
             else result

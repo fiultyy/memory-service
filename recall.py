@@ -36,12 +36,18 @@ import signals
 import store
 
 # ADR-13 向量层(use_vec): 候选扩展 + vec_sim 阈值/top-N。
+# ADR-4 噪音地板: score < 此值的 fact 视为噪音丢弃 (BFS 扩展 fact 绕过 —
+# 见 use_bfs)。默认为**短 query** (交互式 recall, "rust" / "sqlite-vec 部署")
+# 校准: match_item 是 query token 命中率, 长 prompt (harness P2 注入, 整段
+# 用户 prompt 作 query) token 数多 → 命中率被稀释 → 强相关 fact 也只有
+# ~0.19。注入通道用 min_score 参数自校准低门槛, 默认语义零变化。
+SCORE_FLOOR = 0.3
+
 # M13 (G5 已裁决): BFS 扩展入场门槛 — seed/hop 邻居经扩展通道入场的 fact 需
 # lif_source ≥ _BFS_SOURCE_GATE (0.7): regex 0.4 档占位噪声拒、llm 0.7/vote
 # 0.85/human 0.9 过。BFS 是增益通道非主检索 — 字面 seed/向量/中心性路径不受
-# 门槛影响 (低 source fact 仍可被直接查询召回)。hop>0 绕 0.3 过滤的 §7 语义
-# 保留, 但只对过了本门槛入场的扩展 fact 生效 (低分邻居的边不因 bypass 入图
-# — 门槛在 append 点, 未入场者永不进 bfs_expanded_ids)。[设] 可调。
+# 门槛影响 (低 source fact 仍可被直接查询召回)。hop>0 绕地板的 §7 语义保留,
+# 但只对过了本门槛入场的扩展 fact 生效。[设] 可调。
 _BFS_SOURCE_GATE = 0.7
 VEC_MIN = 0.30   # cosine ≥ 此的 active fact 入向量候选(避免全 noise 污染 top-k)
 VEC_TOP_N = 20   # 向量候选上限(扩展 entity/value 候选集)
@@ -242,6 +248,7 @@ def recall(
     bfs_hops: int = 2,
     as_of: str | None = None,
     use_bfs_scoped: bool = False,
+    min_score: float | None = None,
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
@@ -264,6 +271,9 @@ def recall(
             "lif":..., "score":..., "entities":[...]}`` dicts (debug detail for
             ``recall --verbose``); else bare Fact dicts.
         top_k: Truncate to top-k by score; None = no truncation.
+        min_score: 噪音地板覆盖 (default None ⇒ :data:`SCORE_FLOOR` 0.3)。
+            长 prompt 查询场景 (harness P2 注入) 的 match 稀释自校准用;
+            交互式短 query 语义零变化。BFS 扩展 fact 仍绕过任何地板值。
         session_id: Session doing the recall (drives lif_spread on boost).
         boost: Refresh LIF on hit facts (ADR-8v2 reinforcement); default True.
         weights: Optional ``(α, β, γ)`` override forwarded to ``score_fact``
@@ -403,8 +413,9 @@ def recall(
             vec_sim=vs, weights=weights, delta=delta,
             bfs_proximity=bfs_prox,
         ))
-    # drop low-score (噪音); BFS 扩展 fact(hop>0) 绕过 0.3 门槛但仍参与排序+top_k。
-    scored = [s for s in scored if s["score"] >= 0.3 or s["fact"]["id"] in bfs_expanded_ids]
+    # drop low-score (噪音); BFS 扩展 fact(hop>0) 绕过地板但仍参与排序+top_k。
+    floor = SCORE_FLOOR if min_score is None else min_score
+    scored = [s for s in scored if s["score"] >= floor or s["fact"]["id"] in bfs_expanded_ids]
     scored.sort(key=lambda s: s["score"], reverse=True)
     if top_k is not None:
         scored = scored[: max(0, top_k)]

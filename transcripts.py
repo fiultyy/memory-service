@@ -10,9 +10,11 @@ harness     落盘位置                                                      en
 cc          ~/.claude/projects/<enc>/*.jsonl                              type==assistant ∧
             enc = cwd 的 / 和 . 都换 -                                     message.stop_reason=="end_turn"
 dsh         ~/.dsh/sessions/<enc>/session-<uuid>/session.jsonl.zstd      turn/end(reason=completed) 前最后
-            enc = "-" + cwd 的 / 换 - + "-" (点保留)                       一条 assistant/message 的 text 块
-omp (pi)    ~/.omp/agent/sessions/<enc>/<ts>_<uuid>.jsonl                 type==message ∧ role==assistant ∧
-            enc = $HOME 相对路径的 / 换 - (点保留)                          message.stopReason=="stop"
+            enc = "-" + cwd 的 / 换 - + "--" (点保留)                       一条 assistant/message 的 text 块
+pi          ~/.pi/agent/sessions/<enc>/<ts>_<uuid>.jsonl                  type==message ∧ role==assistant ∧
+            enc = "-" + cwd 的 / 换 - + "--" (点保留)                       message.stopReason=="stop"
+omp (pi系)  ~/.omp/agent/sessions/<enc>/<ts>_<uuid>.jsonl                 同 pi (但 enc = $HOME 相对路径
+                                                                           / 换 -, 无包装横杠)
 =========== ============================================================= ==========================
 
 三家共同语义 (与 endsteps.py 单源对齐):
@@ -38,7 +40,7 @@ from pathlib import Path
 
 from endsteps import DEFAULT_MIN_CHARS
 
-HARNESSES = ("cc", "dsh", "omp")
+HARNESSES = ("cc", "dsh", "pi", "omp")
 
 
 def _gates() -> tuple[int, bool]:
@@ -158,30 +160,14 @@ def _dsh_end_steps(lines) -> list[str]:
     return _gate_and_dedup(texts)
 
 
-# ── omp (pi / oh-my-pi) ─────────────────────────────────────────────
+# ── pi / omp (pi wire 格式) ─────────────────────────────────────────
 
-def _omp_project_dir(cwd: str) -> Path:
-    """enc = $HOME 相对路径 / → - (点保留, 实测 ~/.omp/agent/sessions 目录名)。
-
-    cwd == $HOME 边界: 无已知编码约定, 返回不存在的哨兵路径 (locate → 空,
-    绝不落到 sessions/ 根造成跨项目误扫)。
-    """
-    home = str(Path.home())
-    if cwd == home:
-        return Path.home() / ".omp" / "agent" / "sessions" / "-"
-    rel = cwd[len(home):] if cwd.startswith(home + "/") else cwd
-    return Path.home() / ".omp" / "agent" / "sessions" / rel.replace("/", "-")
-
-
-def _omp_session_id(path: Path) -> str:
-    return path.stem  # <ts>_<uuid>
-
-
-def _omp_end_steps(lines) -> list[str]:
+def _pi_end_steps(lines) -> list[str]:
     """pi wire 格式 → stopReason=="stop" 的 assistant text 块。
 
     stop=自然收尾; toolUse=中间步骤; error/aborted=异常截断 (天然排除,
-    与 CC end_turn 同语义)。
+    与 CC end_turn 同语义)。pi 与 omp 会话 jsonl 同格式, 共用本判定;
+    差异只在目录定位 (_pi_project_dir vs _omp_project_dir)。
     """
     texts: list[str] = []
     for line in lines:
@@ -200,6 +186,38 @@ def _omp_end_steps(lines) -> list[str]:
     return _gate_and_dedup(texts)
 
 
+# 别名: omp 会话与 pi 同 wire 格式, 判定共用
+_omp_end_steps = _pi_end_steps
+
+
+def _pi_project_dir(cwd: str) -> Path:
+    # 实测 (真实 ~/.pi/agent/sessions 目录名校准): 与 dsh 同规则 —
+    # "-" + cwd 的 / 换 - + "--", 点保留 (如 /home/yy/.omp → --home-yy-.omp--)。
+    encoded = "-" + cwd.replace("/", "-") + "--"
+    return Path.home() / ".pi" / "agent" / "sessions" / encoded
+
+
+def _pi_session_id(path: Path) -> str:
+    return path.stem  # <ts>_<uuid>
+
+
+def _omp_project_dir(cwd: str) -> Path:
+    """enc = $HOME 相对路径 / → - (点保留, 实测 ~/.omp/agent/sessions 目录名)。
+
+    cwd == $HOME 边界: 无已知编码约定, 返回不存在的哨兵路径 (locate → 空,
+    绝不落到 sessions/ 根造成跨项目误扫)。
+    """
+    home = str(Path.home())
+    if cwd == home:
+        return Path.home() / ".omp" / "agent" / "sessions" / "-"
+    rel = cwd[len(home):] if cwd.startswith(home + "/") else cwd
+    return Path.home() / ".omp" / "agent" / "sessions" / rel.replace("/", "-")
+
+
+def _omp_session_id(path: Path) -> str:
+    return path.stem  # <ts>_<uuid>
+
+
 # ── 统一门面 ────────────────────────────────────────────────────────
 
 _ADAPTERS = {
@@ -207,6 +225,8 @@ _ADAPTERS = {
            lambda p: p.suffix == ".jsonl"),
     "dsh": (_dsh_project_dir, _dsh_session_id, _dsh_end_steps,
             lambda p: p.name == "session.jsonl.zstd" or p.suffix == ".jsonl"),
+    "pi": (_pi_project_dir, _pi_session_id, _pi_end_steps,
+           lambda p: p.suffix == ".jsonl"),
     "omp": (_omp_project_dir, _omp_session_id, _omp_end_steps,
             lambda p: p.suffix == ".jsonl"),
 }

@@ -674,8 +674,8 @@ def _main(argv: list[str] | None = None) -> int:
                         help="当前 cwd 最近 N 个 transcript end-step 蒸馏 → LLM 入 KG (手动补口, M18)")
     ir.add_argument("--cwd", dest="cwd", default=None,
                     help="项目 cwd (默认 $PWD; 定位 harness 的项目 transcript 目录)")
-    ir.add_argument("--harness", choices=("cc", "dsh", "omp"), default="cc",
-                    help="transcript 来源 harness (默认 cc; dsh=~/.dsh/sessions, omp=~/.omp/agent/sessions)")
+    ir.add_argument("--harness", choices=("cc", "dsh", "pi", "omp"), default="cc",
+                    help="transcript 来源 harness (默认 cc; dsh=~/.dsh/sessions, pi=~/.pi/agent/sessions, omp=~/.omp/agent/sessions)")
     ir.add_argument("--limit", type=int, default=10,
                     help="取最近 N 个 transcript 按 mtime (默认 10)")
     ir.add_argument("--dry-run", dest="dry_run", action="store_true",

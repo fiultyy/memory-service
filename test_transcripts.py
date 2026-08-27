@@ -181,6 +181,25 @@ def test_omp_locate_and_ingest_recent(tmp_path, monkeypatch):
     assert LONG in calls[0][1]
 
 
+def test_pi_adapter_dsh_style_encoding(tmp_path, monkeypatch):
+    """pi: 目录编码与 dsh 同规则 (-X--, 点保留); 判定与 omp 同 (stop)。"""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cwd = "/home/yy/.omp"  # 真实存在的 pi 项目 (实测目录 --home-yy-.omp--)
+    pdir = transcripts._pi_project_dir(cwd)
+    assert pdir.name == "--home-yy-.omp--"
+    assert str(pdir).startswith(str(tmp_path / "home" / ".pi"))
+    f = pdir / "2026-08-11T02-17-56-877Z_019fee9c-0000-0000.jsonl"
+    f.parent.mkdir(parents=True)
+    f.write_text("\n".join([
+        _omp_msg("assistant", "toolUse", [{"type": "toolCall", "tool": "b"}]),
+        _omp_msg("assistant", "stop", [{"type": "text", "text": LONG}]),
+        _omp_msg("assistant", "stop", [{"type": "text", "text": SHORT}]),  # 门
+    ]) + "\n", encoding="utf-8")
+    assert transcripts.end_steps(f, "pi") == [LONG]  # 与 omp 判定共用
+    assert transcripts.session_id(f, "pi") == f.stem
+    assert [p for p in transcripts.locate(cwd, "pi")] == [f]
+
+
 def test_unknown_harness_loud():
     for fn in (lambda: transcripts.locate("/x", "vscode"),
                lambda: transcripts.end_steps(Path("/x"), "vscode")):

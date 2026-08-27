@@ -109,15 +109,17 @@ def test_empty_transcript_and_corrupt_file(tmp_path, monkeypatch):
     db.init(tmp_path / "db.sqlite")
     t_empty = pdir / "cccc3333-3333-3333-3333-333333333333.jsonl"
     t_empty.write_text(_tooluse() + "\n", encoding="utf-8")  # 仅中间步骤
-    t_bad = pdir / "dddd4444-4444-4444-4444-444444444444.jsonl"
-    t_bad.mkdir()  # 目录冒充 jsonl → open 抛 OSError → error 记录不崩
+    # 坏字节文件: 活跃会话尾部半写形态 (GBK 段) — errors=replace 容错不炸,
+    # 坏行 json.loads 失败被跳过 → 视作空 (skipped-empty) 而非 error
+    t_garbage = pdir / "dddd4444-4444-4444-4444-444444444444.jsonl"
+    t_garbage.write_bytes(b"\xd6\xd0\xce\xc4\xb4\xed\xc2\xeb\xff\xfe")
     reg = tmp_path / "reg.json"
     r = cli.ingest_recent(cwd=str(cwd), registry_path=reg)
-    assert r["skipped_empty"] == 1 and r["errors"] == 1
-    # 空 transcript 入注册表 → 二跑不再蒸馏它; 坏文件未入注册表(重试)
+    assert r["skipped_empty"] == 2 and r["errors"] == 0
+    # 空/坏 transcript 均入注册表 → 二跑不再蒸馏; 坏文件未抛错
     r2 = cli.ingest_recent(cwd=str(cwd), registry_path=reg)
-    assert r2["skipped_unchanged"] == 1
-    assert r2["errors"] == 1
+    assert r2["skipped_unchanged"] == 2
+    assert r2["errors"] == 0
 
 
 def test_limit_and_mtime_order(tmp_path, monkeypatch):

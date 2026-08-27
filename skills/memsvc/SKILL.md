@@ -16,7 +16,7 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 | 查记忆 + 落盘到当日 recall 日志 | 同上 + `--project`（正文→`memory/recall-<DATE>.md`，MEMORY.md 注入索引行；dir=cc_memory_dir(`--cwd` 或 `$PWD`)；空命中不投影） |
 | 召回（向量融合，解字面盲区） | 同上 + `--vector`（**需 LM Studio 127.0.0.1:16666 在线**） |
 | 召回（图近字面远） | 同上 + `--bfs` |
-| **补最近会话结论入库**（当前项目最近 N 个 transcript 的 end step 走 LLM） | `python3 …/cli.py ingest-recent [--cwd <项目目录>] [--limit 10]`；先 `--dry-run` 预览（零 LLM 零写入） |
+| **补最近会话结论入库**（当前项目最近 N 个 transcript 的 end step 走 LLM） | `python3 …/cli.py ingest-recent [--cwd <项目目录>] [--harness cc\|dsh\|omp] [--limit 10]`；先 `--dry-run` 预览（零 LLM 零写入）。harness 判定：cc=`stop_reason=end_turn`，dsh=`turn/end(completed)` 前最后一条 assistant text（zstd 自动解压），omp=`stopReason=stop` |
 | 单个 transcript 入库 | `python3 …/cli.py autodream --session <id> --transcript <path.jsonl> [--cwd <项目目录>]`（可先 `endsteps.py <t.jsonl> > /tmp/e.jsonl` 蒸馏） |
 | 导入 memory 目录 | `python3 …/cli.py init-memory --memory-dir <dir> [--cwd <项目目录>]` |
 | 单 md 重灌（编辑后） | `python3 …/cli.py re-ingest <file.md> [--cwd <项目目录>]` |
@@ -40,9 +40,10 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 2. `--cwd` 语义按子命令不同：recall 是**过滤**（只看该 cwd + NULL 老数据），autodream/init-memory/re-ingest/ingest-recent 是**标记** source_cwd。导入个人全局记忆时不传 `--cwd`（记 NULL=全局）。
 3. recall 加 `--cwd` 前先想清楚：现库绝大部分 fact source_cwd=NULL（全局），按 cwd 过滤会漏。
 4. `--json` 输出稳定契约（字段名即 ABI），脚本消费必加；人读可不加。`--project` 的报告走 stderr，不污染 stdout 契约。
-5. ingest-recent 定位目录 = `~/.claude/projects/<encoded-cwd>/`（cwd 里 `/` 和 `.` 都换 `-`）；找 transcript 前先确认该 cwd 真的对应一个 CC 项目目录（`ls ~/.claude/projects/ | grep <名字>`），别拿不存在的路径空跑。
+5. ingest-recent 定位目录按 harness 不同：cc=`~/.claude/projects/<enc>/`（`/`和`.`→`-`）、dsh=`~/.dsh/sessions/-<enc>--/session-<uuid>/session.jsonl(.zstd)`、omp=`~/.omp/agent/sessions/<home相对enc>/<ts>_<uuid>.jsonl`。找 transcript 前先 `ls` 确认目录存在，别拿不存在的路径空跑。
 6. ingest-recent 与 PreCompact spool 的注册表**不共享**：已被 PreCompact 处理过的会话手动再跑会重复蒸馏一遍（KG fact 层面幂等吸收，多为 noop，但花 LLM 时间）。
 7. recall-<DATE>.md 是 mem-service 产物（frontmatter `source: mem-service-recall`），init-memory/re-ingest 扫描会自动跳过（ADR-16f 防自指循环）——不要手动把它灌进 KG。
+8. **跨 harness 通用性现状**（M19）：进端 `ingest-recent --harness` 已通用（cc/dsh/omp）；出端 `recall --json` 任何能起进程的 harness 都能裸调（绝对路径，db/.env 模块相对）；**文件投影面只有 CC 做了**（`--project`）——dsh/omp 的等价面是 `APPEND_SYSTEM.md` 约定（pi 系全局系统提示追加，每次请求现读），属用户自有文件+全局生效，接不接、注入什么粒度**待用户裁决**，别擅自动。
 
 ## 示例
 

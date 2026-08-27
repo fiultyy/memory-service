@@ -405,12 +405,15 @@ def autodream(session_id: str, transcript_path: str,
 
 def ingest_recent(cwd: str | None = None, limit: int = 10,
                   dry_run: bool = False,
-                  registry_path: str | Path | None = None) -> dict[str, Any]:
-    """当前 cwd 最近 N 个 CC transcript 的 end step → 蒸馏 → LLM 入 KG (手动)。
+                  registry_path: str | Path | None = None,
+                  harness: str = "cc") -> dict[str, Any]:
+    """当前 cwd 最近 N 个 transcript 的 end step → 蒸馏 → LLM 入 KG (手动)。
 
-    ``~/.claude/projects/<encoded-cwd>/*.jsonl`` 按 mtime 降序取 ``limit`` 个;
-    每个: ``endsteps.extract_end_steps`` 过滤(与 PreCompact worker 同一蒸馏口径)
-    → 合成 transcript → ``autodream(session=文件名 uuid, source_cwd=cwd)``。
+    ``harness`` (M19): ``cc`` / ``dsh`` / ``omp`` — 落盘定位与 end step 判定
+    见 ``transcripts.py`` 适配层 (三家实测校准); 默认 cc。
+
+    每个: 蒸馏(与 PreCompact worker 同口径) → 合成 transcript →
+    ``autodream(session=文件名 uuid, source_cwd=cwd)``。
 
     - 空 end step → skip 不调 LLM (仍记注册表, 免重复蒸馏空跑)。
     - 注册表 ``data/transcript-registry.json``: path → sha256[:16]; 未变 → skip
@@ -422,15 +425,10 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
     import hashlib
     import tempfile
 
-    import endsteps
+    import transcripts as transcripts_mod
 
     cwd = cwd or os.getcwd()
-    encoded = cwd.replace("/", "-").replace(".", "-")
-    tdir = Path.home() / ".claude" / "projects" / encoded
-    files: list[Path] = []
-    if tdir.is_dir():
-        files = sorted(tdir.glob("*.jsonl"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    files = transcripts_mod.locate(cwd, harness, limit)
 
     reg_path = Path(registry_path) if registry_path else \
         Path(__file__).parent / "data" / "transcript-registry.json"
@@ -452,15 +450,17 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
             details.append({"file": p.name, "status": "error",
                             "error": f"read: {e}"})
             continue
-        entry: dict[str, Any] = {"file": p.name, "session": p.stem, "sha": sha}
+        sid = transcripts_mod.session_id(p, harness)
+        label = f"{p.parent.name}/{p.name}" if p.name == "session.jsonl.zstd" \
+            else p.name
+        entry: dict[str, Any] = {"file": label, "session": sid, "sha": sha}
         if registry.get(str(p)) == sha:
             entry["status"] = "skipped-unchanged"
             details.append(entry)
             continue
         try:
-            with p.open(encoding="utf-8") as fh:
-                steps = endsteps.extract_end_steps(fh)
-        except OSError as e:
+            steps = transcripts_mod.end_steps(p, harness)
+        except (OSError, RuntimeError, ValueError) as e:
             entry.update(status="error", error=f"extract: {e}")
             details.append(entry)
             continue
@@ -484,7 +484,7 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
                     out.write(json.dumps(
                         {"type": "user", "message": {"content": txt}},
                         ensure_ascii=False) + "\n")
-            r = autodream_mod.autodream(p.stem, str(tmp), source_cwd=cwd)
+            r = autodream_mod.autodream(sid, str(tmp), source_cwd=cwd)
             entry["status"] = "ingested"
             entry["facts"] = r
             for k, v in (r or {}).items():
@@ -511,7 +511,8 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
         return sum(1 for d in details if d.get("status") == status)
 
     return {
-        "project_dir": str(tdir),
+        "harness": harness,
+        "project_dir": str(transcripts_mod._ADAPTERS[harness][0](cwd)),
         "cwd": cwd,
         "files": len(files),
         "ingested": _n("ingested"),
@@ -670,9 +671,11 @@ def _main(argv: list[str] | None = None) -> int:
     )
 
     ir = sub.add_parser("ingest-recent",
-                        help="当前 cwd 最近 N 个 CC transcript end-step 蒸馏 → LLM 入 KG (手动补口, M18)")
+                        help="当前 cwd 最近 N 个 transcript end-step 蒸馏 → LLM 入 KG (手动补口, M18)")
     ir.add_argument("--cwd", dest="cwd", default=None,
-                    help="项目 cwd (默认 $PWD; 定位 ~/.claude/projects/<encoded-cwd>/)")
+                    help="项目 cwd (默认 $PWD; 定位 harness 的项目 transcript 目录)")
+    ir.add_argument("--harness", choices=("cc", "dsh", "omp"), default="cc",
+                    help="transcript 来源 harness (默认 cc; dsh=~/.dsh/sessions, omp=~/.omp/agent/sessions)")
     ir.add_argument("--limit", type=int, default=10,
                     help="取最近 N 个 transcript 按 mtime (默认 10)")
     ir.add_argument("--dry-run", dest="dry_run", action="store_true",
@@ -768,7 +771,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(autodream(args.session, args.transcript, cwd=args.cwd), ensure_ascii=False))
     elif args.cmd == "ingest-recent":
         print(json.dumps(ingest_recent(args.cwd, limit=args.limit,
-                                       dry_run=args.dry_run),
+                                       dry_run=args.dry_run,
+                                       harness=args.harness),
                          ensure_ascii=False))
     elif args.cmd == "init-memory":
         print(json.dumps(init_memory(args.memory_dir, source_cwd=args.cwd), ensure_ascii=False))

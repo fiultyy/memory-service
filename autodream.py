@@ -369,7 +369,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     #     实体链接了语义内容还没提)。
     # 幂等: 同 material_ref 拒重; M9 novelty (embedding 语言中立) 定优先级,
     # wings 判「无事实」→ 合法 done, attempts≥3 封顶防重复浪费。
-    seg_results: list[tuple[str, Any]] = []
+    seg_results: list[tuple[str, Any, str]] = []  # (prov, result, seg_text D-B b)
     seg_to_enqueue: list[tuple[int, str, Any]] = []
     # batch 12 抽取通道门禁: MEM_EXTRACT_CHANNEL=llm (默认) → LLM 直抽主径
     # (llm_extract, glm-5-turbo, 结构化 JSON + schema 校验, 失败响亮);
@@ -397,7 +397,9 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
             # llm 通道 _queue_on=False: LLM 已看过全文没抽出边, 再喂 wings
             # 是重复花钱 → 不入队 (队列退役清理 2026-08-27)。
             seg_to_enqueue.append((seg_idx, seg_text, seg_prov))
-        seg_results.append((seg_prov, result))
+        # D-B b: seg_text 随产出下传 — Phase c 边处理时喂 dedupe 裁判
+        # (名字族相关性 ≠ 同一性, "A 基于 B" 关系句是非同一性铁证)。
+        seg_results.append((seg_prov, result, seg_text))
 
     # perf/vec-index: A 入队延后批化 — novelty 采样向量 (surprise.novelty_sample
     # 截断) 一次 embed_batch 预热缓存, 再逐段 enqueue (novelty embed 全走
@@ -426,7 +428,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     # 在 canonical 谓词上 (同义异名谓词一跑内互躲去重)。「最后」位置 = 最后
     # 的提取后步骤 / 第一个持久化前步骤。fact.predicate=canonical,
     # raw_predicate=原文; registry 计数 = 词频统计机制。
-    _raw_preds = [e.predicate for _p, _r in seg_results for e in _r.edges]
+    _raw_preds = [e.predicate for _p, _r, _t in seg_results for e in _r.edges]
     _canon_map: dict[str, str] = {}
     if _raw_preds:
         import predgate as predgate_mod
@@ -451,7 +453,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     # perf 收尾批: 新 fact value 预热批 — put_fact 内嵌 embed(value) 逐条
     # 串行 HTTP (~120 次/全量 init); 边集 upfront 已知, 一次批预热后全走 L1。
     _edge_values: list[str] = []
-    for _seg_prov, _result in seg_results:
+    for _seg_prov, _result, _st in seg_results:
         for _edge in _result.edges:
             _v = (_edge.object or "").strip()
             if _v and _v not in _edge_values:
@@ -459,7 +461,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     if _edge_values:
         import embedding as _embedding_mod
         _embedding_mod.embed_batch(_edge_values)
-    for seg_provenance, result in seg_results:
+    for seg_provenance, result, seg_text in seg_results:
         ext_label = result.source_meta.get("extractor_label", "llm")
         lif_dims = scoring_mod.compute_lif(
             {"extractor": ext_label, "fact_type": fact_type, "created_at": now.isoformat()},
@@ -493,7 +495,8 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
             entity_types=[e.type for e in seg_entities],
             aliases_map={e.name: list(e.aliases) for e in seg_entities
                          if getattr(e, "aliases", None)},
-            providers=active_providers) if seg_entities else {}
+            providers=active_providers,
+            context=seg_text) if seg_entities else {}  # D-B b: 段原文喂裁判
         for ent in result.entities:
             if not ent.name:
                 continue
@@ -527,7 +530,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 if not _entity_hygiene_gate(subject):
                     continue
                 sid = resolver.resolve_entity(subject, name_to_type.get(subject, "concept"),
-                                              providers=active_providers)
+                                              providers=active_providers, context=seg_text)
                 if sid is None:
                     continue
                 name_to_id[subject] = sid
@@ -538,19 +541,28 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 if not _entity_hygiene_gate(value):
                     continue
                 oid = resolver.resolve_entity(value, name_to_type.get(value, "concept"),
-                                              providers=active_providers)
+                                              providers=active_providers, context=seg_text)
                 if oid is None:
                     continue
                 name_to_id[value] = oid
             object_id = name_to_id[value]
 
-            # 解析后自环防线 (P4 修): 上面 subject == value 只比较**表面串**;
-            # 两个不同表面名 (omp / @oh-my-pi/pi-coding-agent) 经 resolver
-            # 别名/语义合并可解析到**同一实体 id** → fact 落库成 A--pred-->A
-            # 自环 (生产实测 7 条: omp based_on omp 等)。合并质量是 resolver
-            # 的独立问题, 但落库侧必须自洽: 解析后同 id 即弃。
+            # D-B c 图不变量防线 (P4 D-A 升级): 表面串检查 (subject == value)
+            # 挡不住 resolver 合并 — 两个不同表面名解析到同一实体 id 时, 不再
+            # 丢边 (D-A 旧语义连事实一起扔), 而是**否决合并**: object 名带
+            # exclude_ids={subject_id} 重解析 (resolver step1 命中被拒 → step2
+            # 候选滤掉 → 都排光则新建), 宁分离勿自环。真同串 (value == subject
+            # 表面) 才丢弃 — A --pred--> A 语义无效。
             if object_id == subject_id:
-                continue
+                if value == subject:
+                    continue
+                split_id = resolver.resolve_entity(
+                    value, name_to_type.get(value, "concept"),
+                    providers=active_providers, context=seg_text,
+                    exclude_ids={subject_id})
+                if not split_id or split_id == subject_id:
+                    continue  # 分离失败兜底 (理论不可达, exclude 语义保证)
+                object_id = name_to_id[value] = split_id
 
             # Exact (subject, predicate, value) match ⇒ UPDATE / NOOP.
             exact = _find_active_fact(subject_id, predicate, value)

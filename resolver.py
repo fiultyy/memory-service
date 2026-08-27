@@ -24,7 +24,7 @@ _TOP_K = 5
 
 
 def resolve_entity(name, entity_type, aliases=None, providers=None,
-                   embedding_providers=None):
+                   embedding_providers=None, context=None, exclude_ids=None):
     """Resolve a name to an entity id, merging on duplicate (ADR-D3 two-step).
 
     Args:
@@ -34,12 +34,19 @@ def resolve_entity(name, entity_type, aliases=None, providers=None,
         providers: LLM providers for step-2 dedupe judgement (empty/None → skip).
         embedding_providers: embedding providers for step-2 vectors (None →
             ``embedding.default_providers()``; offline → [] → skip step 2).
+        context: 待判实体被提及的原文片段 (D-B b) — 透传 provider.dedupe_entity;
+            名字族相关性 ≠ 同一性, "A 基于 B" 关系句是非同一性铁证。
+        exclude_ids: 实体 id 集合, 该 name **不得**解析到其中任何一个 (D-B c
+            图不变量): 调用方(autodream 边处理)已知 subject_id 时, object 解析
+            排除它 — 宁分离勿自环。step1 命中被排除 → 视为未命中(继续 step2);
+            step2 候选先滤掉排除 id 再喂裁判; 都被排光 → step3 新建。
 
     Returns:
         The entity id (str), or None only on an empty name.
     """
     if not name:
         return None
+    exclude = set(exclude_ids) if exclude_ids else set()
 
     # emb 算一次, 供 step1/step2 回填既有 entity 的 name_embedding(D1)。惰性 import
     # 推迟 cache 连接; embedding != LLM — step1 廉价闸指"无 LLM 判定", embedding 计算仍做。
@@ -47,8 +54,9 @@ def resolve_entity(name, entity_type, aliases=None, providers=None,
     emb = embedding.embed(name, providers=embedding_providers)
 
     # Step 1 — 廉价闸: 大小写不敏感 name + alias 精确命中(无 LLM)。
+    # D-B c: 命中在排除集 → 视为未命中 (合并被图不变量否决), 继续走 step2/3。
     hit = store.find_entity_exact(name)
-    if hit is not None:
+    if hit is not None and hit["id"] not in exclude:
         # D7: 把 surface form 记入别名(与 step2 对称), 让 T1 能断言含异写。
         # ADR-2② + perf: 等于 survivor 规范名 (case-sensitive) 的 surface 不加
         # — 旧路径加了再被 _gc_aliases 清掉 (add/remove 乒乓, 每次全量失效
@@ -75,9 +83,18 @@ def resolve_entity(name, entity_type, aliases=None, providers=None,
         # (merge 路径唯一消费者)。heal 独立保留 (索引完整性, 与 LLM 无关)。
         if providers:
             candidates = _cosine_topk(emb, _TOP_K, embedding_providers=embedding_providers)
+            # D-B c 图不变量: 排除 id 的候选绝不到裁判面前 (误判机会都不给)。
+            candidates = [c for c in candidates if c["id"] not in exclude]
             if candidates:
                 try:
-                    dup = providers[0].dedupe_entity(name, entity_type, candidates)
+                    dup = providers[0].dedupe_entity(
+                        name, entity_type, candidates, context=context)
+                except TypeError:
+                    # 旧式 provider 签名无 context 形参 (向后兼容 shim)。
+                    try:
+                        dup = providers[0].dedupe_entity(name, entity_type, candidates)
+                    except Exception:
+                        dup = None
                 except Exception:
                     # provider can't/won't dedupe (stub/test-fake/offline) → degrade
                     dup = None
@@ -156,7 +173,8 @@ __all__ = ["resolve_entity", "resolve_entities_batch"]
 
 
 def resolve_entities_batch(names, entity_types=None, aliases_map=None,
-                           providers=None, embedding_providers=None):
+                           providers=None, embedding_providers=None,
+                           context=None):
     """批式实体消解 (perf/vec-index): 一次 embed 批 (本地模型一次 POST) +
     逐名走**同 resolve_entity 三步协议** (step1 字典廉价闸 / step2 vec0 ANN /
     step3 新建)。
@@ -171,6 +189,10 @@ def resolve_entities_batch(names, entity_types=None, aliases_map=None,
         aliases_map: ``{name: [alias, ...]}`` 透传单条同参语义 (可选)。
         providers: LLM dedupe judge (None → 单条同参语义)。
         embedding_providers: 向量 provider 覆盖。
+        context: 段原文 (D-B b) — 批内全部名共享 (批是段级调用), 透传 dedupe
+            裁判作世界证据。批式无 exclude_ids: 排除约束是**边级**信息 (哪个
+            名不得并到哪个 id), 批解析时边尚未处理 — 由 autodream 边处理层对
+            冲突名单条重解析 (见 autodream D-B c 防线)。
 
     Returns:
         ``{"name": entity_id | None}`` — None 仅当名为空 (协议同单条)。
@@ -193,5 +215,5 @@ def resolve_entities_batch(names, entity_types=None, aliases_map=None,
     for name, etype in zip(names, types):
         out[name] = resolve_entity(
             name, etype, aliases=aliases_map.get(name), providers=providers,
-            embedding_providers=embedding_providers)
+            embedding_providers=embedding_providers, context=context)
     return out

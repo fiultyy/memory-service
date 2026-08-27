@@ -83,7 +83,7 @@ class LLMProvider(Protocol):
     def extract_facts(self, text: str) -> Extraction: ...
 
     def dedupe_entity(self, new_name: str, new_type: str,
-                      candidates: list) -> dict: ...
+                      candidates: list, context: str | None = None) -> dict: ...
 
     def judge_contradiction(self, subject_type: str, subject_name: str,
                             predicate: str, new_value: str,
@@ -167,7 +167,22 @@ _DEDUPE_PROMPT = """你是知识图谱实体去重裁判。判断"待判实体"�
 现在判断:
 待判: name="{new_name}" type="{new_type}"
 候选: {candidates}
-"""
+{context_block}"""
+
+# v2 (D-B b, 2026-08-27): + 原文片段区块 — 名字族相关性 ≠ 同一性, 裁判需要
+# 世界证据。生产误并: omp 吸收 @oh-my-pi/pi-coding-agent (派生关系), 裁判只看
+# 裸名字时缩写族确实像同义; 原文 "omp 基于 X 开发" 即非同一性铁证。
+# 区块由 dedupe_entity 按需注入 (context=None → "(无)"), prompt 单源在此。
+# 平衡校准 (实测): 过严规则 (并列即不合/无证据即不合) 会误杀真同义
+# (NYC=New York City / js=JavaScript) — 原文证据只**否决**派生/组成类合并,
+# 不改变名字族的默认同义判定 (v1 示例语义保持)。
+_CONTEXT_BLOCK = """原文片段(待判实体在其中被提及的上下文, 可能空):
+{context}
+
+结合原文判断:
+- 原文显示两者处于"基于/派生自/是...的子系统(模块/前端/组件)/...的配置文件/...的路径/包含"关系的两侧 → 不同对象, 不合。例: "A 基于 B 开发"/"warpui 是 Warp 的渲染框架"/"X.json 是该机制的配置文件"。
+- 原文显示两者是同一对象的等价表述(同位语/简称/全称/译名, "也就是/即/又称"句式) → 合。例: "用户在 NYC 出差, 也就是 New York City"。
+- 原文无上述任一方向证据时, 仍按上面的名字+类型规则判断(缩写/大小写/译名族可合, 参见示例), 原文不构成否决即不否决。"""
 
 
 # ── Contradiction judge prompt (ADR-1 R1 纯 LLM 裁判, Graphiti 式) ──────
@@ -262,22 +277,26 @@ class ZhipuAnthropicProvider:
                           source_meta={"provider": "zhipu", "model": self.model})
 
     def dedupe_entity(self, new_name: str, new_type: str,
-                      candidates: list) -> dict:
+                      candidates: list, context: str | None = None) -> dict:
         """Decide whether ``new_name`` duplicates an existing entity (ADR-D3).
 
         Graphiti dedupe_nodes style: few-shot LLM judges synonymy vs mere
         relatedness/homonymy. Returns ``{"duplicate_id": str | None}``.
+        ``context`` (D-B b): 待判实体被提及的原文片段 — 名字族相关性 ≠ 同一性,
+        世界证据(派生/子系统/路径关系句)让裁判可分; None → v1 裸名字判定。
         Offline / no key / network error / parse failure → ``{"duplicate_id": None}``
         (降级为新建, 不 crash)。
         """
         key = self.api_key or _load_zhipu_key()
         if not key:
             return {"duplicate_id": None}
+        ctx_block = _CONTEXT_BLOCK.format(context=(context or "").strip() or "(无)")
         body = json.dumps({
             "model": self.model, "max_tokens": 256,
             "messages": [{"role": "user", "content": _DEDUPE_PROMPT.format(
                 new_name=new_name, new_type=new_type,
-                candidates=json.dumps(candidates, ensure_ascii=False))}],
+                candidates=json.dumps(candidates, ensure_ascii=False),
+                context_block=ctx_block)}],
         }).encode("utf-8")
         req = urllib.request.Request(
             f"{self.base_url}/v1/messages", data=body,

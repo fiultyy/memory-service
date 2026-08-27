@@ -747,6 +747,20 @@ def _main(argv: list[str] | None = None) -> int:
     dd.add_argument("--once", action="store_true",
                     help="single sweep, no loop(smoke test / cron mode)")
 
+    # ── M20 KG 实时图浏览 (graphlive: inotify+SSE, 无轮询) ──
+    ge = sub.add_parser("graph-export",
+                        help="导出全图: --json(快照含游标) / --csv(Cosmograph/Gephi Lite 对, 边带 created_at 时间列)")
+    ge.add_argument("--json", dest="as_json", metavar="PATH",
+                    help="写 json 快照到 PATH")
+    ge.add_argument("--csv", dest="csv_dir", metavar="DIR",
+                    help="写 nodes.csv+edges.csv 到 DIR")
+    ge.add_argument("--cwd", default=None, help="ADR-14 source_cwd 过滤(含 NULL 老数据)")
+    gl = sub.add_parser("graph-live",
+                        help="起实时图服务器(http://127.0.0.1:8765/, inotify 事件驱动+SSE 增量)")
+    gl.add_argument("--port", type=int, default=8765)
+    gl.add_argument("--host", default="127.0.0.1")
+    gl.add_argument("--db", dest="db", default=None, help="db 路径(默认 data/memory.db)")
+
     args = p.parse_args(argv)
     if args.cmd == "ingest":
         print(json.dumps(
@@ -806,6 +820,22 @@ def _main(argv: list[str] | None = None) -> int:
     elif args.cmd == "dream-daemon":
         # daemon runs its own loop (blocking); returns exit code, not JSON.
         return dream_daemon(cwd=args.cwd, interval=args.interval, once=args.once)
+    elif args.cmd == "graph-export":
+        import graphlive
+        if not args.as_json and not args.csv_dir:
+            print("graph-export: 需要 --json PATH 或 --csv DIR 至少一个", file=sys.stderr)
+            return 2
+        out = {}
+        if args.as_json:
+            out["json"] = str(graphlive.export_json(Path(args.as_json), cwd=args.cwd))
+        if args.csv_dir:
+            nodes_p, edges_p = graphlive.export_csv(Path(args.csv_dir), cwd=args.cwd)
+            out["csv"] = [str(nodes_p), str(edges_p)]
+        print(json.dumps(out, ensure_ascii=False))
+    elif args.cmd == "graph-live":
+        import graphlive
+        return graphlive.run_server(host=args.host, port=args.port,
+                                    db_path=Path(args.db) if args.db else None)
     return 0
 
 

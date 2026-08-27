@@ -25,6 +25,8 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 | 直接写一条事实 | `python3 …/cli.py write "<subject>" "<predicate>" "<value>" [--fact-type stable\|permanent\|ephemeral]` |
 | 证实/失效/晋升/引用 | `confirm\|invalidate\|elevate\|cite <fact_id>`（invalidate 可加 `--note`，cite 可加 `--ref`） |
 | 库况 | `python3 …/cli.py stats-json` |
+| **看图谱实时生长** | `python3 …/cli.py graph-live`（默认 http://127.0.0.1:8765/，前台阻塞；`--port`/`--db` 可调。inotify 盯 wal 零轮询，入库即推） |
+| 导出图谱给外部工具 | `python3 …/cli.py graph-export --json <path>`（快照含 rowid 游标）或 `--csv <dir>`（nodes.csv+edges.csv，边带 created_at 时间列 → **Cosmograph** 时间轴回放原生可识别；Gephi Lite 同吃） |
 
 `…` = `/home/yy/projects/memory-service`（下同）。
 
@@ -43,7 +45,8 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 5. ingest-recent 定位目录按 harness 不同：cc=`~/.claude/projects/<enc>/`（`/`和`.`→`-`）、dsh/pi=`~/.dsh|~/.pi/agent/sessions/-<enc>--/`（`/`→`-`，点保留）、omp=`~/.omp/agent/sessions/<home相对enc>/`。找 transcript 前先 `ls` 确认目录存在，别拿不存在的路径空跑。
 6. ingest-recent 与 PreCompact spool 的注册表**不共享**：已被 PreCompact 处理过的会话手动再跑会重复蒸馏一遍（KG fact 层面幂等吸收，多为 noop，但花 LLM 时间）。
 7. recall-<DATE>.md 是 mem-service 产物（frontmatter `source: mem-service-recall`），init-memory/re-ingest 扫描会自动跳过（ADR-16f 防自指循环）——不要手动把它灌进 KG。
-8. **跨 harness 现状**（用户裁决 2026-08-27：接 cc/dsh/pi，omp 搁置）：
+8. **实时图 (M20) 语义边界**：`graph-live` 只跟踪 **INSERT 生长**（LIF 衰减/状态流转不推）；页面上删除不反映，要全量态**刷新页面**即可（重新快照）。快照/增量只画 degree>0 实体（孤儿与纯字面事实不成图）；增量对新边端点做**并集补发**（老实体从未下发过、新边连上时必须补，否则悬空）。服务器同源无 CORS；SSE 断线自动重连并按游标补拉错过的增量。
+9. **跨 harness 现状**（用户裁决 2026-08-27：接 cc/dsh/pi，omp 搁置）：
    - skill 入口：cc=`~/.claude/skills/memsvc`、dsh=`~/.dsh/skills/memsvc`（watcher 热加载）、pi **零安装**（pi 的 claude 兼容发现层直接扫 `~/.claude/skills`）——三处全是 symlink 指向 repo 正本，单一源。
    - 进端：`ingest-recent --harness cc|dsh|pi` 全通（omp 适配器代码保留但搁置）。
    - 出端：`recall --json` 任何 harness 裸调即可；文件投影（`--project`）只有 CC 布局。dsh/pi 的等价面是 `APPEND_SYSTEM.md` 约定（全局系统提示追加、用户自有文件），接不接待裁决，别擅自动。

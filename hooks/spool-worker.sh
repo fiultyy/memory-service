@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
-# [休眠 2026-08-27] CC 接线已全部移除 (用户裁决「hook 自动全清掉」) — 本脚本不再被
-# 任何 settings.json 触发, 仅作手动/未来重接线工具保留 (同 regex 通道模式)。
-# spool-worker.sh — PreCompact 快照排干 worker (P1, 2026-08-27)。
+# spool-worker.sh — PreCompact 快照排干 worker (P1 → 2026-08-27 v2 重接线)。
 #
-# 单例锁 (flock spool-worker.lock) 防并发双跑; 逐个处理 spool/*.jsonl:
-#   autodream(session 从文件名提取) → 成功删文件 → synthesis-index 投影
-# 对账。处理中失败 (LLM 不可达等) 的文件**留在 spool** (下次钩子触发/
-# 下次 compact 重试 — 不丢记忆, 只延迟); .lock 后缀文件是上次被中断
-# 处理的半成品, 重命名回收重试。
+# v2 形态 (用户裁决: CC automemory 不动 / 只抽 assistant end step 入 KG /
+# 召回+consolidation 手动):
+#   1. 逐 spool 文件先经 endsteps.py 蒸馏 — 只留 assistant 每轮输出的
+#      end step (stop_reason=end_turn 主链 text, 长度门 120, 文内去重),
+#      合成 autodream 可吃的 transcript。
+#   2. 蒸馏为空 (纯工具会话) → 视为成功, 删文件零 LLM。
+#   3. autodream 入 KG (LLM 直抽, 断供响亮跳过留重试)。
+#   4. **不再 synthesis-index** — 那会写 CC memory 目录 (投影/MEMORY.md),
+#      违背「不改变 CC automemory 机制」; KG 是唯一 sink。
 #
-# 排空后自行退出 — 常驻由钩子触发驱动, 无 daemon。
+# 单例锁 (flock) 防并发双跑; 处理中 .lock 后缀可回收重试; 失败文件留在
+# spool 下次重试 (不丢记忆, 只延迟)。排空即退出, 无 daemon。
 set -u
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SVC_DIR="$(cd "${HOOK_DIR}/.." && pwd)"
 CLI="${SVC_DIR}/cli.py"
+ENDSTEPS="${SVC_DIR}/endsteps.py"
 SPOOL="${SVC_DIR}/data/transcript-spool"
 CWD_ARG=""
 [ "${1:-}" = "--cwd" ] && [ -n "${2:-}" ] && CWD_ARG="--cwd ${2}"
 
 [ -f "${CLI}" ] || exit 0
+[ -f "${ENDSTEPS}" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 mkdir -p "${SPOOL}" 2>/dev/null || exit 0
 
@@ -44,21 +49,33 @@ for f in "${SPOOL}"/*.jsonl; do
     # 占位: 处理中改名 .lock (中断可回收)。
     mv -- "$f" "$f.lock" 2>/dev/null || continue
 
+    # ① 蒸馏: raw transcript → assistant end steps 合成 transcript。
+    if ! python3 "${ENDSTEPS}" "$f.lock" > "$f.endsteps" 2>>"${SPOOL}/worker.log"; then
+        mv -- "$f.lock" "$f" 2>/dev/null || true
+        echo "$(date -Is) filter-fail: ${base}" >>"${SPOOL}/worker.log"
+        continue
+    fi
+
+    # ② 空蒸馏 (纯工具会话/全短应答) → 成功, 零 LLM。
+    if [ ! -s "$f.endsteps" ]; then
+        rm -f -- "$f.lock" "$f.endsteps"
+        echo "$(date -Is) no-end-steps: ${base}" >>"${SPOOL}/worker.log"
+        continue
+    fi
+
+    # ③ autodream 入 KG (LLM 直抽)。
     ( cd "${SVC_DIR}" && \
       python3 cli.py autodream --session "${session}" \
-                                --transcript "$f.lock" \
+                                --transcript "$f.endsteps" \
                                 ${CWD_ARG:+--cwd "${CWD_ARG#--cwd }"} \
           >>"${SPOOL}/worker.log" 2>&1 )
     rc=$?
 
+    # ④ 成功删 raw+蒸馏; 失败留 raw 重试 (蒸馏可再生, 不留)。
     if [ $rc -eq 0 ]; then
-        rm -f -- "$f.lock"
-        ( cd "${SVC_DIR}" && \
-          python3 cli.py synthesis-index \
-                ${CWD_ARG:+--scope "${CWD_ARG#--cwd }"} \
-                >>"${SPOOL}/worker.log" 2>&1 || true )
+        rm -f -- "$f.lock" "$f.endsteps"
     else
-        # 失败: 保留重试 (去掉 .lock 回到待处理态)。
+        rm -f -- "$f.endsteps"
         mv -- "$f.lock" "$f" 2>/dev/null || true
         echo "$(date -Is) retry-later: ${base} rc=${rc}" >>"${SPOOL}/worker.log"
     fi

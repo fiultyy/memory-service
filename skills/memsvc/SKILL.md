@@ -5,8 +5,9 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 
 # memsvc 手动操作
 
-**背景**: 2026-08-27 hook 自动化已全撤（用户裁决），所有记忆操作走本 skill 手动触发。
+**背景** (2026-08-27 定稿): 唯一自动面 = **PreCompact 钩子**（compact 时蒸馏 assistant 每轮输出的 end step 入 KG，`endsteps.py` 过滤）；**召回与 consolidation 全手动走本 skill**；CC automemory 机制不动（KG 不写 CC memory 目录，无投影）。
 库: `data/memory.db`（~1900 active fact / 2300+ entity，SQLite WAL，词法召回毫秒级）。
+手动补历史会话结论入库: `python3 /home/yy/projects/memory-service/endsteps.py <transcript.jsonl> > /tmp/e.jsonl && python3 …/cli.py autodream --session <id> --transcript /tmp/e.jsonl --cwd <项目目录>`。
 
 ## 意图 → 命令
 
@@ -58,5 +59,6 @@ python3 /home/yy/projects/memory-service/cli.py synthesis-index --scope "$PWD"
 ## 红线
 
 - **绝不 regex 回退**：LLM 断供时入库命令报错/跳段是正确行为，不要绕。
-- 生产 `data/` 只由这些显式命令写——没有后台自动面（hook 已全撤），写库即用户可见决策。
-- 休眠的 hooks/ 脚本（session-start/user-prompt-recall/pre-compact/post-tool-use/spool-worker）不要重新接线 settings.json，除非用户明确要求恢复自动化。
+- 生产 `data/` 写入面 = 显式命令 + PreCompact 蒸馏入库（唯一自动面）；其余全手动。
+- **CC automemory 不动**：不跑 synthesis-index 写 CC memory 目录（投影已从管道移除），除非用户明确要求。
+- 其余三个钩子（session-start/user-prompt-recall/post-tool-use）保持休眠；召回、consolidation 手动。

@@ -1,20 +1,13 @@
 #!/usr/bin/env bash
-# [休眠 2026-08-27] CC 接线已全部移除 (用户裁决「hook 自动全清掉」) — 本脚本不再被
-# 任何 settings.json 触发, 仅作手动/未来重接线工具保留 (同 regex 通道模式)。
-# PreCompact hook (ADR-10): session transcript raw→KG incremental dream.
+# PreCompact hook (ADR-10): transcript 快照 → 后台蒸馏入库 (v2 重接线 2026-08-27)。
 #
-# P1 快照-后台模式 (2026-08-27, 用户裁决 P1-4 go): LLM 直抽主径下一段
-# 12-60s, 长会话几十段 = 分钟级~小时级 — 同步跑必撞 CC hook 超时(默认
-# 60s), 超时钩子被杀 + compact 照常执行 + 原始 transcript 被压缩掉 =
-# 记忆丢失竞态 (regex 时代本钩子是快的, LLM 主径后成雷)。
+# v2 形态 (用户裁决): CC automemory 机制/使用完全不动; 本钩子只做一件事 —
+# 快照 transcript 进 spool, 由 spool-worker 蒸馏出 **assistant 每轮输出的
+# end step** (stop_reason=end_turn 主链 text) 入 KG。召回/consolidation 全
+# 手动 (skills/memsvc)。同步面 ~25ms (快照+nohup), compact 永不阻塞。
 #
-# 本钩子只做: ①毫秒级快照 transcript → spool/ ②顺带排干已有积压
-# (启动/重启后台 worker, 幂等) ③立即 exit 0。compact 永不被阻塞。
-#
-# 落库正确性由既有机制保证: fact 级 NOOP 幂等(同 (s,p,o) 不重复 ADD),
-# 重放安全; spool 文件名含 session_id+sha256(前16), 同 transcript 重复
-# 快照天然去重; worker 处理成功后删 spool 文件 (处理中加 .lock 后缀)。
-#
+# 落库正确性: fact 级 NOOP 幂等(同 (s,p,o) 不重复 ADD) + spool 文件名
+# session_id+sha16 去重 + worker 失败保留重试 (.lock 可回收)。
 # Tolerates everything: missing jq/python3/cli.py/transcript — exit 0。
 set -u
 

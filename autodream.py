@@ -544,6 +544,14 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 name_to_id[value] = oid
             object_id = name_to_id[value]
 
+            # 解析后自环防线 (P4 修): 上面 subject == value 只比较**表面串**;
+            # 两个不同表面名 (omp / @oh-my-pi/pi-coding-agent) 经 resolver
+            # 别名/语义合并可解析到**同一实体 id** → fact 落库成 A--pred-->A
+            # 自环 (生产实测 7 条: omp based_on omp 等)。合并质量是 resolver
+            # 的独立问题, 但落库侧必须自洽: 解析后同 id 即弃。
+            if object_id == subject_id:
+                continue
+
             # Exact (subject, predicate, value) match ⇒ UPDATE / NOOP.
             exact = _find_active_fact(subject_id, predicate, value)
             if exact is not None:

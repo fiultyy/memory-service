@@ -220,7 +220,8 @@ function applyDelta(d, isSnapshot = false) {
   for (const e of d.edges) {
     if (!graph.hasNode(e.subject_id) || !graph.hasNode(e.object_id)) continue; // 悬空防线
     if (graph.hasEdge(e.id)) continue;
-    graph.addEdge(e.id, e.subject_id, e.object_id, edgeAttrs(noteAttrs(e)));
+    // graphology 的带 key 加边是独立方法 (addEdge 无 4 参 (key,s,t,attrs) 形式, 实测会错位)
+    graph.addEdgeWithKey(e.id, e.subject_id, e.object_id, edgeAttrs(noteAttrs(e)));
     ne.push(e);
   }
   cursor = d.cursor;
@@ -253,6 +254,7 @@ function applyAndAnnounce(d, tag) {
 const setConn = (txt, cls) => { const c = $("conn"); c.textContent = txt; c.className = cls ?? ""; };
 let everConnected = false;
 function connect() {
+  if (new URLSearchParams(location.search).has("nosse")) { setConn("nosse 模式", ""); return; }
   if (es) es.close();
   es = new EventSource("/api/stream");
   es.onopen = () => {
@@ -337,7 +339,7 @@ const initSlider = () => {
 initSlider();
 refreshTimeWindow();
 logLine(`快照载入: ${snap.nodes.length} 节点 / ${snap.edges.length} 边`, "");
-connect();
+connect();  // headless 冒烟可加 ?nosse=1 跳过 (SSE 长连接会挂住 virtual-time dump)
 </script>
 </body>
 </html>

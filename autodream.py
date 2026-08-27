@@ -347,7 +347,14 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     truncated_segs: list[tuple[int, str]] = []
     segments = _build_segments(blocks, truncated=truncated_segs)
     # M8→M4 wire: 超长段截尾的全文 ref 入升级队列 (wings 异步升级; M9 入队时算 surprise)。
-    for seg_idx, full_text in truncated_segs:
+    # batch 13+ 队列退役清理 (用户裁决「全面清理」2026-08-27): llm 通道下
+    # 升级队列语义失效 — 抽取已是 LLM 本体, 再喂 wings 是重复花钱; 队列
+    # 仅 regex 通道 (休眠中) 保留。
+    from llm_extract import extract_channel as _extract_channel
+    from llm_extract import CHANNEL_REGEX as _CH_REGEX
+    use_regex_channel = _extract_channel() == _CH_REGEX
+    _queue_on = use_regex_channel
+    for seg_idx, full_text in (truncated_segs if _queue_on else []):
         prov_of_seg = segments[seg_idx][0] if seg_idx < len(segments) else None
         upgrade.enqueue_segment(transcript_path, seg_idx, full_text,
                                 provenance=prov_of_seg)
@@ -369,9 +376,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     # =regex → 遗留占位通道 (词典+regex 三路, 暂闭但代码保留可开)。
     # B 路语义链接与 resolver 不属于 regex 通道 — 两档下实体解析照常工作。
     # LLM 通道零产出/失败语义: 提取异常上抛 (bootstrap 记 skip+errors,
-    # 绝不回落 regex); 提取成功但零 edges → 照走 A 层入队 (wings 异步)。
-    from llm_extract import extract_channel, CHANNEL_REGEX
-    use_regex_channel = extract_channel() == CHANNEL_REGEX
+    # 绝不回落 regex); 队列入队已由上方 _queue_on 门控 (llm 通道停)。
     import llm_extract as llm_extract_mod
     for seg_idx, (seg_prov, seg_text) in enumerate(segments):
         if use_regex_channel:
@@ -385,10 +390,12 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
             c_ents = gazetteer.semantic_fallback_hits(seg_text)
             if c_ents:
                 result.entities = c_ents  # 实体声明接管; edges 保持空
-        if not result.edges:
+        if not result.edges and _queue_on:
             # A 层: 全文入队 — **与实体来源无关** (两档通道命中实体但无数
             # 谓词边的段同样语义内容未提, 皆入 A; FINDING c9 根因修复)。
             # 幂等由 enqueue 的 material_ref 拒重保证 (c10)。
+            # llm 通道 _queue_on=False: LLM 已看过全文没抽出边, 再喂 wings
+            # 是重复花钱 → 不入队 (队列退役清理 2026-08-27)。
             seg_to_enqueue.append((seg_idx, seg_text, seg_prov))
         seg_results.append((seg_prov, result))
 
@@ -587,7 +594,9 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 for old in contradicting:
                     store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now(), reason="contradiction")  # M1: contradiction 必带 reason
                 # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
-                fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
+                # llm 通道不入队 (队列退役清理 2026-08-27, 同 ADD 路径)。
+                if _queue_on:
+                    fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
                 deleted += len(contradicting)
                 added += 1
                 continue
@@ -608,7 +617,10 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 raw_predicate=raw_predicate,
             )
             # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
-            fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
+            # llm 通道 (_queue_on=False) 不收集: extractor='llm' 的 fact 已是
+            # 终态, wings 升级=重复消费 (队列退役清理 2026-08-27)。
+            if _queue_on:
+                fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
             added += 1
 
     # perf 收尾批: fact 入队批化 — 三元组文本 novelty 采样一次 embed_batch

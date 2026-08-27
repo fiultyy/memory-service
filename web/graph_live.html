@@ -78,6 +78,19 @@
   <div id="main">
     <div id="graph"></div>
     <div id="side">
+      <div class="card" id="filter-card">
+        <h4>过滤 <span id="filter-stat" style="float:right;text-transform:none;letter-spacing:0"></span></h4>
+        <div id="type-boxes" style="display:flex;flex-wrap:wrap;gap:4px 10px;margin:4px 0"></div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+          <label style="color:var(--dim);font-size:12px">最小度
+            <select id="mindeg" style="background:#1f2937;color:var(--fg);border:1px solid #374151;border-radius:6px;padding:2px 6px">
+              <option value="0">全部</option><option value="1">≥1</option>
+              <option value="2" selected>≥2</option><option value="3">≥3</option><option value="5">≥5</option>
+            </select></label>
+          <input id="search" type="search" placeholder="搜索实体聚焦…"
+                 style="flex:1;background:#1f2937;color:var(--fg);border:1px solid #374151;border-radius:6px;padding:3px 8px;font-size:12px">
+        </div>
+      </div>
       <div class="card" id="node-card">
         <span class="close" data-close="node-card">✕</span>
         <h3 id="nd-name"></h3>
@@ -138,36 +151,70 @@ function edgeAttrs(e) {
            _topic: e.topic || e.value || "", size: 1, _lif: e.LIF, color: "#475569" };
 }
 
-/* ── reducers: 时间窗过滤 + 类型着色 ── */
-const visibleEdges = () => {             // 由时间窗算可见边集合
-  const vis = new Set();
-  graph.forEachEdge((eid, a) => { if (!cutoff || !Number.isFinite(a._ts) || a._ts >= cutoff) vis.add(eid); });
-  return vis;
+/* ── reducers: 过滤(类型/度数/时间窗) + 搜索聚焦 + 类型着色 ── */
+let hiddenNodes = new Set();             // 类型/度数过滤掉的节点
+const filters = { types: null, minDeg: 2, q: "" };   // types=null=全选(等快照后建)
+const searchMatch = () => {              // 搜索命中集 (大小写不敏感, name+aliases)
+  if (!filters.q) return null;
+  const q = filters.q.toLowerCase(), hit = new Set();
+  graph.forEachNode((id, a) => {
+    if ((a.name ?? "").toLowerCase().includes(q) ||
+        (Array.isArray(a.aliases) && a.aliases.some(s => String(s).toLowerCase().includes(q))))
+      hit.add(id);
+  });
+  return hit;
 };
-let visNodesCache = new Set();
+let matchSet = null, focusNode = null;
+let visNodesCache = new Set();           // 时间窗可见节点集 (裁剪边后的两端)
+function computeHidden() {               // 每次过滤条件变化重算 (含时间窗可见节点集)
+  hiddenNodes = new Set();
+  graph.forEachNode((id, a) => {
+    if (filters.types && !filters.types.has(a.entity_type)) hiddenNodes.add(id);
+    else if ((a.degree ?? 0) < filters.minDeg) hiddenNodes.add(id);
+  });
+  matchSet = searchMatch();
+  visNodesCache = new Set();
+  if (cutoff) graph.forEachEdge((eid, a, s, t) => {
+    if ((!Number.isFinite(a._ts) || a._ts >= cutoff) &&
+        !hiddenNodes.has(s) && !hiddenNodes.has(t)) { visNodesCache.add(s); visNodesCache.add(t); }
+  });
+  const visN = graph.order - hiddenNodes.size;
+  $("filter-stat").textContent = `显示 ${visN}/${graph.order}`;
+  let visE = 0;                          // 可见边 = 两端都未被过滤 (∧时间窗)
+  graph.forEachEdge((eid, a, s, t) => {
+    if (!hiddenNodes.has(s) && !hiddenNodes.has(t) &&
+        (!cutoff || !Number.isFinite(a._ts) || a._ts >= cutoff)) visE++;
+  });
+  $("edge-visible").textContent = `边 ${visE}/${graph.size}`;
+}
 renderer.setSetting("nodeReducer", (node, data) => {
+  if (hiddenNodes.has(node)) return { ...data, hidden: true };
   const t = TYPE_COLOR[data.entity_type] ?? hashColor(data.id);
-  return { ...data, color: t,
-           size: 2 + Math.sqrt(data.degree ?? 1) * 1.6,
-           hidden: cutoff && !visNodesCache.has(node),
-           highlighted: node === highlightNode || undefined };
+  const base = { ...data, color: t,
+                 size: 2 + Math.sqrt(data.degree ?? 1) * 1.6,
+                 highlighted: node === highlightNode || undefined };
+  if (matchSet) {                        // 搜索: 命中高亮放大, 其余压暗去标签
+    const hit = matchSet.has(node);
+    return { ...base, size: hit ? base.size * 1.5 : base.size * 0.4,
+             color: hit ? t : "#334155", label: hit ? data.label : null,
+             forceLabel: hit, highlighted: hit || base.highlighted };
+  }
+  return base;
 });
 renderer.setSetting("edgeReducer", (edge, data) => {
+  const [s, t] = graph.extremities(edge);
+  if (hiddenNodes.has(s) || hiddenNodes.has(t)) return { ...data, hidden: true };
   const vis = !cutoff || !Number.isFinite(data._ts) || data._ts >= cutoff;
   // 年龄色在此处算 (非入图时): tMin/tMax 随增量后移, reducer 每次 refresh 重算保持一致
   const age01 = Number.isFinite(data._ts) && tMax > tMin ? (data._ts - tMin) / (tMax - tMin) : 0;
-  return { ...data, hidden: !vis, color: vis ? `hsl(${210 - 190 * age01} 80% ${40 + 20 * age01}%)` : data.color,
-           size: vis ? 1 + age01 : 1 };
+  const dimmed = matchSet && !(matchSet.has(s) || matchSet.has(t));
+  return { ...data, hidden: !vis,
+           color: dimmed ? "#1e293b" : `hsl(${210 - 190 * age01} 80% ${40 + 20 * age01}%)`,
+           size: vis ? (dimmed ? 0.5 : 1 + age01) : 1 };
 });
 function refreshTimeWindow() {
-  visNodesCache = new Set();
-  if (cutoff) graph.forEachEdge((eid, a, s, t, _u, _v) => {
-    if (!Number.isFinite(a._ts) || a._ts >= cutoff) { visNodesCache.add(s); visNodesCache.add(t); }
-  });
+  computeHidden();
   renderer.refresh();
-  $("edge-visible").textContent = cutoff
-    ? `显示 ${visNodesCache.size} 节点 / ${graph.size} 边中 ${visibleEdges().size} 条`
-    : "";
 }
 
 /* ── 布局 ── */
@@ -246,7 +293,8 @@ function applyAndAnnounce(d, tag) {
   if (nn.length || ne.length) {
     logLine(`<b>+${nn.length} 节点</b> +${ne.length} 边 · ${tag} · ` +
       nn.slice(0, 3).map(n => n.name).join("、") + (nn.length > 3 ? " …" : ""));
-    renderer.refresh();
+    buildTypeBoxes();                  // 类型计数可能变
+    refreshTimeWindow();               // 新节点也过一遍过滤器
   }
 }
 
@@ -318,6 +366,48 @@ $("slider").oninput = ev => {
   $("t0").textContent = cutoff ? new Date(cutoff).toLocaleString() : "全部";
   refreshTimeWindow();
 };
+$("mindeg").onchange = ev => { filters.minDeg = +ev.target.value; refreshTimeWindow(); };
+let searchTimer = null;
+$("search").oninput = ev => {          // 输入去抖 200ms; Enter 聚焦度最高的命中
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { filters.q = ev.target.value.trim(); refreshTimeWindow(); }, 200);
+};
+$("search").onkeydown = ev => {
+  if (ev.key !== "Enter" || !matchSet?.size) return;
+  let best = null, bestDeg = -1;
+  for (const id of matchSet) {
+    const d = graph.getNodeAttribute(id, "degree") ?? 0;
+    if (d > bestDeg) { bestDeg = d; best = id; }
+  }
+  if (best) {
+    focusNode = best;
+    highlightNode = best;
+    const a = graph.getNodeAttributes(best);
+    renderer.getCamera().animate({ x: a.x, y: a.y, ratio: 60 }, { duration: 400 });
+    renderer.refresh();
+  }
+};
+
+/* 类型勾选框 (快照后按实际类型+计数生成) */
+function buildTypeBoxes() {
+  const counts = {};
+  graph.forEachNode((_id, a) => { counts[a.entity_type] = (counts[a.entity_type] ?? 0) + 1; });
+  const box = $("type-boxes");
+  box.innerHTML = "";
+  filters.types = new Set(Object.keys(counts));
+  for (const [t, c] of Object.entries(counts).sort((a, b) => b[1] - a[1])) {
+    const lab = document.createElement("label");
+    lab.style.cssText = "font-size:12px;cursor:pointer;display:flex;gap:3px;align-items:center";
+    const dot = TYPE_COLOR[t] ?? hashColor(t);
+    lab.innerHTML = `<input type="checkbox" checked data-type="${t}"
+       style="accent-color:${dot}"><span style="color:${dot}">●</span>${t} <span style="color:var(--dim)">${c}</span>`;
+    lab.querySelector("input").onchange = ev => {
+      ev.target.checked ? filters.types.add(t) : filters.types.delete(t);
+      refreshTimeWindow();
+    };
+    box.appendChild(lab);
+  }
+}
 
 /* ── 启动 ── */
 setConn("加载快照…");
@@ -337,6 +427,7 @@ const initSlider = () => {
   $("slider").max = "1000";
 };
 initSlider();
+buildTypeBoxes();
 refreshTimeWindow();
 logLine(`快照载入: ${snap.nodes.length} 节点 / ${snap.edges.length} 边`, "");
 connect();  // headless 冒烟可加 ?nosse=1 跳过 (SSE 长连接会挂住 virtual-time dump)

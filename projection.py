@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +121,7 @@ def project_fact_md(fact: dict, subject: str, mem_dir: Path,
     topic = _fact_topic(fact, subject)
     fname = _mem_filename(fid, topic)
     p = mem_dir / fname
+    mem_dir.mkdir(parents=True, exist_ok=True)  # 冷启动全新项目: memory/ 可能不存在
     pred = fact.get("predicate") or ""
     val = fact.get("value") or ""
     content = f"""---
@@ -315,3 +317,103 @@ def _rewrite_mem_lines(memory_md: Path, new_lines: list[str]) -> None:
     out = [ln for ln in existing.splitlines() if not _is_mem_index_line(ln)]
     out.extend(new_lines)
     memory_md.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+# ── M18 recall log 投影 (recall-<DATE>.md + MEMORY 索引行, 用户裁决 2026-08-27) ──
+# 手动召回的内容正文按日落一文件 ``recall-YYYYMMDD.md``, MEMORY.md 注入当日索引行。
+# 这是对「CC automemory 不动」红线的**用户明示放宽**: 只限 recall 日志这一族文件,
+# 其余 (synthesis-index 等) 仍保持手动/休眠。与 ADR-15 per-hit ``mem-<id>.md`` 投影
+# 互补: mem-*.md 是单 fact 载体(Ch2), recall-*.md 是当日召回流水(查询+命中合集)。
+
+RECALL_FILE_RE = re.compile(r"^recall-\d{8}\.md$")
+_RECALL_INDEX_HEADING = "## KG recall logs"
+_RECALL_VALUE_MAX = 200  # value 单行截断(正文可读性; 完整值在 mem-<id>.md/KG)
+
+
+def _recall_fact_line(fact: dict, idx: int) -> str:
+    """单命中 → recall 正文条目行 ``N. topic — value [score x.xx · mem-xx.md]``。
+
+    topic 优先 ``_snaptag.display``(recall 已算好, 与 per-hit 投影同源), 回退
+    ``_fact_topic``。value 压成单行并截断; score/mem_path 仅存在时附注。"""
+    tag = fact.get("_snaptag") or {}
+    topic = (tag.get("display") or _fact_topic(fact, "?"))
+    topic = topic.replace("\r", " ").replace("\n", " ").strip() or "?"
+    val = (fact.get("value") or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(val) > _RECALL_VALUE_MAX:
+        val = val[:_RECALL_VALUE_MAX].rstrip() + "…"
+    parts = ""
+    score = fact.get("score")
+    if isinstance(score, (int, float)):
+        parts += f" [score {score:.2f}]"
+    if tag.get("mem_path"):
+        parts += f" · {tag['mem_path']}"
+    return f"{idx}. {topic} — {val}{parts}"
+
+
+def _inject_recall_index_line(memory_md: Path, fname: str, date_str: str,
+                              n_hits: int) -> bool:
+    """MEMORY.md 幂等注入当日 recall 索引行; 返回是否新增。
+
+    非破坏: 已有该日链接 → no-op; 新增 → 插入 ``## KG recall logs`` 段首(无段则
+    文末建段), CC 原生行不动。原子写 ``MEMORY.md.tmp`` + ``os.replace``。
+    synthesis_index 重写只删 ``](mem-`` 行, recall 行不受影响(两族正交)。"""
+    text = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
+    if f"]({fname})" in text:
+        return False
+    line = f"- [recall {date_str}]({fname}) — 当日 KG 召回记录 ({n_hits} 命中)"
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if _RECALL_INDEX_HEADING in text:
+        lines = text.splitlines(keepends=True)
+        for i, ln in enumerate(lines):
+            if ln.strip() == _RECALL_INDEX_HEADING:
+                lines.insert(i + 1, line + "\n")  # 段首插(最新在上)
+                break
+        text = "".join(lines)
+    else:
+        # 空文件/全新项目: 直接以 heading 起(不带前导空行)
+        text += (f"\n{_RECALL_INDEX_HEADING}\n\n{line}\n" if text
+                 else f"{_RECALL_INDEX_HEADING}\n\n{line}\n")
+    tmp = memory_md.with_suffix(".md.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, memory_md)  # 原子: 防 CC/其他读者读到半写
+    return True
+
+
+def project_recall(memory_dir: Path | str, query: str, facts: list[dict],
+                   now: datetime | None = None) -> dict[str, Any]:
+    """recall 结果 → 当日 ``recall-<DATE>.md`` 正文追加 + MEMORY.md 索引行 (M18)。
+
+    - 文件: ``recall-YYYYMMDD.md`` (本地日期, 一天一文件); 不存在则建骨架,
+      frontmatter ``source: mem-service-recall`` — ADR-16f 子串命中
+      (``source: mem-service`` in fm_block) → init-memory/re-ingest 扫描自动
+      跳过, 防自指循环。
+    - 正文: 每查询一节 ``## HH:MM — query``, 下挂命中条目 (``_recall_fact_line``:
+      topic + value 摘要 + score + mem-<id>.md 溯源)。追加写(当日多查询共存)。
+    - MEMORY.md: ``_inject_recall_index_line`` 幂等注入。
+    - ``facts`` 空 → 调用方自行跳过(不写空日志; 本函数仍可被显式调用)。
+    """
+    mem_dir = Path(memory_dir)
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    now = now or datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    fname = "recall-" + now.strftime("%Y%m%d") + ".md"
+    p = mem_dir / fname
+    if not p.exists():
+        p.write_text(
+            "---\n"
+            "description: 当日 KG 召回记录 (mem-service recall log)\n"
+            "source: mem-service-recall\n"
+            f"date: {date_str}\n"
+            "---\n"
+            f"# Recall log {date_str}\n\n",
+            encoding="utf-8")
+    q = (query or "").replace("\r", " ").replace("\n", " ").strip() or "(empty query)"
+    body = [f"## {now.strftime('%H:%M')} — {q}\n"]
+    body.extend(_recall_fact_line(f, i) for i, f in enumerate(facts or [], 1))
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write("\n".join(body) + "\n\n")
+    index_added = _inject_recall_index_line(mem_dir / "MEMORY.md", fname,
+                                            date_str, n_hits=len(facts or []))
+    return {"recall_file": fname, "appended": len(facts or []),
+            "index_added": index_added}

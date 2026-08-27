@@ -307,7 +307,8 @@ def recall(query: str, verbose: bool = False,
            as_of: str | None = None,
            use_bfs_scoped: bool = False,
            as_json: bool = False,
-           min_score: float | None = None) -> list[dict[str, Any]] | dict[str, Any]:
+           min_score: float | None = None,
+           project: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
     Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
@@ -326,6 +327,21 @@ def recall(query: str, verbose: bool = False,
                                with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops,
                                as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped,
                                min_score=min_score)
+    if project:
+        # M18: 召回正文 → recall-<DATE>.md + MEMORY.md 索引行 (用户裁决 2026-08-27)。
+        # dir = cc_memory_dir(--cwd 或 $PWD); 空命中不投影(不写空日志)。报告走
+        # stderr — stdout JSON 契约 (M15a) 不混投影元数据。
+        facts = result["results"] if isinstance(result, dict) and "results" in result \
+            else result
+        facts = [f.get("fact", f) if isinstance(f, dict) else f for f in (facts or [])]
+        if facts:
+            import projection
+            proj = projection.project_recall(
+                projection.cc_memory_dir(cwd or os.getcwd()), query, facts)
+            sys.stderr.write(
+                f"📋 recall projected → memory/{proj['recall_file']} "
+                f"(+{proj['appended']} hits; MEMORY.md index "
+                f"{'added' if proj['index_added'] else 'already present'})\n")
     if as_json:
         facts = result["results"] if isinstance(result, dict) and "results" in result \
             else result
@@ -383,6 +399,129 @@ def autodream(session_id: str, transcript_path: str,
     LLM 不可用即 block)。``cwd`` ADR-14 b 方案: 记 source_cwd, recall --cwd 过滤。
     """
     return autodream_mod.autodream(session_id, transcript_path, source_cwd=cwd)
+
+
+# ── ingest-recent (M18: 手动补近期会话结论入库) ──────────────────────
+
+def ingest_recent(cwd: str | None = None, limit: int = 10,
+                  dry_run: bool = False,
+                  registry_path: str | Path | None = None) -> dict[str, Any]:
+    """当前 cwd 最近 N 个 CC transcript 的 end step → 蒸馏 → LLM 入 KG (手动)。
+
+    ``~/.claude/projects/<encoded-cwd>/*.jsonl`` 按 mtime 降序取 ``limit`` 个;
+    每个: ``endsteps.extract_end_steps`` 过滤(与 PreCompact worker 同一蒸馏口径)
+    → 合成 transcript → ``autodream(session=文件名 uuid, source_cwd=cwd)``。
+
+    - 空 end step → skip 不调 LLM (仍记注册表, 免重复蒸馏空跑)。
+    - 注册表 ``data/transcript-registry.json``: path → sha256[:16]; 未变 → skip
+      (防手滑重跑烧 LLM); 内容变更 → 重跑。成功(含空跳过)才落 sha; 失败不落
+      (下次重试)。``registry_path`` 显式注入(测试隔离), 缺省模块相对 data/。
+    - ``dry_run``: 只统计蒸馏结果(纯 CPU 零 LLM), 不调 LLM 不写注册表。
+    - per-file 容错: 单文件失败记 error 继续 (bootstrap 惯例), 汇总返回。
+    """
+    import hashlib
+    import tempfile
+
+    import endsteps
+
+    cwd = cwd or os.getcwd()
+    encoded = cwd.replace("/", "-").replace(".", "-")
+    tdir = Path.home() / ".claude" / "projects" / encoded
+    files: list[Path] = []
+    if tdir.is_dir():
+        files = sorted(tdir.glob("*.jsonl"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+
+    reg_path = Path(registry_path) if registry_path else \
+        Path(__file__).parent / "data" / "transcript-registry.json"
+    registry: dict[str, str] = {}
+    if reg_path.exists():
+        try:
+            loaded = json.loads(reg_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                registry = loaded
+        except (OSError, ValueError):
+            registry = {}  # 损坏注册表不阻塞: 当作未注册重跑
+
+    details: list[dict[str, Any]] = []
+    agg: dict[str, int] = {}
+    for p in files:
+        try:
+            sha = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+        except OSError as e:
+            details.append({"file": p.name, "status": "error",
+                            "error": f"read: {e}"})
+            continue
+        entry: dict[str, Any] = {"file": p.name, "session": p.stem, "sha": sha}
+        if registry.get(str(p)) == sha:
+            entry["status"] = "skipped-unchanged"
+            details.append(entry)
+            continue
+        try:
+            with p.open(encoding="utf-8") as fh:
+                steps = endsteps.extract_end_steps(fh)
+        except OSError as e:
+            entry.update(status="error", error=f"extract: {e}")
+            details.append(entry)
+            continue
+        entry["steps"] = len(steps)
+        if not steps:
+            entry["status"] = "skipped-empty"
+            if not dry_run:
+                registry[str(p)] = sha
+            details.append(entry)
+            continue
+        if dry_run:
+            entry["status"] = "would-ingest"
+            details.append(entry)
+            continue
+        # 合成 transcript (与 spool-worker 同形状) → autodream
+        fd, tmp_name = tempfile.mkstemp(suffix=".jsonl", prefix="endsteps-")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                for txt in steps:
+                    out.write(json.dumps(
+                        {"type": "user", "message": {"content": txt}},
+                        ensure_ascii=False) + "\n")
+            r = autodream_mod.autodream(p.stem, str(tmp), source_cwd=cwd)
+            entry["status"] = "ingested"
+            entry["facts"] = r
+            for k, v in (r or {}).items():
+                agg[k] = agg.get(k, 0) + int(v)
+            registry[str(p)] = sha
+        except Exception as e:  # noqa: BLE001 — 汇总报告, 不中断其余文件
+            entry["status"] = "error"
+            entry["error"] = str(e)[:200]
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        details.append(entry)
+
+    if not dry_run and files:
+        reg_path.parent.mkdir(parents=True, exist_ok=True)
+        rt = reg_path.with_suffix(".json.tmp")
+        rt.write_text(json.dumps(registry, ensure_ascii=False, indent=1),
+                      encoding="utf-8")
+        os.replace(rt, reg_path)
+
+    def _n(status: str) -> int:
+        return sum(1 for d in details if d.get("status") == status)
+
+    return {
+        "project_dir": str(tdir),
+        "cwd": cwd,
+        "files": len(files),
+        "ingested": _n("ingested"),
+        "skipped_unchanged": _n("skipped-unchanged"),
+        "skipped_empty": _n("skipped-empty"),
+        "would_ingest": _n("would-ingest"),
+        "errors": _n("error"),
+        "facts": agg,
+        "details": details,
+    }
 
 
 # ── init-memory (bootstrap) ─────────────────────────────────────────
@@ -513,6 +652,9 @@ def _main(argv: list[str] | None = None) -> int:
                      help="限 BFS 图构建为本 cwd(source_cwd 过滤; 默认 off 全局图 ADR-14)")
     rec.add_argument("--json", dest="json", action="store_true",
                      help="M15a 稳定 JSON 契约输出 {query, facts:[…]} (字段名即 ABI; 缺省行为不变)")
+    rec.add_argument("--project", action="store_true",
+                     help="M18: 召回正文投影 recall-<DATE>.md + MEMORY.md 索引行 "
+                          "(dir = cc_memory_dir(--cwd 或 $PWD); 空命中不投影)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -526,6 +668,15 @@ def _main(argv: list[str] | None = None) -> int:
         "--cwd", dest="cwd", default=None,
         help="ADR-14 记 source_cwd(来源 cwd, 从 hook stdin cwd 传)",
     )
+
+    ir = sub.add_parser("ingest-recent",
+                        help="当前 cwd 最近 N 个 CC transcript end-step 蒸馏 → LLM 入 KG (手动补口, M18)")
+    ir.add_argument("--cwd", dest="cwd", default=None,
+                    help="项目 cwd (默认 $PWD; 定位 ~/.claude/projects/<encoded-cwd>/)")
+    ir.add_argument("--limit", type=int, default=10,
+                    help="取最近 N 个 transcript 按 mtime (默认 10)")
+    ir.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="只统计蒸馏结果(零 LLM), 不入 KG 不写注册表")
 
     initmem = sub.add_parser("init-memory", help="seed KG from CC memory .md (ADR-12)")
     initmem.add_argument(
@@ -602,7 +753,7 @@ def _main(argv: list[str] | None = None) -> int:
         ))
     elif args.cmd == "recall":
         session_id = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
-        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped, as_json=args.json)
+        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped, as_json=args.json, project=args.project)
         # ADR-4 bfs hint: direct-match 薄且未开 --bfs → stderr 提示(不污染 stdout 机器输出)。
         # 结果数 < 阈值代理 direct-match 薄(候选少 → 命中少); suggest_bfs 字段在 envelope
         # (with_tag) 里有, 但 cli 走结果数自判覆盖 list/verbose 全 path。
@@ -615,6 +766,10 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":
         print(json.dumps(autodream(args.session, args.transcript, cwd=args.cwd), ensure_ascii=False))
+    elif args.cmd == "ingest-recent":
+        print(json.dumps(ingest_recent(args.cwd, limit=args.limit,
+                                       dry_run=args.dry_run),
+                         ensure_ascii=False))
     elif args.cmd == "init-memory":
         print(json.dumps(init_memory(args.memory_dir, source_cwd=args.cwd), ensure_ascii=False))
     elif args.cmd == "re-ingest":

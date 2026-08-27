@@ -1,10 +1,11 @@
 """endsteps — CC transcript 蒸馏过滤器 (PreCompact 入库前置, 2026-08-27 重接线)。
 
-用户裁决的新接线形态:
-- CC automemory 原生机制/使用方式**完全不动** (KG 不写 CC memory 目录, 无投影)。
+用户裁决的接线形态:
+- CC automemory 原生机制/使用方式**完全不动** (例外: recall --project 的
+  recall-<DATE>.md 召回日志投影, 用户 2026-08-27 明示)。
 - PreCompact 钩子把 transcript 快照进 spool; worker 先经本模块过滤 — 只留
   **assistant 每一轮输出的 end step** — 再 autodream 入 KG。
-- 召回/consolidation 全手动 (skills/memsvc)。
+- 召回/consolidation 全手动 (skills/memsvc); 手动补近期会话 = cli ingest-recent。
 
 end step 判定 (实测校准, 717 tool_use vs 9 end_turn 的大 transcript):
 - ``type == "assistant"`` 且 ``message.stop_reason == "end_turn"`` — API 语义上
@@ -20,7 +21,8 @@ autodream 消费的合成 transcript 形状 (与 bootstrap.init_memory 一致)�
 
 CLI: ``python3 endsteps.py <transcript.jsonl> [> out.jsonl]`` (无参读 stdin);
 统计走 stderr。手动入库某会话结论: ``endsteps.py t.jsonl > e.jsonl && cli.py
-autodream --session X --transcript e.jsonl``。
+autodream --session X --transcript e.jsonl``; 批量最近 N 个会话一键:
+``cli.py ingest-recent`` (本模块同口径蒸馏 + sha 注册表防重跑)。
 """
 from __future__ import annotations
 

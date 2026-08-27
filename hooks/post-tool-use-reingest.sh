@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# [休眠 2026-08-27] CC 接线已全部移除 (用户裁决「hook 自动全清掉」) — 本脚本不再被
+# 任何 settings.json 触发, 仅作手动/未来重接线工具保留 (同 regex 通道模式)。
 # PostToolUse hook (ADR-17 a/e/f): re-ingest CC memory md files after Write/Edit.
 #
 # CC fires this after Write/Edit tools (stdin JSON: {tool_name, tool_input, cwd}).

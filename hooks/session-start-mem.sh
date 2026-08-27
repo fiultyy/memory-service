@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# [休眠 2026-08-27] CC 接线已全部移除 (用户裁决「hook 自动全清掉」) — 本脚本不再被
+# 任何 settings.json 触发, 仅作手动/未来重接线工具保留 (同 regex 通道模式)。
 # SessionStart hook: 开局投影 KG → CC memory [mem].
 #
 # CC fires this at session start (stdin JSON: {session_id, cwd}). We project

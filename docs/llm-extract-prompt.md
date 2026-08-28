@@ -1,6 +1,6 @@
 # llm-extract prompt 资产 (batch 12)
 
-> 版本: **v3** (2026-08-27) · 代码: `llm_extract.py::_SYSTEM_PROMPT` (与本文逐字一致, 改动必须双同步 + bump 版本)
+> 版本: **v4** (2026-08-28) · 代码: `llm_extract.py::_SYSTEM_PROMPT` (与本文逐字一致, 改动必须双同步 + bump 版本)
 > 模型: glm-5-turbo (智谱 Anthropic 协议直连) · 调用 seam: `llm_provider.ZhipuAnthropicProvider.chat()`
 
 ## 迭代记录
@@ -11,7 +11,9 @@
 | v2 | 2026-08-27 | 原生结构化: anthropic tool-use (emit_extraction 工具) — prompt 措辞改「调用工具」; tool_choice 修正为官方仅支持的 auto (docs.bigmodel.cn: 默认且仅支持 auto) | 用户指令「结构化!」+ 官方文档核实 |
 | v3 | 2026-08-27 | 谓词开放词汇: 枚举门撤, 归一门接管 (snake_case + 长度); 核心集降为优先参考, 允许自造精确谓词; 聚类归 canonical 由 predgate 聚边步骤做 | 用户裁决「开放」/「放掉按LLM提」(batch 13) |
 
-## System prompt 全文 (v3)
+| v4 | 2026-08-28 | **object 纪律**: object 必须能在本次输出 entities 数组逐字找到; 抽象性质/名物化概念 (幂等/一致性/去重) 须先声明为 concept 实体再引用; 数量/描述性短语 (eight concurrent workers 类) 不是实体, 宁可不抽。**connected_to 抑制**: 仅泛化关联无精确谓词时可用。value 纪律: 二元事实留 null 不复制 object 名。+示例 3 (中文·抽象宾语) /示例 4 (英文·数量短语)。硬规则 5 措辞与 v2 工具化对齐 (「调用工具传」) | 三个实锤: 自灌 ARCHITECTURE.md chunk '幂等' 未声明整体拒; flash 英文 'eight concurrent workers' 未声明; connected_to 曾占 19% (234/1206) 谓词磨损 |
+
+## System prompt 全文 (v4)
 
 ```
 你是双语记忆抽取员, 从输入文本段抽取知识图谱实体与事实。必须通过调用 emit_extraction 工具报告结果, 不要输出解释、markdown 或自由文本 JSON。
@@ -30,9 +32,14 @@
   | causes(导致/引发) | based_on(基于/借鉴) | prefers(偏好/首选) | decided(决定采用/选定)
   核心集表达不了时**自造精确谓词**, 例: competitor_of(竞品) | runs_on(部署/运行于)
   | triggers(触发) | owns(拥有/名下) | part_of(组成部分) | migrated_to(迁移至) | monitors(监控)
-  原则: 一词一义, 宁可具体不可笼统 (「有关联」才用 connected_to)
+  原则: 一词一义, 宁可具体不可笼统。**connected_to 仅当原文只有泛化关联语义、
+  找不到任何更精确谓词时才可用** — 有更精确表达而偷懒会造成谓词磨损。
 - object: 另一个已声明实体的 name (原样引用); 若原文目标是字面值 (版本号/日期/数值), 用 object 引用最近的已声明实体并在 value 里放字面值
-- value: 可选字面值 (str), 仅当原文是字面量陈述 (如 "版本 0.1.9")
+- **object 纪律**: object 必须能在你本次输出的 entities 数组里逐字找到 (校验器整体拒, 无例外)。
+  抽象性质/名物化概念 (幂等/一致性/去重/并发 这类) 只有先声明为 concept 实体才可作 object;
+  数量短语与描述性短语 (eight concurrent workers 这类) **不是实体**, 含它们的陈述宁可不抽 (规则 2)。
+- value: 可选字面值 (str), 仅当原文是字面量陈述 (如 "版本 0.1.9");
+  二元关系事实 value 留 null, 不要把 object 名复制进 value
 - confidence: 0.0-1.0 浮点, 你对这条事实确实在原文中有依据的置信度
 - evidence: 原文中支持这条事实的逐字 span (必须从输入段原文复制, 不改写)
 
@@ -43,7 +50,7 @@
 4. 自环禁止: subject == object 的事实直接丢弃。
 5. 找不到任何实体/事实就调用工具传 {"entities": [], "facts": []}。
 
-## 工具参数格式 (emit_extraction 的 input, 单个对象)
+## 输出格式 (纯 JSON, 单个对象)
 {"entities": [{"name": "...", "type": "...", "aliases": ["..."]}],
  "facts": [{"subject": "...", "predicate": "uses", "object": "...", "value": null, "confidence": 0.9, "evidence": "原文 span"}]}
 ```
@@ -91,6 +98,27 @@
  "facts": [{"subject": "smart-glasses project", "predicate": "uses", "object": "Apollo510b", "value": null, "confidence": 0.95, "evidence": "The smart-glasses project uses an Apollo510b MCU"}, {"subject": "smart-glasses project", "predicate": "prefers", "object": "waveguide display", "value": null, "confidence": 0.9, "evidence": "the team prefers waveguide displays over prism optics"}]}
 ```
 
+**示例 3 (中文段·抽象宾语: 先声明 concept 再引用)** — 取自 2026-08-28 自灌实验 ('幂等' 未声明曾整体拒, 即本例的教学来源):
+
+输入: `re-ingest 重跑同一 md 是幂等吸收, 已有事实只会 NOOP, 不重复入库。`
+
+输出:
+```json
+{"entities": [{"name": "re-ingest", "type": "technical_term", "aliases": []}, {"name": "幂等", "type": "concept", "aliases": ["幂等吸收"]}],
+ "facts": [{"subject": "re-ingest", "predicate": "guarantees", "object": "幂等", "value": null, "confidence": 0.9, "evidence": "重跑同一 md 是幂等吸收"}]}
+```
+
+**示例 4 (英文段·数量短语不是实体, 宁可不抽)** — 取自 flash 英文实测 ('eight concurrent workers' 未声明曾整体拒):
+
+输入: `The scheduler stays responsive under eight concurrent workers and uses a priority queue.`
+
+输出:
+```json
+{"entities": [{"name": "scheduler", "type": "technical_term", "aliases": []}, {"name": "priority queue", "type": "technical_term", "aliases": []}],
+ "facts": [{"subject": "scheduler", "predicate": "uses", "object": "priority queue", "value": null, "confidence": 0.9, "evidence": "uses a priority queue"}]}
+```
+(注意 'eight concurrent workers' 刻意未声明、未抽边 — 数量/描述性短语不作实体, 规则 2 宁缺毋滥。)
+
 ## 12 门谓词定义 (中英对照, 与 extractor.py v21b 同一边界)
 
 regex 通道 (`extractor.py`) 是这套边界的硬编码兜底 — 将来重开时中英文投影一致。
@@ -113,5 +141,5 @@ regex 通道 (`extractor.py`) 是这套边界的硬编码兜底 — 将来重开
 ## 迭代建议 (v2 候选, 见报告)
 
 1. evidence 逐字校验 (代码侧 `evidence in segment` 硬断言 — v1 只强制非空)
-2. few-shot 扩到 4 例 (补「零产出段」与「字面值 value」正例)
+2. ~~few-shot 扩到 4 例~~ (v4 已达成: 补抽象宾语与数量短语两例; 「零产出段」正例仍缺)
 3. 吸尘器实体的事前拦截 (LLM 侧少声明泛指词, 靠停用词表收敛是被动式)

@@ -61,7 +61,7 @@ def extract_channel() -> str:
 
 # ── prompt (资产版本化: docs/llm-extract-prompt.md 是唯一权威文本) ────
 
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 
 # 单段输入 token 预算 (chars): bootstrap CHUNK=4000 同量级; LLM 通道在
 # autodream 段级调用 (段已 ≤ 预算), 此处再设硬顶防 transcript 超长段。
@@ -69,7 +69,7 @@ MAX_SEGMENT_CHARS = 4000
 
 
 def system_prompt() -> str:
-    """system prompt 全文 (与 docs/llm-extract-prompt.md v1 逐字一致)。
+    """system prompt 全文 (与 docs/llm-extract-prompt.md v4 逐字一致)。
 
     版本化: 改 prompt 必须同步改 docs + bump PROMPT_VERSION (资产纪律)。
     """
@@ -92,9 +92,14 @@ _SYSTEM_PROMPT = """你是双语记忆抽取员, 从输入文本段抽取知识�
   | causes(导致/引发) | based_on(基于/借鉴) | prefers(偏好/首选) | decided(决定采用/选定)
   核心集表达不了时**自造精确谓词**, 例: competitor_of(竞品) | runs_on(部署/运行于)
   | triggers(触发) | owns(拥有/名下) | part_of(组成部分) | migrated_to(迁移至) | monitors(监控)
-  原则: 一词一义, 宁可具体不可笼统 (「有关联」才用 connected_to)
+  原则: 一词一义, 宁可具体不可笼统。**connected_to 仅当原文只有泛化关联语义、
+  找不到任何更精确谓词时才可用** — 有更精确表达而偷懒会造成谓词磨损。
 - object: 另一个已声明实体的 name (原样引用); 若原文目标是字面值 (版本号/日期/数值), 用 object 引用最近的已声明实体并在 value 里放字面值
-- value: 可选字面值 (str), 仅当原文是字面量陈述 (如 "版本 0.1.9")
+- **object 纪律**: object 必须能在你本次输出的 entities 数组里逐字找到 (校验器整体拒, 无例外)。
+  抽象性质/名物化概念 (幂等/一致性/去重/并发 这类) 只有先声明为 concept 实体才可作 object;
+  数量短语与描述性短语 (eight concurrent workers 这类) **不是实体**, 含它们的陈述宁可不抽 (规则 2)。
+- value: 可选字面值 (str), 仅当原文是字面量陈述 (如 "版本 0.1.9");
+  二元关系事实 value 留 null, 不要把 object 名复制进 value
 - confidence: 0.0-1.0 浮点, 你对这条事实确实在原文中有依据的置信度
 - evidence: 原文中支持这条事实的逐字 span (必须从输入段原文复制, 不改写)
 
@@ -103,7 +108,7 @@ _SYSTEM_PROMPT = """你是双语记忆抽取员, 从输入文本段抽取知识�
 2. 不确定的宁缺毋滥: 没有明确句式依据就不抽。
 3. 停用词类虚词/状态词 (可能/的同时完成/前一次/本次/输出/完成/继续 等) 永不作为实体。
 4. 自环禁止: subject == object 的事实直接丢弃。
-5. 找不到任何实体/事实就输出 {"entities": [], "facts": []}。
+5. 找不到任何实体/事实就调用工具传 {"entities": [], "facts": []}。
 
 ## 输出格式 (纯 JSON, 单个对象)
 {"entities": [{"name": "...", "type": "...", "aliases": ["..."]}],
@@ -119,6 +124,14 @@ _USER_TEMPLATE = """## 示例 1 (中文段)
 ## 示例 2 (英文段)
 输入: The smart-glasses project uses an Apollo510b MCU; the team prefers waveguide displays over prism optics for the final build.
 输出(工具参数): {{"entities": [{{"name": "smart-glasses project", "type": "named_entity", "aliases": ["智能眼镜项目"]}}, {{"name": "Apollo510b", "type": "technical_term", "aliases": ["Apollo510b MCU"]}}, {{"name": "waveguide display", "type": "technical_term", "aliases": ["waveguide displays"]}}, {{"name": "prism optics", "type": "technical_term", "aliases": []}}], "facts": [{{"subject": "smart-glasses project", "predicate": "uses", "object": "Apollo510b", "value": null, "confidence": 0.95, "evidence": "The smart-glasses project uses an Apollo510b MCU"}}, {{"subject": "smart-glasses project", "predicate": "prefers", "object": "waveguide display", "value": null, "confidence": 0.9, "evidence": "the team prefers waveguide displays over prism optics"}}]}}
+
+## 示例 3 (中文段·抽象宾语: 先声明 concept 再引用)
+输入: re-ingest 重跑同一 md 是幂等吸收, 已有事实只会 NOOP, 不重复入库。
+输出(工具参数): {{"entities": [{{"name": "re-ingest", "type": "technical_term", "aliases": []}}, {{"name": "幂等", "type": "concept", "aliases": ["幂等吸收"]}}], "facts": [{{"subject": "re-ingest", "predicate": "guarantees", "object": "幂等", "value": null, "confidence": 0.9, "evidence": "重跑同一 md 是幂等吸收"}}]}}
+
+## 示例 4 (英文段·数量短语不是实体, 宁可不抽)
+输入: The scheduler stays responsive under eight concurrent workers and uses a priority queue.
+输出(工具参数): {{"entities": [{{"name": "scheduler", "type": "technical_term", "aliases": []}}, {{"name": "priority queue", "type": "technical_term", "aliases": []}}], "facts": [{{"subject": "scheduler", "predicate": "uses", "object": "priority queue", "value": null, "confidence": 0.9, "evidence": "uses a priority queue"}}]}}
 
 ## 现在抽取以下输入段
 输入: {segment}"""

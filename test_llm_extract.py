@@ -388,3 +388,26 @@ def test_prompt_version_synced_with_doc():
     assert llm_extract.PROMPT_VERSION in text
     assert llm_extract._SYSTEM_PROMPT.splitlines()[0] in text
     assert llm_extract._SYSTEM_PROMPT.splitlines()[-1] in text
+
+
+def test_prompt_v4_disciplines():
+    """v4 资产守卫: object 纪律 / connected_to 抑制 / 数量短语反例 + docs 逐字同步。"""
+    import re
+    assert llm_extract.PROMPT_VERSION == "v4"
+    sp = llm_extract._SYSTEM_PROMPT
+    # object 纪律: 逐字可寻 + 抽象宾语先声明 + 数量短语不抽
+    assert "entities 数组里逐字找到" in sp
+    assert "幂等" in sp and "concept 实体" in sp
+    assert "eight concurrent workers" in sp
+    # connected_to 抑制
+    assert "找不到任何更精确谓词时才可用" in sp
+    # value 纪律
+    assert "不要把 object 名复制进 value" in sp
+    # few-shot 4 例
+    assert len(re.findall(r"## 示例 \d", llm_extract._USER_TEMPLATE)) == 4
+    # docs 逐字同步 (纪律强制, 升级自锚点比对)
+    doc = (Path(__file__).parent / "docs" / "llm-extract-prompt.md").read_text(
+        encoding="utf-8")
+    m = re.search(r"## System prompt 全文 \(v4\)\n\n```\n(.*?)\n```", doc, re.S)
+    assert m, "docs 缺 v4 prompt 全文块"
+    assert m.group(1) == llm_extract._SYSTEM_PROMPT

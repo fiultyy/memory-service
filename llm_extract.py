@@ -174,7 +174,17 @@ def _norm_predicate(raw: Any) -> str:
     return s
 
 
-def validate(doc: Any) -> tuple[list[EntityOut], list[EdgeOut], float]:
+def _evidence_verbatim(evidence: str, segment: str) -> bool:
+    """evidence 逐字断言: 严格子串; 失败再试空白归一 (同字符异空白仍算逐字 —
+    模型偶发换行/多空格不算伪造; 改字才算)。"""
+    if evidence in segment:
+        return True
+    import re
+    norm = lambda s: re.sub(r"\s+", " ", s).strip()  # noqa: E731
+    return norm(evidence) in norm(segment)
+
+
+def validate(doc: Any, segment: str | None = None) -> tuple[list[EntityOut], list[EdgeOut], float]:
     """schema v1 校验 + 归一 (§2.3)。
 
     规则: 顶层 dict / entities[].name 必填 str / type 枚举 (缺省 concept,
@@ -182,6 +192,10 @@ def validate(doc: Any) -> tuple[list[EntityOut], list[EdgeOut], float]:
     confidence clamp 0-1 / subject/object 必须引用已声明实体名 / value
     可选 str / evidence 必填非空。返回 (entities, edges, aggregate_conf)。
     违规**整体拒** (不静默丢条 — 那是坏输出混入的口子; 由重试机制整体重试)。
+
+    ``segment`` 提供 (extract() 恒传) 时追加 **evidence 逐字硬断言** — evidence
+    span 必须能在原文段中逐字找到 (空白归一容差), 伪造 evidence → 整体拒进重试
+    (迭代建议 #1 落地, 2026-08-28; 源不变式: 提取只准引用原文)。
     """
     if not isinstance(doc, dict):
         raise SchemaViolation(f"顶层非对象: {type(doc).__name__}")
@@ -248,6 +262,11 @@ def validate(doc: Any) -> tuple[list[EntityOut], list[EdgeOut], float]:
         evidence = f.get("evidence")
         if not isinstance(evidence, str) or not evidence.strip():
             raise SchemaViolation(f"evidence 缺失/非 str: {subj!r}->{obj!r}")
+        if segment is not None and not _evidence_verbatim(
+                evidence.strip(), segment):
+            raise SchemaViolation(
+                f"evidence 非原文逐字: {evidence.strip()[:40]!r} "
+                "(必须从输入段原文复制, 禁止改写/缩略/脑补)")
         edges.append(EdgeOut(subject=subj, predicate=pred, object=obj,
                              topic=evidence.strip(), confidence=conf))
         confs.append(conf)
@@ -390,7 +409,7 @@ def extract(segment: str, provider=None) -> Extraction:
             raise ExtractFailed(f"provider 不可达: {e}") from e
         try:
             doc = _parse_json_block(content)
-            entities, edges, aggregate = validate(doc)
+            entities, edges, aggregate = validate(doc, segment=segment)
             return Extraction(
                 entities=entities, edges=edges, confidence=aggregate,
                 source_meta={"provider": "zhipu", "extractor_label": "llm",

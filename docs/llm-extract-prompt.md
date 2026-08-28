@@ -13,6 +13,8 @@
 
 | v4 | 2026-08-28 | **object 纪律**: object 必须能在本次输出 entities 数组逐字找到; 抽象性质/名物化概念 (幂等/一致性/去重) 须先声明为 concept 实体再引用; 数量/描述性短语 (eight concurrent workers 类) 不是实体, 宁可不抽。**connected_to 抑制**: 仅泛化关联无精确谓词时可用。value 纪律: 二元事实留 null 不复制 object 名。+示例 3 (中文·抽象宾语) /示例 4 (英文·数量短语)。硬规则 5 措辞与 v2 工具化对齐 (「调用工具传」) | 三个实锤: 自灌 ARCHITECTURE.md chunk '幂等' 未声明整体拒; flash 英文 'eight concurrent workers' 未声明; connected_to 曾占 19% (234/1206) 谓词磨损 |
 
+| v4·校验 | 2026-08-28 | evidence 逐字校验代码侧硬断言 (`validate(doc, segment=...)`, extract() 恒传; 严格子串+空白归一容差; 伪造→重试反馈→两轮败响亮)。prompt 文本不变, 版本仍 v4 | 迭代建议 #1 落地 (用户「遗留做完」) |
+
 ## System prompt 全文 (v4)
 
 ```
@@ -74,7 +76,7 @@
 }
 ```
 
-校验规则 (`llm_extract.validate`): predicate 表外 → 整体拒; subject/object 未声明 → 整体拒; confidence clamp 0-1; evidence 缺失 → 整体拒; type 表外 → concept 收拢 (不拒); 自环 → 静默弃。整体拒 → 1 次重试 (附违规原因) → 仍败 `ExtractFailed` 响亮抛出。
+校验规则 (`llm_extract.validate`): predicate 表外 → 整体拒; subject/object 未声明 → 整体拒; confidence clamp 0-1; evidence 缺失/**非原文逐字** → 整体拒 (v4 起 `extract()` 恒传 segment, 逐字硬断言 + 空白归一容差 — 迭代建议 #1 落地); type 表外 → concept 收拢 (不拒); 自环 → 静默弃。整体拒 → 1 次重试 (附违规原因) → 仍败 `ExtractFailed` 响亮抛出。
 
 ## Few-shot (用户消息模板内嵌, 语料取 claw 真实段)
 

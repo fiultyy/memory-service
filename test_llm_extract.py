@@ -77,7 +77,7 @@ _GOOD_DOC = {
     ],
     "facts": [
         {"subject": "dais", "predicate": "depends_on", "object": "logseq-cli",
-         "value": None, "confidence": 0.9, "evidence": "它依赖 logseq-cli"},
+         "value": None, "confidence": 0.9, "evidence": "依赖 logseq-cli"},
     ],
 }
 
@@ -183,7 +183,7 @@ def test_fenced_json_stripped():
     """```json 围栏剥壳解析。"""
     fenced = "```json\n" + json.dumps(_GOOD_DOC, ensure_ascii=False) + "\n```"
     p = MockProvider(fenced)
-    r = extract("段", provider=p)
+    r = extract("dais 依赖 logseq-cli", provider=p)
     assert len(r.edges) == 1
 
 
@@ -411,3 +411,55 @@ def test_prompt_v4_disciplines():
     m = re.search(r"## System prompt 全文 \(v4\)\n\n```\n(.*?)\n```", doc, re.S)
     assert m, "docs 缺 v4 prompt 全文块"
     assert m.group(1) == llm_extract._SYSTEM_PROMPT
+
+
+# ── evidence 逐字校验 (2026-08-28, 迭代建议 #1 落地) ──────────────────
+
+_FABRICATED = {
+    "entities": [
+        {"name": "dais", "type": "technical_term", "aliases": []},
+        {"name": "logseq-cli", "type": "technical_term", "aliases": []},
+    ],
+    "facts": [
+        {"subject": "dais", "predicate": "depends_on", "object": "logseq-cli",
+         "value": None, "confidence": 0.9, "evidence": "dais 深度依赖 logseq-cli 生态"},  # 「深度/生态」原文无
+    ],
+}
+
+
+def test_evidence_verbatim_retry_feedback():
+    """伪造 evidence → 首轮拒 + 重试反馈含证据原因 → 次轮诚实输出收货。"""
+    p = MockProvider(json.dumps(_FABRICATED, ensure_ascii=False),
+                     json.dumps(_GOOD_DOC, ensure_ascii=False))
+    r = extract("dais 依赖 logseq-cli", provider=p)
+    assert len(r.edges) == 1 and r.source_meta["retries"] == 1
+    feedback = p.calls[1][1][-1]["content"]
+    assert "evidence 非原文逐字" in feedback
+
+
+def test_evidence_fabricated_both_attempts_loud():
+    """两轮都伪造 → ExtractFailed 响亮 (不静默丢条, 红线口径)。"""
+    import pytest
+    p = MockProvider(json.dumps(_FABRICATED, ensure_ascii=False),
+                     json.dumps(_FABRICATED, ensure_ascii=False))
+    with pytest.raises(llm_extract.ExtractFailed, match="evidence 非原文逐字"):
+        extract("dais 依赖 logseq-cli", provider=p)
+
+
+def test_evidence_whitespace_normalization_passes():
+    """同字符异空白 (换行/多空格) 不算伪造 — 逐字断言带空白归一容差。"""
+    doc = {
+        "entities": [{"name": "dais", "type": "technical_term", "aliases": []},
+                     {"name": "logseq-cli", "type": "technical_term", "aliases": []}],
+        "facts": [{"subject": "dais", "predicate": "depends_on",
+                   "object": "logseq-cli", "value": None, "confidence": 0.9,
+                   "evidence": "dais  依赖\n logseq-cli"}],
+    }
+    entities, edges, _ = llm_extract.validate(doc, segment="dais 依赖 logseq-cli")
+    assert len(edges) == 1
+
+
+def test_validate_without_segment_keeps_legacy_semantics():
+    """不传 segment (旧调用方) → 逐字断言不生效, 只查非空 (向后兼容)。"""
+    entities, edges, _ = llm_extract.validate(_FABRICATED)
+    assert len(edges) == 1

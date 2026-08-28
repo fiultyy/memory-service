@@ -217,7 +217,12 @@ def score_fact(
     """
     q_lower = (query or "").strip().lower()
     q_tokens = query_tokens(q_lower)
-    m = match_item(fact.get("value"), q_tokens, q_lower)
+    # ADR-C: topic 是事实的人读语句面 → match 内容 = value + topic。reified 二元
+    # fact 的 value 常只是宾语词（如 endsteps→memsvc 的 value='memsvc'），锚词落在
+    # topic 里 → 只看 value 会 0 match 被 SCORE_FLOOR 砍掉（2026-08-28 自灌
+    # ARCHITECTURE.md dogfood 实测发现）。
+    _content = (fact.get("value") or "") + "\n" + (fact.get("topic") or "")
+    m = match_item(_content, q_tokens, q_lower)
     # ponytail: lif reads the Fact.LIF storage scalar directly (ADR-4);
     # not AO2 NeuralField rank-based percentile — that is a runtime field
     # ranking, wrong for a static trust scalar.

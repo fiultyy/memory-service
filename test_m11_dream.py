@@ -383,7 +383,17 @@ def test_queue_wings_unreachable_skip_round():
             "SELECT status, attempts FROM upgrade_queue").fetchall()
         assert all(r["status"] == "pending" and r["attempts"] == 0 for r in rows), (
             f"整轮回退 pending 且 attempts 不烧: {[(r['status'], r['attempts']) for r in rows]}")
-        assert store.get_fact(f1)["access_count"] == 1, "重放补回发生"
+        # v1.7⑤ E9/C2 分账改写 (原断言 access_count==1): f1 是 fallback 来源
+        # (extractor='regex') → 重放走受限记账 — 只写 recall_sessions 观测集,
+        # LIF 列/access_count/last_accessed 零变化 (仅衰减不可提权)。
+        f1f = store.get_fact(f1)
+        assert f1f["access_count"] == 0, (
+            f"fallback fact 重放不得刷 access_count, got {f1f['access_count']}")
+        assert f1f["last_accessed_at"] is None, "fallback fact 重放不得刷 last_accessed"
+        assert "sx" in (f1f.get("recall_sessions") or []), (
+            "受限重放仍要写 recall_sessions 观测集 (重放发生的证明)")
+        assert "sx" not in (f1f.get("seen_sessions") or []), (
+            "受限重放不得写 seen_sessions (分账边界)")
     finally:
         adapter.extract_facts = orig_extract
         embedding.embed = orig_embed

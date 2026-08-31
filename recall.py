@@ -29,6 +29,7 @@ from typing import Any
 
 import db
 import embedding
+import gate
 import networkx as nx
 import projection
 import scoring
@@ -43,11 +44,14 @@ import store
 # ~0.19。注入通道用 min_score 参数自校准低门槛, 默认语义零变化。
 SCORE_FLOOR = 0.3
 
-# M13 (G5 已裁决): BFS 扩展入场门槛 — seed/hop 邻居经扩展通道入场的 fact 需
-# lif_source ≥ _BFS_SOURCE_GATE (0.7): regex 0.4 档占位噪声拒、llm 0.7/vote
-# 0.85/human 0.9 过。BFS 是增益通道非主检索 — 字面 seed/向量/中心性路径不受
-# 门槛影响 (低 source fact 仍可被直接查询召回)。hop>0 绕地板的 §7 语义保留,
-# 但只对过了本门槛入场的扩展 fact 生效。[设] 可调。
+# v1.7③ M3 终裁 (门槛解耦 — 软惩罚, 显式推翻 M13 G5 硬门): BFS 扩展通道
+# (B 翼) 不再按 lif_source 硬拒入场 —— 低档 fact 仍经扩展入场 (独有边不因
+# 档位丢失), 但排序分乘 gate_mod = 0.5 + 0.5·min(1, lif_source/0.7)
+# (regex 0.4 档 ≈0.786 折, llm 0.7/vote 0.85/human 0.9 档恒 1.0)。
+# `_BFS_SOURCE_GATE` 保留为公式分母。乘子只挂 b_wing_ids (经 BFS 扩展口
+# 入场的专属集), 不进 score_fact、不挂 bfs_expanded_ids (主路径/向量路蹭标
+# 会泄漏乘子); 折后分仍绕 SCORE_FLOOR 入榜 (绕地板键仍是 bfs_expanded_ids),
+# 仅排序降权。A 路永远注入、不受乘子影响。[设] 可调。
 _BFS_SOURCE_GATE = 0.7
 VEC_MIN = 0.30   # cosine ≥ 此的 active fact 入向量候选(避免全 noise 污染 top-k)
 VEC_TOP_N = 20   # 向量候选上限(扩展 entity/value 候选集)
@@ -249,6 +253,9 @@ def recall(
     as_of: str | None = None,
     use_bfs_scoped: bool = False,
     min_score: float | None = None,
+    use_gate: bool = False,
+    gate_account: bool = True,
+    gate_provider: Any = None,
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
@@ -279,6 +286,21 @@ def recall(
         weights: Optional ``(α, β, γ)`` override forwarded to ``score_fact``
             (ADR-4v2 调参); None ⇒ module defaults. eval_recall grid passes
             candidate triples here.
+        use_gate: v1.7③ — 对 b_wing_ids 成员 (BFS 扩展口入场的 B 翼) 跑单 LLM
+            窄域 gate (gate.py)。判 keep 的 fact 附 ``gate_keep=True`` +
+            ``match_score`` 键; 判不匹配 / gate 不可用 (ProviderCallError/超时/
+            两轮 schema 败/断供短路) → **B 翼 fact 全部不入返回** (只注入 A,
+            spec §③ 失败语义; 不降级不静默当 keep), recall 不炸。keep 的
+            fact 按 N2 语义累计 ``gate_score`` (见 ``gate_account``)。A 路
+            fact 永不经 gate、不带这两个键。
+        gate_account: gate_score 解锁累计记账开关 (N2, 暂缓期只写不读)。
+            True (默认, 注入面首轮档) → keep 的 match_score 经
+            :func:`store.bump_gate_score` 求和封顶入账; False (CLI 手动
+            --gate 面) → **不入解锁累计** (v7 三句之三: 防 CLI 探测污染账本),
+            gate 判定与输出 schema 仍零分叉。
+        gate_provider: gate LLM 依赖注入 seam (照 ``llm_extract.extract``
+            provider= 先例; 测试零网络注入 mock)。None ⇒ gate 内部按断供
+            红线自检 (env 无 ZHIPU_API_KEY 直接短路"无 gate")。
 
     Returns:
         Sorted list of Facts (bare) or score-detail dicts (verbose).
@@ -358,6 +380,7 @@ def recall(
     # BFS 图遍历扩展(use_bfs): 从 seed entity BFS 扩展邻居, 补充字面/向量未命中的 fact。
     bfs_fact_min_hop: dict[str, int] = {}
     bfs_expanded_ids: set[str] = set()
+    b_wing_ids: set[str] = set()
     if use_bfs and entities:
         seed_ids = [e["id"] for e in entities]
         bfs_result = bfs_neighbors(seed_ids, entity_graph, hops=bfs_hops)
@@ -365,12 +388,17 @@ def recall(
         neighbor_eids = [eid for eid in bfs_result if eid not in seed_ids]
         if neighbor_eids:
             for f in _facts_for_entities(neighbor_eids, as_of=as_of):
-                if float(f.get("lif_source") or 0.0) < _BFS_SOURCE_GATE:
-                    continue  # M13 G5: BFS 扩展入场门槛 lif_source≥0.7
+                # v1.7③ M3 软惩罚化: 原 M13 硬门 (lif_source < 0.7 → continue)
+                # 摘除 — 低档邻居 fact 仍入场, 排序降权在 scored 构建后统一乘
+                # gate_mod (见下)。lif_source 读取保留, 移至乘子处取。
                 fid = f["id"]
                 if fid not in seen_ids:
                     seen_ids.add(fid)
                     candidates.append(f)
+                    # B 翼专属集 (v1.7③): 仅经本口入场的 fact —— gate_mod 只乘
+                    # 此集, gate 只判此集; 不挂 bfs_expanded_ids (主路径 fact 端点
+                    # 恰为邻居时也被打标, 不纯, 乘子泄漏会污染 A 路)。
+                    b_wing_ids.add(fid)
         # 记录每个 fact 的 min_hop(基于 subject_id/object_id 在 bfs_result 中的最小值)
         for f in candidates:
             fid = f["id"]
@@ -413,9 +441,60 @@ def recall(
             vec_sim=vs, weights=weights, delta=delta,
             bfs_proximity=bfs_prox,
         ))
+    # v1.7③ M3 软惩罚(无条件, 与 gate 是否在场无关): b_wing_ids 成员排序分乘
+    # gate_mod = 0.5 + 0.5·min(1, lif_source/_BFS_SOURCE_GATE) (regex 0.4 档
+    # ≈0.786 折, ≥0.7 档恒 1.0)。只乘 B 翼专属集 — 不进 score_fact(A 路分数
+    # 逐字不动)、不挂 bfs_expanded_ids(主路径蹭标会泄漏乘子); 折后分仍绕
+    # SCORE_FLOOR 入榜(绕地板键仍是 bfs_expanded_ids), 仅排序降权。
+    for s in scored:
+        if s["fact"]["id"] in b_wing_ids:
+            lif_source = float(s["fact"].get("lif_source") or 0.0)
+            s["score"] *= 0.5 + 0.5 * min(1.0, lif_source / _BFS_SOURCE_GATE)
     # drop low-score (噪音); BFS 扩展 fact(hop>0) 绕过地板但仍参与排序+top_k。
     floor = SCORE_FLOOR if min_score is None else min_score
     scored = [s for s in scored if s["score"] >= floor or s["fact"]["id"] in bfs_expanded_ids]
+    # v1.7③ 单 LLM gate(use_gate): 只判 b_wing_ids 成员(B 翼)。keep → fact 附
+    # gate_keep=True + match_score 键, 并按 gate_account 累计 gate_score(N2);
+    # 判不匹配 → 该条剔除; gate 不可用(断供短路/ProviderCallError/超时/两轮
+    # schema 败, gate.GateFailed 响亮上抛在此承接) → **B 翼全部不入返回, 只注入
+    # A** — 不降级、不静默当 keep, recall 不炸(spec §③ 失败语义)。
+    if use_gate and b_wing_ids:
+        cand_texts: dict[str, str] = {}
+        for s in scored:
+            f = s["fact"]
+            if f["id"] in b_wing_ids:
+                cand_texts[f["id"]] = (
+                    (f.get("value") or "") + "\n" + (f.get("topic") or "")
+                ).strip()
+        try:
+            verdicts = gate.run_gate(
+                cand_texts, query,
+                provider=gate_provider,
+                scope=("manual" if not gate_account else "recall"),
+            )
+        except Exception:  # noqa: BLE001 — gate 任何失败 ≡ 不可用, 契约只要求 A 路
+            verdicts = None
+        if verdicts is None:
+            scored = [s for s in scored if s["fact"]["id"] not in b_wing_ids]
+        else:
+            kept: list[dict[str, Any]] = []
+            acct_conn = db.get_conn() if gate_account else None
+            for s in scored:
+                fid = s["fact"]["id"]
+                if fid not in b_wing_ids:
+                    kept.append(s)  # A 路: 永不经 gate, 不带 gate 键
+                    continue
+                v = verdicts.get(fid)
+                if v is not None and v.get("keep"):
+                    s["fact"]["gate_keep"] = True
+                    s["fact"]["match_score"] = float(v["match_score"])
+                    kept.append(s)
+                    if gate_account:
+                        # N2: 求和且达解锁阈值封顶(MEM_UNLOCK_MATCH_SCORE, 默认
+                        # 2.0); 暂缓期只写不读。手动面 gate_account=False 不入账。
+                        store.bump_gate_score(fid, float(v["match_score"]),
+                                              conn=acct_conn)
+            scored = kept
     scored.sort(key=lambda s: s["score"], reverse=True)
     if top_k is not None:
         scored = scored[: max(0, top_k)]

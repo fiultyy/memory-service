@@ -144,6 +144,26 @@ def _replay_recall_hits(source_cwd: str | None) -> dict[str, int]:
         if row is None:
             continue  # 已被 supersede/prune 的 fact: 信号丢弃 (存储态权威)
         fact = store._decode_fact(row)
+        # v1.7⑤ E9/C2 (双口之一): fallback 来源 fact (extractor='regex') 的
+        # replay **仅记账** — 只写 recall_sessions 观测集, 不刷 LIF 列/
+        # access_count/last_accessed_at (⑤b 仅衰减不可提权, 无条件不受 D6 门
+        # 控制); 主径 fact 待验证 (llm 低初值未解锁) 在 D6 解锁期同走受限刷
+        # (暂缓期门关跑旧规则)。非受限 replay 照旧 seen_sessions 批量补回
+        # (M4 反向修正: **不碰** extract_sessions — replay 是使用痕迹, 不是
+        # 提取证据, 写穿分账会重开自喂洞)。
+        if scoring.refresh_restricted(fact):
+            obs = list(fact.get("recall_sessions") or [])
+            changed = False
+            for r in rows:
+                sid = r.get("session_id")
+                if sid and sid not in obs:
+                    obs.append(sid)
+                    changed = True
+            if changed:
+                conn.execute("UPDATE fact SET recall_sessions = ? WHERE id = ?",
+                             (json.dumps(obs, ensure_ascii=False), fid))
+            replayed += 1
+            continue
         access_count = int(fact.get("access_count") or 0) + len(rows)
         sessions = list(fact.get("seen_sessions") or [])
         for r in rows:
@@ -321,32 +341,81 @@ def _demote_self_pollution() -> int:
 # ── ⑥ M4 队列消费 → wings 升级 ───────────────────────────────────────
 
 def _consume_queue(providers: list | None) -> dict[str, int]:
-    """dequeue(≤20) → 逐项 adapter.extract_facts(wings 复活点) → 升级/流转。
-    LLM 不可达 (RuntimeError) → 整轮回退 pending 跳过 (attempts 不烧)。"""
+    """dequeue(≤20) → material_ref 前缀分流 (v1.7⑤ E11/N1):
+    ``segment:``/``segcontra:`` → **autodream 决策管道重跑** (矛盾 judge +
+    C1b 通道门槛在场, 非 ADD-only 直写; 主径恢复 sweep 补抽经此转正);
+    ``fact:`` → wings 升级 (原路径)。
+    LLM 不可达 (RuntimeError) → 整轮/单项回退 pending 跳过 (attempts 不烧)。"""
     out = {"queue_done": 0, "queue_failed": 0, "queue_skipped": 0,
            "facts_upgraded": 0}
-    batch = upgrade.dequeue(QUEUE_BATCH)
+    # v1.7⑤ N1: in_flight 孤儿启动清扫 — crash 遗留行永久卡死防线 (单进程
+    # 假设成立): 消费循环启动时批量 revert → pending (复用 rollback, 不烧
+    # attempts, 不建 lease 列)。
+    conn = db.get_conn()
+    orphans = [r["id"] for r in conn.execute(
+        "SELECT id FROM upgrade_queue WHERE status='in_flight'").fetchall()]
+    if orphans:
+        upgrade.revert(orphans)
+
+    def _is_segment(item: dict[str, Any]) -> bool:
+        ref = item.get("material_ref") or ""
+        return ref.startswith("segment:") or ref.startswith("segcontra:")
+
+    batch = [b for b in upgrade.dequeue(QUEUE_BATCH)]
     if not batch:
+        return out
+
+    seg_items = [b for b in batch if _is_segment(b)]
+    fact_items = [b for b in batch if not _is_segment(b)]
+
+    # ── segment/segcontra 补抽: autodream 决策管道重跑 (E11) ────────────
+    import autodream as autodream_mod
+    for item in seg_items:
+        text = item.get("material_text") or ""
+        if not text:
+            upgrade.mark_failed(item["id"])  # 无素材 (legacy 行) → 真失败路径
+            out["queue_failed"] += 1
+            continue
+        try:
+            n = autodream_mod.rerun_segment(
+                text, provenance=item.get("material_prov"),
+                providers=providers)
+        except RuntimeError:
+            # 主径不可达 (ExtractFailed 等): revert 不烧 attempts (勘误 N1
+            # 三边角 — sweep 失败回 pending 保住重试预算)。
+            upgrade.revert([item["id"]])
+            out["queue_skipped"] += 1
+            continue
+        except Exception:
+            upgrade.mark_failed(item["id"])
+            out["queue_failed"] += 1
+            continue
+        out["facts_upgraded"] += n["added"] + n["updated"]
+        upgrade.mark_done(item["id"])
+        out["queue_done"] += 1
+
+    if not fact_items:
         return out
 
     def _extract(text: str):
         # 源不变式: 输入 = 队列 material_text (入队时 transcript 提取面转写)。
         return adapter.extract_facts(text, providers=providers)
 
-    # 可达性探针: 首项先走一次 — RuntimeError ⇒ 整轮回退 (不烧 20 项 attempts)。
-    first = batch[0]
+    # 可达性探针: fact: 首项先走一次 — RuntimeError ⇒ 整轮 (fact 面) 回退
+    # (不烧 20 项 attempts)。segment 面已上方独立处理, 不占探针。
+    first = fact_items[0]
     if not first["material_text"]:
-        upgrade.revert([b["id"] for b in batch])
-        out["queue_skipped"] = len(batch)
+        upgrade.revert([b["id"] for b in fact_items])
+        out["queue_skipped"] += len(fact_items)
         return out
     try:
         probe = _extract(first["material_text"])
     except RuntimeError:
-        upgrade.revert([b["id"] for b in batch])
-        out["queue_skipped"] = len(batch)
+        upgrade.revert([b["id"] for b in fact_items])
+        out["queue_skipped"] += len(fact_items)
         return out
 
-    for item in batch:
+    for item in fact_items:
         text = item["material_text"]
         if not text:
             upgrade.mark_failed(item["id"])  # 无素材 (legacy 行) → 真失败路径
@@ -370,49 +439,38 @@ def _consume_queue(providers: list | None) -> dict[str, int]:
 
 def _apply_upgrade(item: dict[str, Any], result: Any) -> int:
     """wings 产出落库。fact:<id> → supersede 旧 fact 建 extractor 档新高 fact
-    (supersede_reason='upgrade'); segment:* → 边直接 ADD (provenance 继承素材)。
-    返回升级/新增 fact 数。"""
+    (supersede_reason='upgrade')。segment:/segcontra: 素材 (v1.7⑤ E11/N1) →
+    **autodream 决策管道重跑** (矛盾 judge + C1b 通道门槛在场) — 原 ADD-only
+    直写已废 (会把待裁决固化成共存双事实, 勘误 N1); 消费端 _consume_queue
+    已按 material_ref 前缀分流, 本分支保留作直调漏网防线, wings/词典消费端
+    不经此路径 (segcontra 段跳过 wings/词典面)。返回升级/新增 fact 数。"""
+    ref = item["material_ref"]
+    if not ref.startswith("fact:"):
+        import autodream as autodream_mod
+        n = autodream_mod.rerun_segment(
+            item.get("material_text") or "",
+            provenance=item.get("material_prov"))
+        return n["added"] + n["updated"]
     ext_label = result.source_meta.get("extractor_label", "llm")
     edges = result.edges or []
     conn = db.get_conn()
-    ref = item["material_ref"]
     now_iso = datetime.now(timezone.utc).replace(microsecond=0)
-    count = 0
 
-    if ref.startswith("fact:"):
-        old = store.get_fact(ref[5:])
-        if old is None:
-            return 0
-        if not edges:
-            return 0  # wings 合法判空 (非错误): 旧 fact 保留, mark_done 无升级
-        edge = edges[0]
-        new_id = _put_wings_fact(
-            subject_id=old["subject_id"], predicate=edge.predicate,
-            value=edge.object, object_id=None,
-            provenance=old.get("provenance") or item.get("material_prov"),
-            extractor=ext_label, src_refs=list(old.get("source_refs") or []),
-            sessions=list(old.get("seen_sessions") or []), now=now_iso)
-        store.update_fact_status(old["id"], "superseded", supersedes_id=new_id,
-                                 valid_to=store._now(), reason="upgrade")
-        return 1
-
-    # segment 素材: 边 ADD-only (确定性升级路径, 无矛盾裁判)。
-    for edge in edges:
-        subject = (edge.subject or "").strip()
-        obj = (edge.object or "").strip()
-        if not subject or not obj:
-            continue
-        sid = resolver.resolve_entity(subject, "concept", providers=None)
-        oid = resolver.resolve_entity(obj, "concept", providers=None)
-        if sid is None or oid is None:
-            continue
-        _put_wings_fact(
-            subject_id=sid, predicate=(edge.predicate or "relates_to").strip(),
-            value=obj, object_id=oid,
-            provenance=item.get("material_prov"), extractor=ext_label,
-            src_refs=[], sessions=[], now=now_iso)
-        count += 1
-    return count
+    old = store.get_fact(ref[5:])
+    if old is None:
+        return 0
+    if not edges:
+        return 0  # wings 合法判空 (非错误): 旧 fact 保留, mark_done 无升级
+    edge = edges[0]
+    new_id = _put_wings_fact(
+        subject_id=old["subject_id"], predicate=edge.predicate,
+        value=edge.object, object_id=None,
+        provenance=old.get("provenance") or item.get("material_prov"),
+        extractor=ext_label, src_refs=list(old.get("source_refs") or []),
+        sessions=list(old.get("seen_sessions") or []), now=now_iso)
+    store.update_fact_status(old["id"], "superseded", supersedes_id=new_id,
+                             valid_to=store._now(), reason="upgrade")
+    return 1
 
 
 def _put_wings_fact(*, subject_id: str, predicate: str, value: str,

@@ -359,8 +359,14 @@ def test_hygiene_alias_cap(fresh_db):
 
 def test_no_regex_fallback_in_llm_extract():
     """llm_extract.py 无 regex 回落: **AST 级** import 检查 (不 import
-    extractor/gazetteer) + 'fallback'/'degraded' 降级字样 (红线锁死;
-    AST 级防 docstring 提及误报)。"""
+    extractor/gazetteer) + 无 ExtractFailed 内部吞异常 (红线锁死; AST 级防
+    docstring 提及误报)。
+
+    v1.7⑤ E10 更新: 降级开关上移 autodream._decide_segments (通道分派面),
+    llm_extract 本体仍零回落 — ``CHANNEL_FALLBACK="fallback:auto"`` 只是
+    显式 opt-in 档位常量, extract() 对 ExtractFailed 仍响亮上抛; 默认 llm
+    档断供响亮的行为断言见 test_fallback_lane.py::test_default_llm_
+    channel_stays_loud。"""
     import ast as _ast
     tree = _ast.parse(Path(llm_extract.__file__).read_text(encoding="utf-8"))
     imported = set()
@@ -371,13 +377,20 @@ def test_no_regex_fallback_in_llm_extract():
             imported.add(node.module or "")
     assert "extractor" not in imported, "regex 回落红线: 不得 import extractor"
     assert "gazetteer" not in imported, "regex 回落红线: 不得 import gazetteer"
-    # 代码级降级字样 (剥离 docstring/comment)
-    code_only = "\n".join(
-        line for line in Path(llm_extract.__file__).read_text(
-            encoding="utf-8").splitlines()
-        if not line.lstrip().startswith(("#", '"', "'")))
-    assert "fallback" not in code_only.lower()
-    assert "degraded" not in code_only.lower()
+    # E10 红线: llm_extract 本体不得吞 ExtractFailed (降级决策不在本模块 —
+    # 档位常量存在 ≠ 内部回落)。
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.ExceptHandler):
+            names = set()
+            for sub in _ast.walk(node.type):
+                if isinstance(sub, _ast.Name):
+                    names.add(sub.id)
+                elif isinstance(sub, _ast.Attribute):
+                    names.add(sub.attr)
+            assert "ExtractFailed" not in names, (
+                "E10 红线: llm_extract 不得内部捕获 ExtractFailed (响亮上抛)")
+    # E10: fallback:auto 为显式 opt-in 档位常量 (消费端 autodream 按它开洞)。
+    assert llm_extract.CHANNEL_FALLBACK == "fallback:auto"
 
 
 def test_prompt_version_synced_with_doc():

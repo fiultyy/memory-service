@@ -1,14 +1,18 @@
 """mem-service M5 信号流 — 延迟消费的行为信号 (DR-1 D3 / DR-7 G6 已裁决).
 
 布局 (G6 裁决: 全局单流 + source_cwd 字段隔离 — 不按 cwd 分片目录, 消费时
-过滤, 与 ADR-14 b 方案同构): ``data/signals/*.jsonl``, 五流 append-only
+过滤, 与 ADR-14 b 方案同构): ``data/signals/*.jsonl``, 流 append-only
 (只追加不改写 — 本模块不提供 update/delete API, 纪律即接口)。
 
-    recall_hits      — recall 命中 (M10 改道时写; 唯一本批真实生产者)
-    agent_crud       — agent 四动词 CRUD (M17 未来写入)
-    citations        — 引用记账 (M16 未来写入)
-    confirm_arrivals — confirm 到达 (M17 未来写入)
-    human_proj_ops   — human 投影操作 (M18 未来写入)
+    recall_hits            — recall 命中 (M10 改道时写; 唯一本批真实生产者)
+    agent_crud             — agent 四动词 CRUD (M17 未来写入)
+    citations              — 引用记账 (M16 未来写入)
+    confirm_arrivals       — confirm 到达 (M17 未来写入)
+    human_proj_ops         — human 投影操作 (M18 未来写入)
+    contradiction_pending  — C1b 低通道矛盾挂起轻记录 (v1.7⑤ E7; 七字段
+                             {ref, subject_id, predicate, old_value,
+                             new_value, channel} + 公共 ts/source_cwd;
+                             无 fact 状态变更 — 主径未来重抽同事实时自然裁决)
 
 每条记录公共字段 ``{"ts": ISO8601, "source_cwd": str|null, ...流特有}``;
     ts 自动补 (秒级 ISO, store._now 惯例); 流特有字段 schema 为 [设] 档可调
@@ -25,9 +29,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-# 五流白名单 (防 typo 混写他文件)。
+# 流白名单 (防 typo 混写他文件)。v1.7⑤ E7: + contradiction_pending (C1b
+# 低通道矛盾挂起轻记录 — 勘误钉死落 signals 流, 不建新表)。
 STREAMS = ("recall_hits", "agent_crud", "citations",
-           "confirm_arrivals", "human_proj_ops")
+           "confirm_arrivals", "human_proj_ops", "contradiction_pending")
 
 # 缺省信号目录: <module>/data/signals (与 db._DEFAULT_DB 同布局惯例)。
 # 测试隔离: monkeypatch 本模块 ``_signals_dir`` (函数属性替换)。
@@ -48,7 +53,7 @@ def append(stream: str, record: dict[str, Any]) -> None:
     """追加一条信号 (append-only; 自动补 ts / source_cwd 缺省)。
 
     Args:
-        stream: 五流白名单之一 (否则 ValueError — 防混写)。
+        stream: 流白名单之一 (否则 ValueError — 防混写)。
         record: 流特有字段 + 可选公共字段覆盖 (显式 ts/source_cwd 尊重调用方)。
     """
     _require_stream(stream)

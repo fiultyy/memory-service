@@ -6,8 +6,9 @@
    (adapter/gazetteer 提取调用计数=0)。
 3. M12 时序: dream 到期轮卫生同轮紧随; dream 未到期卫生独立门控; 卫生异常
    不杀 daemon。
-4. M13 门槛: regex(0.4) fact 不入 BFS 扩展; llm(0.7) 入; hop>0 bypass 仅高分
-   邻域生效; 主检索路径 (字面 seed) 不受门槛影响。
+4. M13→v1.7③ M3 软惩罚(终裁): regex(0.4) 邻居 fact 仍经 BFS 扩展入场但排序
+   分乘 gate_mod≈0.7857; llm(0.7) 恒 mod=1.0; hop>0 绕地板对全部扩展 fact
+   生效(折后仍入榜); 主检索路径 (字面 seed) 不受乘子影响。
 
 测试规范: def test_xxx() 函数让 pytest 收集。禁网络/LLM。
 """
@@ -21,8 +22,24 @@ import gazetteer
 import hygiene
 import mem_daemon
 import projection
+import pytest
 import recall as recall_mod
+import scoring
 import store
+
+
+def _base_score(s: dict, query: str) -> float:
+    """verbose 条目的折前公式分 (gate_mod 乘前): 用条目自带的融合输入重算。"""
+    return scoring.score_fact(
+        s["fact"], query,
+        centrality=s["centrality"], vec_sim=s["vec_sim"],
+        bfs_proximity=s["bfs_proximity"],
+    )["score"]
+
+
+def _gate_mod(lif_source: float) -> float:
+    """v1.7③ M3 软惩罚乘子公式 (与 recall.py 实现同式)。"""
+    return 0.5 + 0.5 * min(1.0, lif_source / recall_mod._BFS_SOURCE_GATE)
 
 
 def _fresh(name: str) -> tuple[str, Path]:
@@ -261,39 +278,59 @@ def _bfs_chain(extractor_bc: str, extractor_cd: str):
     return f_bc, f_cd
 
 
-def test_bfs_gate_regex_rejected_llm_admitted():
-    """regex 档 (lif_source 0.4) 邻居 fact 不入 BFS 扩展; llm 档 (0.7) 入。"""
+def test_bfs_gate_regex_penalized_llm_unpenalized():
+    """v1.7③ M3 软惩罚改写(原硬门断言反转, 不静默删): regex 档 (lif_source
+    0.4) 邻居 fact **应在场**且排序分被乘 gate_mod = 0.5+0.5·min(1, 0.4/0.7)
+    ≈0.7857 (钉数值); llm 档 (0.7) 语义不变 mod=1.0 (折前=折后)。"""
     tmp, _ = _fresh("gate1")
     f_bc, f_cd = _bfs_chain("regex", "regex")
-    res = recall_mod.recall("Alpha", use_bfs=True, bfs_hops=2, boost=False)
-    ids = {f["id"] for f in res}
-    assert f_bc not in ids and f_cd not in ids, (
-        f"regex 0.4 档不得经 BFS 扩展入场, got {ids}")
+    res = {s["fact"]["id"]: s for s in recall_mod.recall(
+        "Alpha", use_bfs=True, bfs_hops=2, boost=False, verbose=True)}
+    assert f_bc in res and f_cd in res, (
+        f"regex 0.4 档软惩罚化后仍应在场 (仅排序降权), got {set(res)}")
+    mod_regex = _gate_mod(0.4)
+    assert abs(mod_regex - 0.7857142857142857) < 1e-12, mod_regex
+    for fid in (f_bc, f_cd):
+        s = res[fid]
+        assert s["score"] == pytest.approx(_base_score(s, "Alpha") * mod_regex, abs=1e-12), (
+            f"regex 档 {fid} 折后分应 = 折前公式分×{mod_regex:.6f}, "
+            f"got {s['score']} vs base {_base_score(s, 'Alpha')}")
 
     tmp2, _ = _fresh("gate2")
     f_bc2, f_cd2 = _bfs_chain("llm", "llm")
-    res2 = recall_mod.recall("Alpha", use_bfs=True, bfs_hops=2, boost=False)
-    ids2 = {f["id"] for f in res2}
-    assert f_bc2 in ids2 and f_cd2 in ids2, (
-        f"llm 0.7 档应正常入场 (既有行为), got {ids2}")
+    res2 = {s["fact"]["id"]: s for s in recall_mod.recall(
+        "Alpha", use_bfs=True, bfs_hops=2, boost=False, verbose=True)}
+    assert f_bc2 in res2 and f_cd2 in res2, (
+        f"llm 0.7 档应正常在场 (既有行为), got {set(res2)}")
+    for fid in (f_bc2, f_cd2):
+        s2 = res2[fid]
+        assert s2["score"] == pytest.approx(_base_score(s2, "Alpha"), abs=1e-12), (
+            f"llm 0.7 档 {fid} mod=1.0 折前=折后, got {s2['score']} "
+            f"vs base {_base_score(s2, 'Alpha')}")
     _restore_signals()
 
 
 def test_bfs_gate_mixed_tiers():
-    """混合档: B→C 边 llm (B 的 fact 入场), C→D 边 regex (C 的 fact 拒) —
-    门槛按 fact 自身档位逐条判。"""
+    """混合档 (软惩罚语义): B→C 边 llm (mod=1.0 全额), C→D 边 regex (mod≈0.786
+    折扣) — 乘子按 fact 自身档位逐条算, 两档都在场。"""
     tmp, _ = _fresh("gate3")
     f_bc, f_cd = _bfs_chain("llm", "regex")
-    res = recall_mod.recall("Alpha", use_bfs=True, bfs_hops=2, boost=False)
-    ids = {f["id"] for f in res}
-    assert f_bc in ids, "llm 档邻居 fact 应入场"
-    assert f_cd not in ids, "regex 档邻居 fact 应拒"
+    res = {s["fact"]["id"]: s for s in recall_mod.recall(
+        "Alpha", use_bfs=True, bfs_hops=2, boost=False, verbose=True)}
+    assert f_bc in res, "llm 档邻居 fact 应在场 (mod=1.0)"
+    assert f_cd in res, "regex 档邻居 fact 软惩罚化后应在场 (仅排序降权)"
+    assert res[f_bc]["score"] == pytest.approx(_base_score(res[f_bc], "Alpha"), abs=1e-12), (
+        "llm 档折前=折后")
+    assert res[f_cd]["score"] == pytest.approx(
+        _base_score(res[f_cd], "Alpha") * _gate_mod(0.4), abs=1e-12), (
+        "regex 档应被乘 gate_mod≈0.7857")
     _restore_signals()
 
 
-def test_bfs_bypass_only_within_gated_neighborhood():
-    """hop>0 bypass (绕 0.3 过滤) 仅对过门槛入场者生效: llm 档低分 fact
-    仍被 bypass 召回 (§7 语义保留); regex 档低分 fact 不因 bypass 入图。"""
+def test_bfs_bypass_and_penalty_all_expanded():
+    """hop>0 bypass (软惩罚语义改写): 绕 0.3 地板对全部扩展通道 fact 生效 —
+    llm 档低分 fact mod=1.0 入榜; regex 档低分 fact 折后 (mod≈0.786) **仍绕
+    地板入榜**, 仅排序降权 (不再硬拒出图)。"""
     tmp, _ = _fresh("gate4")
     # B 的 fact: llm 档, match 分极低 (value 与 query 无字面重叠) → 靠 bypass。
     ea = store.put_entity("Alpha", "concept")
@@ -306,38 +343,51 @@ def test_bfs_bypass_only_within_gated_neighborhood():
     f_low_llm = store.put_fact(eb, "runs_on", "zzz qqq xxx", extractor="llm",
                                fact_type="permanent", LIF=0.5, confidence=0.8,
                                object_id=ec, topic="lowmatch llm")
-    # 低分 regex fact: 两端都不沾 seed (沾 seed 会走主路径, 门槛不管主路径)。
+    # 低分 regex fact: 两端都不沾 seed (沾 seed 会走主路径, 乘子不管主路径)。
     f_low_regex = store.put_fact(ec, "depends_on", "yyy www vvv",
                                  extractor="regex", fact_type="permanent",
                                  LIF=0.5, confidence=0.8, object_id=ed,
                                  topic="lowmatch regex")
-    res = recall_mod.recall("Alpha", use_bfs=True, bfs_hops=2, boost=False)
-    ids = {f["id"] for f in res}
-    assert f_low_llm in ids, (
-        f"llm 档扩展 fact 应享 hop>0 bypass (低 match 仍入场): {ids}")
-    assert f_low_regex not in ids, (
-        f"regex 档不得因 bypass 入图: {ids}")
+    res = {s["fact"]["id"]: s for s in recall_mod.recall(
+        "Alpha", use_bfs=True, bfs_hops=2, boost=False, verbose=True)}
+    assert f_low_llm in res, (
+        f"llm 档扩展 fact 应享 hop>0 bypass (低 match 仍入场): {set(res)}")
+    assert res[f_low_llm]["score"] == pytest.approx(
+        _base_score(res[f_low_llm], "Alpha"), abs=1e-12), "llm 档 mod=1.0"
+    assert f_low_regex in res, (
+        f"regex 档折后仍应绕地板入榜 (软惩罚化, 仅排序降权): {set(res)}")
+    assert res[f_low_regex]["score"] == pytest.approx(
+        _base_score(res[f_low_regex], "Alpha") * _gate_mod(0.4), abs=1e-12), (
+        f"regex 档应被乘 gate_mod≈0.7857, got {res[f_low_regex]['score']}")
     _restore_signals()
 
 
-def test_main_retrieval_path_ungated():
-    """主检索路径不受门槛: regex 档 fact 仍可被直接查询召回 (字面 seed 命中
-    其 subject 实体 → 主路径候选, 非 BFS 扩展通道)。"""
+def test_main_retrieval_path_unpenalized():
+    """主检索路径不受乘子 (软惩罚语义改写): regex 档 fact 经字面 seed 主路径
+    召回时 mod=1.0 (折前=折后, A 路零惩罚); 同 fact 经 BFS 扩展通道入场时才
+    被乘 gate_mod≈0.7857 (B 翼专属, 不挂主路径)。"""
     tmp, _ = _fresh("gate5")
     eid = store.put_entity("Zephyr", "concept")
     f_regex = store.put_fact(eid, "is_a", "zephyr tool fact", extractor="regex",
                              fact_type="permanent", LIF=0.5, confidence=0.8,
                              topic="zephyr")
-    res = recall_mod.recall("Zephyr", boost=False)
-    ids = {f["id"] for f in res}
-    assert f_regex in ids, (
-        f"主路径 (字面 seed) 不得受 BFS 门槛影响: {ids}")
-    # 对照: 同 fact 经 BFS 扩展通道 (从别的 seed 走图过来) 被拒。
+    res = {s["fact"]["id"]: s for s in recall_mod.recall(
+        "Zephyr", boost=False, verbose=True)}
+    assert f_regex in res, (
+        f"主路径 (字面 seed) 不得受 BFS 乘子影响: {set(res)}")
+    assert res[f_regex]["score"] == pytest.approx(
+        _base_score(res[f_regex], "Zephyr"), abs=1e-12), (
+        "主路径 regex 档 fact 不得被乘 gate_mod (A 路分数逐字不变)")
+    # 对照: 同 fact 经 BFS 扩展通道 (从别的 seed 走图过来) → B 翼, 被乘 gate_mod。
     ea = store.put_entity("AnchorEnt", "concept")
     store.put_fact(ea, "uses", "AnchorEnt uses Zephyr", extractor="llm",
                    fact_type="permanent", LIF=0.5, confidence=0.8,
                    object_id=eid, topic="anchor")
-    res2 = recall_mod.recall("AnchorEnt", use_bfs=True, bfs_hops=2, boost=False)
-    ids2 = {f["id"] for f in res2}
-    assert f_regex not in ids2, "同 fact 经扩展通道必须被门槛拒"
+    res2 = {s["fact"]["id"]: s for s in recall_mod.recall(
+        "AnchorEnt", use_bfs=True, bfs_hops=2, boost=False, verbose=True)}
+    assert f_regex in res2, (
+        f"软惩罚化后扩展通道 regex 档仍应在场: {set(res2)}")
+    assert res2[f_regex]["score"] == pytest.approx(
+        _base_score(res2[f_regex], "AnchorEnt") * _gate_mod(0.4), abs=1e-12), (
+        f"扩展通道 regex 档应被乘 gate_mod≈0.7857, got {res2[f_regex]['score']}")
     _restore_signals()

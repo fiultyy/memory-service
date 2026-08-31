@@ -89,13 +89,14 @@ $ python3 cli.py ingest "用户使用 rust 进行开发"
 ### 2. `recall` / `mem recall` — KG 加权召回 Fact
 
 ```bash
-mem recall "<query>" [--verbose] [--vector] [--bfs] [--as-of <ts>] [--cwd <cwd>] [--session <sid>] [--top-k <n>]
+mem recall "<query>" [--verbose] [--vector] [--bfs] [--gate|--no-gate] [--as-of <ts>] [--cwd <cwd>] [--session <sid>] [--top-k <n>]
 ```
 
 - 加权召回(ADR-4v2): `score = α·match + β·centrality + γ·LIF + δ·vec_sim`——字面匹配 + PageRank 中心性 + LIF 信任标量 + 向量相似度
 - `query` 经分词后 `entity.name LIKE %token%` 定位 seed 实体 → 其 subject/object 的 Fact 为候选集
 - `--vector`: 向量召回融合(ADR-13,解同义/改写/字面盲区)
-- `--bfs`: BFS 图遍历召回(D5,召回图近但字面/向量远的 fact);`--bfs-hops`(默认 2)/`--bfs-scoped`(限本 cwd 图)。**入图门槛**: BFS 扩展通道入场的 fact 需 `lif_source≥0.7`(占位 regex 0.4 档不进扩展;主检索路径不受影响)
+- `--bfs`: BFS 图遍历召回(D5,召回图近但字面/向量远的 fact);`--bfs-hops`(默认 2)/`--bfs-scoped`(限本 cwd 图)。**软惩罚**(v1.7③ M3 终裁): B 翼扩展 fact 全部入场,排序分乘 `gate_mod=0.5+0.5·min(1, lif_source/0.7)`(regex 0.4 档≈0.786 折,≥0.7 档不打折);折后分仍绕 0.3 噪音地板入榜,仅排序降权;主检索路径(A 路)不受乘子影响
+- `--gate`(默认开,`--no-gate` 逃生): v1.7③ 对 B 翼扩展 fact 跑单 LLM 一致性 gate(query 自动升格 `{keywords, intent, scope:"manual"}`,与注入面同一 gate schema 零分叉)。判 keep 的 fact 附 `gate_keep:true`+`match_score` 键;判不匹配或 gate LLM 不可用(断供/超时/两轮 schema 败)→ **B 翼全部不入返回,只返回 A 路**(不降级不静默当 keep,recall 不炸)。手动面 match_score 不入 gate_score 解锁累计(防 CLI 探测污染账本)
 - `--as-of`: 点时召回(bi-temporal,只返回 `valid_from<=t<valid_to` 的 fact)
 - `--cwd`: ADR-14 过滤 source_cwd(本 cwd fact + NULL 老数据;默认全 cwd)
 - `--verbose`: 每条 Fact 追加 `_scored`/`_subject_name`/`_object_name` 调试字段

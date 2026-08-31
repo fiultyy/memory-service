@@ -263,6 +263,13 @@ def _merge_group(group: list[dict[str, Any]]) -> int:
     ``source_refs`` is also absorbed; the rest flip to ``status='superseded'``
     pointing at the survivor. Returns count merged.
 
+    v1.7④ E4 dedup merge 证据保全 (grill v4 修复 + 勘误 N4): UPDATE 列在
+    source_refs 之外补 ``seen_sessions`` / ``extract_sessions`` 并集 (同待
+    遇 union, 防 dedup 吞掉分账证据 — extract_sessions 是冷启动解锁判据的
+    唯一输入); ``extractor`` 改写为 **group 内最高档** (按
+    :data:`scoring.SOURCE_WEIGHT` human0.9>vote0.85>llm0.7>regex0.4, 非固定
+    升 llm — N4: 信任就高不就低, 防 regex 过滤规则错杀 llm 证据)。
+
     Idempotent: already-superseded dups fall out of the active group on the next
     pass; a re-merge of a single-member group is a no-op.
     """
@@ -287,11 +294,29 @@ def _merge_group(group: list[dict[str, Any]]) -> int:
         + w["source"] * new_source
     )))
 
+    # E4 N4: extractor 取 group 内最高档 (同档保 survivor 原值 — 严格大于才
+    # 换, 确定性; 缺档 extractor 按 regex 0.4 兜底)。
+    new_extractor = survivor.get("extractor") or "regex"
+    best_w = scoring.SOURCE_WEIGHT.get(new_extractor, 0.4)
+    for f in group:
+        ext = f.get("extractor") or "regex"
+        w_ext = scoring.SOURCE_WEIGHT.get(ext, 0.4)
+        if w_ext > best_w:
+            new_extractor, best_w = ext, w_ext
+
     new_refs: list[str] = list(survivor["source_refs"])
+    new_seen: list[str] = list(survivor.get("seen_sessions") or [])
+    new_extract: list[str] = list(survivor.get("extract_sessions") or [])
     for dup in group[1:]:
         for ref in dup["source_refs"]:
             if ref not in new_refs:
                 new_refs.append(ref)
+        for s in (dup.get("seen_sessions") or []):
+            if s not in new_seen:
+                new_seen.append(s)
+        for s in (dup.get("extract_sessions") or []):
+            if s not in new_extract:
+                new_extract.append(s)
         # ponytail: no transaction — single-writer cli, crash leaves at worst a
         # half-merged group re-runnable on next consolidate (idempotent: already
         # superseded dups fall out of the active group next pass).
@@ -302,11 +327,16 @@ def _merge_group(group: list[dict[str, Any]]) -> int:
     conn.execute(
         """UPDATE fact SET
                LIF = ?, lif_freq = ?, lif_recency = ?, lif_spread = ?,
-               lif_coherence = ?, lif_source = ?, source_refs = ?
+               lif_coherence = ?, lif_source = ?, source_refs = ?,
+               extractor = ?, seen_sessions = ?, extract_sessions = ?
            WHERE id = ?""",
         (
             new_lif, new_freq, new_recency, new_spread, new_coherence, new_source,
-            json.dumps(new_refs, ensure_ascii=False), survivor_id,
+            json.dumps(new_refs, ensure_ascii=False),
+            new_extractor,
+            json.dumps(new_seen, ensure_ascii=False),
+            json.dumps(new_extract, ensure_ascii=False),
+            survivor_id,
         ),
     )
     return merged

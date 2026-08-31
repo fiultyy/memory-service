@@ -13,7 +13,11 @@ Top seam is the cli module (Spec §6): both ``cli.ingest(...)`` (Python) and
   recall deferred — ADR-4, Spec Defer).
 - consolidate: dedup skeleton, no decay (Spec §4 story 4; Node D owns depth).
 
-No ``query`` subcommand (debug via ``recall --verbose`` or sqlite3 — Spec §3).
+No standalone ``query`` subcommand — ``recall`` IS the query surface (debug
+detail via ``--verbose``, stable contract via ``--json``; v1.7③: ``--gate``
+默认开, ``--no-gate`` 逃生 — query 自动升格 gate 请求三字段
+``{keywords, intent, scope:"manual"}`` 并对 BFS 扩展 (B 翼) fact 跑单 LLM
+一致性 gate; 手动面 match_score 不入解锁累计, v7 三句之三).
 """
 
 from __future__ import annotations
@@ -308,7 +312,9 @@ def recall(query: str, verbose: bool = False,
            use_bfs_scoped: bool = False,
            as_json: bool = False,
            min_score: float | None = None,
-           project: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
+           project: bool = False,
+           use_gate: bool = False,
+           gate_provider=None) -> list[dict[str, Any]] | dict[str, Any]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
     Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
@@ -321,12 +327,20 @@ def recall(query: str, verbose: bool = False,
     更小); default off 保持全局图(ADR-14 单体 KG 跨 cwd 共享)。
     ``as_json=True`` (M15a) 输出稳定 JSON 契约 shape: ``{"query", "facts":
     [structured...]}`` — 见 :func:`_json_contract_facts` (字段名即 ABI)。
+    ``use_gate=True`` (v1.7③, CLI ``--gate`` 默认开): query 自动升格三字段
+    {keywords=确定性实体提取, intent=原文, scope:"manual"} 并对 B 翼 fact 跑
+    单 LLM gate — 输出与注入面同一 gate schema 零分叉; **本 wrapper 即手动面**,
+    恒以 ``gate_account=False`` 下传 (v7 三句之三: 手动面 match_score 不入
+    gate_score 解锁累计, 防 CLI 探测污染账本; recall boost 记账路径照旧)。
+    ``gate_provider``: gate LLM 依赖注入 seam (照 recall.recall 同名参数;
+    测试零网络注入 mock; argv 面不暴露 flag, key 走 env)。
     """
     result = recall_mod.recall(query, verbose=verbose, session_id=session_id,
                                boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
                                with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops,
                                as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped,
-                               min_score=min_score)
+                               min_score=min_score, use_gate=use_gate,
+                               gate_account=False, gate_provider=gate_provider)
     if project:
         # M18: 召回正文 → recall-<DATE>.md + MEMORY.md 索引行 (用户裁决 2026-08-27)。
         # dir = cc_memory_dir(--cwd 或 $PWD); 空命中不投影(不写空日志)。报告走
@@ -670,6 +684,12 @@ def _main(argv: list[str] | None = None) -> int:
     rec.add_argument("--project", action="store_true",
                      help="M18: 召回正文投影 recall-<DATE>.md + MEMORY.md 索引行 "
                           "(dir = cc_memory_dir(--cwd 或 $PWD); 空命中不投影)")
+    rec.add_argument("--gate", dest="gate", action="store_true", default=True,
+                     help="v1.7③: 对 BFS 扩展(B 翼) fact 跑单 LLM 一致性 gate "
+                          "(query 自动升格 {keywords, intent, scope:manual}; "
+                          "默认开 — N3 选 a: 手动=低频高价值, 保③硬约束)")
+    rec.add_argument("--no-gate", dest="gate", action="store_false",
+                     help="逃生: 关闭 --gate (纯公式路, 零 LLM 依赖)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -790,7 +810,7 @@ def _main(argv: list[str] | None = None) -> int:
         ))
     elif args.cmd == "recall":
         session_id = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
-        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped, as_json=args.json, project=args.project)
+        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped, as_json=args.json, project=args.project, use_gate=args.gate)
         # ADR-4 bfs hint: direct-match 薄且未开 --bfs → stderr 提示(不污染 stdout 机器输出)。
         # 结果数 < 阈值代理 direct-match 薄(候选少 → 命中少); suggest_bfs 字段在 envelope
         # (with_tag) 里有, 但 cli 走结果数自判覆盖 list/verbose 全 path。

@@ -3,7 +3,8 @@
 覆盖:
 1. 命中注入 → additionalContext 整体包 <memsvc-recall> 标记块 (LLM 可读,
    harness 不解释=零适配器), 且该 ctx 被 corpus_prep 五 harness 整块剥净
-   (闭环: 打标面 = 清洗面)。
+   (闭环: 打标面 = 清洗面); v1.7⑤a 全降级块加 quality="fallback" 属性 +
+   块顶警示, 属性被清洗面通配吸收。
 2. prompt 未指名已知实体 → 零输出 (既有精度门, 回归锚)。
 3. 预算扣除包裹开销后条目照常注入 (MAX_BYTES 承诺不破)。
 
@@ -50,10 +51,16 @@ def test_additional_context_wrapped_in_memsvc_recall_marker(monkeypatch):
     monkeypatch.setattr(sys, "stdout", out)
     assert ri.main() == 0
     ctx = json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
-    assert ctx.startswith("<memsvc-recall>") and ctx.endswith("</memsvc-recall>")
+    # v1.7⑤a: stub facts 未带 extractor 键 = 保守按 fallback 档 (extractor
+    # 缺省即 regex 档, 与 fact 表列默认一致) → 全降级块打 quality 属性 +
+    # 块顶警示; 包裹不变式仍以 <memsvc-recall 开头、</memsvc-recall> 结尾。
+    assert ctx.startswith('<memsvc-recall quality="fallback">')
+    assert ctx.endswith("</memsvc-recall>")
+    assert "[warning]" in ctx and "未经主径 LLM 验证" in ctx
     assert "## Memory recall (auto, 2 hits)" in ctx
     assert "结论 0" in ctx and "[0.42]" in ctx
-    # 闭环: 打标面 = 清洗面 — 五 harness 剥完都是空 (语料重进不重入库)
+    # 闭环: 打标面 = 清洗面 — 五 harness 剥完都是空 (语料重进不重入库;
+    # quality 属性被 corpus_prep 开标签通配吸收, 清洗面零改动)
     from corpus_prep import HARNESSES, clean
     for h in HARNESSES:
         assert clean(ctx, h) == "", h

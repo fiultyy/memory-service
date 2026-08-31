@@ -8,6 +8,7 @@ Fact.source_refs.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import uuid
@@ -546,6 +547,38 @@ def update_fact_status(fact_id: str, status: str, supersedes_id: str | None = No
         # perf/vec-index: 非活跃 (superseded/deprecated/deleted) → 删 vec_fact
         # 行保持一致 (查询面另有 active 过滤兜底, 双保险)。
         vec_index.delete_fact(fact_id)
+
+
+def unlock_match_score_cap() -> float:
+    """v1.7③ N2: gate_score 累计解锁阈值/封顶 (env ``MEM_UNLOCK_MATCH_SCORE``,
+    默认 2.0)。累计语义 = 求和且达阈值即封顶; 暂缓期只写不读, 默认值不敏感。
+    非法 env 值回落默认 (不可考不臆测)。
+    """
+    try:
+        return float(os.environ.get("MEM_UNLOCK_MATCH_SCORE", "2.0"))
+    except (TypeError, ValueError):
+        return 2.0
+
+
+def bump_gate_score(fact_id: str, delta: float, conn=None) -> float | None:
+    """v1.7③ N2: gate keep 的 match_score 累计入 ``fact.gate_score`` —
+    求和且达解锁阈值 (:func:`unlock_match_score_cap`) 封顶。
+
+    暂缓期**只写不读**: 不进 cli ``_JSON_FACT_FIELDS``, 解锁消费端是 ④ 的
+    后续活。写入时机仅限 gate 实际运行且 keep (recall.py gate 块);
+    CLI 手动 --gate 面**不调**本函数 (v7 三句之三: 防 CLI 探测污染账本)。
+
+    Returns:
+        写入后的累计值; fact 不存在返回 None (无行不造行)。
+    """
+    c = conn if conn is not None else db.get_conn()
+    row = c.execute("SELECT gate_score FROM fact WHERE id = ?", (fact_id,)).fetchone()
+    if row is None:
+        return None
+    cur = float(row["gate_score"] or 0.0)
+    new = min(unlock_match_score_cap(), cur + float(delta))
+    c.execute("UPDATE fact SET gate_score = ? WHERE id = ?", (new, fact_id))
+    return new
 
 
 def _decode_session_list(row: Any, key: str) -> list[str]:

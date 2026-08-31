@@ -75,6 +75,38 @@ def enqueue_segment(transcript_path: str, seg_index: int, text: str,
                    text=text, material_prov=provenance)
 
 
+# v1.7⑤ E7 C1b: 矛盾段专用 material_ref 前缀 — 与普通 segment: 段分流,
+# 消费端 (dream) 据此前缀走 autodream 决策管道重跑; done/dead 冻结语义
+# (enqueue 幂等冻结) 对该前缀不适用 — 放行重入 (复活位实现定稿 = enqueue
+# 放行 segcontra 重入, 复用队列, 不建 revive API / 不加列)。
+CONTRA_PREFIX = "segcontra"
+
+
+def enqueue_contra_segment(transcript_path: str, seg_index: int, text: str,
+                           provenance: str | None = None) -> str | None:
+    """E7 矛盾段复活入队 (material_ref 前缀 ``segcontra:``)。
+
+    与 :func:`enqueue_segment` 的差异只在重入语义: 同 ref 已 pending/in_flight
+    → 幂等 no-op 返 None (同前); 已 done/dead → **放行重入**: 复位 pending +
+    attempts 归零 (矛盾段复活 = 新一轮主径裁决, 非失败重试 — 冻结语义对矛盾
+    段不适用, 勘误 N1 钉死)。调用方 (autodream C1b NOOP 分支) 不受 _queue_on
+    门控 — llm 通道开洞。"""
+    conn = db.get_conn()
+    ref = f"{CONTRA_PREFIX}:{transcript_path}#seg{seg_index}"
+    existing = conn.execute(
+        "SELECT id, status FROM upgrade_queue WHERE material_ref = ?",
+        (ref,)).fetchone()
+    if existing is not None:
+        if existing["status"] in ("done", "dead"):
+            conn.execute(
+                "UPDATE upgrade_queue SET status='pending', attempts=0, "
+                "updated_at=? WHERE id=?", (_now(), existing["id"]))
+            return existing["id"]
+        return None  # pending/in_flight: 幂等拒重
+    return enqueue(ref, transcript_path=transcript_path, byte_offset=seg_index,
+                   text=text, material_prov=provenance)
+
+
 def enqueue_fact(fact_id: str, *, subject: str, predicate: str, obj: str,
                  provenance: str | None = None) -> str | None:
     """M6 wire 点: 占位 fact (extractor='regex') 落库后待升级项入队。

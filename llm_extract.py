@@ -49,19 +49,28 @@ ENTITY_TYPES = frozenset({
 # uncertain。校验宽松: 表外值收 None (元数据面非正确性面, 不整体拒重试)。
 TASK_OUTCOMES = frozenset({"success", "partial", "fail", "uncertain"})
 
-# 抽取通道门禁 (§2.1): llm 默认 | regex 遗留可显式重开。读取函数供测试 pin。
+# 抽取通道门禁 (§2.1): llm 默认 | regex 遗留可显式重开 | fallback:auto (v1.7⑤
+# E10 显式 opt-in 降级档) = llm 主径 + ExtractFailed 自动切 regex 兜底链。
 CHANNEL_LLM = "llm"
 CHANNEL_REGEX = "regex"
+CHANNEL_FALLBACK = "fallback:auto"
 
 
 def extract_channel() -> str:
     """当前抽取通道 (env ``MEM_EXTRACT_CHANNEL``, 默认 ``llm``)。
 
+    - ``llm`` — LLM 直抽主径, 失败响亮上抛 (无降级红线, 默认档不变)。
+    - ``regex`` — 遗留占位通道 (词典+regex 三路) 显式重开。
+    - ``fallback:auto`` — v1.7⑤ ⑤兜底 lane (显式 opt-in): = llm 主径,
+      :class:`ExtractFailed` (含 ProviderCallError 网络检测, 见 :func:`extract`)
+      时由 autodream 调度自动切 regex 兜底链 + 降级标记 (产物 extractor=regex,
+      lif_source 0.4 — 编排者裁决: 不加 SOURCE_WEIGHT 新键)。
+
     未知值 → ``llm`` (默认档; 响亮默认优于响亮崩溃 — 门禁拼错重开 regex
     是危险方向, 落回主径安全)。
     """
     v = (os.environ.get("MEM_EXTRACT_CHANNEL") or "").strip().lower()
-    return v if v in (CHANNEL_LLM, CHANNEL_REGEX) else CHANNEL_LLM
+    return v if v in (CHANNEL_LLM, CHANNEL_REGEX, CHANNEL_FALLBACK) else CHANNEL_LLM
 
 
 # ── prompt (资产版本化: docs/llm-extract-prompt.md 是唯一权威文本) ────
@@ -456,4 +465,5 @@ def extract(segment: str, provider=None) -> Extraction:
 __all__ = ["extract", "validate", "extract_channel", "ExtractFailed",
            "SchemaViolation", "PREDICATES", "ENTITY_TYPES", "PROMPT_VERSION",
            "TASK_OUTCOMES",
-           "CHANNEL_LLM", "CHANNEL_REGEX", "MAX_SEGMENT_CHARS"]
+           "CHANNEL_LLM", "CHANNEL_REGEX", "CHANNEL_FALLBACK",
+           "MAX_SEGMENT_CHARS"]

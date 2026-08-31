@@ -26,6 +26,28 @@ Idempotent by construction: re-running on the same transcript (no wall-clock
 progress, no new extraction delta) yields ``{added:0, updated:0, deleted:0,
 noop:N}`` — the acceptance contract.
 
+v1.7④⑤ 本车道增量 (LIF 分账 + 冷启动 D6 双窗口 + 无LLM兜底 lane):
+
+- **E3 分账 stamp**: 主径 llm 通道触发 UPDATE 时 session 追加进
+  ``extract_sessions`` (seen_sessions 照旧); bootstrap 通道
+  (session_id=``memory:<file>#<ci>``) 的 stamp 值统一虚拟会话 ``"self"``
+  (两列), session_id 本体只进 source_refs 溯源 (勘误读法一)。
+- **E5 解锁判据** ``len(extract_sessions)>=2`` 与 **D6 双窗口门**
+  ``MEM_COLDSTART_UNLOCK`` (默认 0=暂缓期: 分账列只写不读, 刷新面跑旧 LIF
+  规则) — 判据/门/毕业语义权威定义在 ``scoring.py`` 头部注释块。
+- **D6 切换程序** (一次性运维, 不建代码): 设 ``MEM_COLDSTART_UNLOCK=1``
+  (D6 投影回声指纹完成后) + 一次性 SQL 清零分账列重计
+  (``UPDATE fact SET extract_sessions = '[]';`` 防暂缓期污染合法化)。
+- **E6 C1a**: regex 通道 (含 fallback:auto 降级链) 复现同 (s,p,v) 不入
+  extract_sessions — 单通道凑不满解锁。
+- **E7 C1b 通道门槛**: 顶替者信任严格低于被处决者 (regex 档证据 vs llm 档
+  fact) → NOOP + ``contradiction_pending`` 信号轻记录 + 矛盾段
+  ``segcontra:`` 前缀复活入队 (待主径重抽仲裁); 反向与同档 supersede 照旧。
+- **E10 fallback:auto**: llm 主径 + ExtractFailed 自动切 regex 兜底链
+  (显式 opt-in 档; 默认 llm 档断供仍响亮上抛 — 断供红线不变)。
+- **④ 低初值**: 主径 llm brand-new ADD 显式 ``lif_source=0.4`` (待验证,
+  写侧立即生效); regex 产物本就 0.4 不动。
+
 Returns ``{"added", "updated", "deleted", "noop"}``.
 """
 
@@ -38,6 +60,7 @@ from typing import Any
 import consolidate as consolidate_mod
 import db
 import gazetteer
+import signals as signals_mod
 import store
 import resolver
 import upgrade
@@ -220,6 +243,12 @@ def _build_segments(blocks: list[tuple[str, str]],
 
 
 
+def _is_bootstrap_session(session_id: str | None) -> bool:
+    """v1.7④ E3: bootstrap 通道判定 — init_memory 以合成 transcript 喂
+    autodream, session_id = ``memory:<file>#<ci>`` (bootstrap.py:78/:142)。"""
+    return bool(session_id) and session_id.startswith("memory:")
+
+
 def _find_active_fact(subject_id: str, predicate: str, value: str) -> dict[str, Any] | None:
     """Lookup a Fact by exact (subject_id, predicate, value).
 
@@ -365,7 +394,10 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     # 仅 regex 通道 (休眠中) 保留。
     from llm_extract import extract_channel as _extract_channel
     from llm_extract import CHANNEL_REGEX as _CH_REGEX
-    use_regex_channel = _extract_channel() == _CH_REGEX
+    from llm_extract import CHANNEL_FALLBACK as _CH_FALLBACK
+    _channel = _extract_channel()
+    use_regex_channel = _channel == _CH_REGEX
+    use_fallback_auto = _channel == _CH_FALLBACK
     _queue_on = use_regex_channel
     for seg_idx, full_text in (truncated_segs if _queue_on else []):
         prov_of_seg = segments[seg_idx][0] if seg_idx < len(segments) else None
@@ -373,6 +405,71 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                                 provenance=prov_of_seg)
     # M6: providers 仅供 contradiction judge (显式传入才生效); 主径提取零 LLM,
     # 不再 default_providers() 自取。
+    active_providers = list(providers) if providers else []
+    return _decide_segments(
+        [(prov, text) for prov, text in segments],
+        session_id=session_id,
+        providers=active_providers,
+        fact_type=fact_type,
+        source_cwd=source_cwd,
+        transcript_path=transcript_path,
+        use_regex_channel=use_regex_channel,
+        use_fallback_auto=use_fallback_auto,
+        allow_enqueue=True,
+    )
+
+
+def rerun_segment(text: str, *, provenance: str | None = None,
+                  providers: list | None = None, fact_type: str = "stable",
+                  source_cwd: str | None = None) -> dict[str, int]:
+    """v1.7⑤ E11/N1: 升级队列 segment:/segcontra: 素材 → **autodream 决策
+    管道重跑** (dream 消费端分流入口)。
+
+    矛盾 judge + C1b 通道门槛在场 — 非 dream._apply_upgrade 的 ADD-only
+    直写 (会把待裁决固化成共存双事实, 勘误 N1)。主径恢复 (llm 档) 时 sweep
+    补抽经此转正 (产物 extractor=llm); regex/fallback 通道经此走词典链 +
+    通道门槛。素材已在队列 → 不重入队 (allow_enqueue=False, 重入队自身
+    material_ref 无意义)。单进程假设成立, 失败由消费端 revert → pending
+    (attempts 不烧)。"""
+    from llm_extract import CHANNEL_REGEX as _CH_REGEX
+    from llm_extract import CHANNEL_FALLBACK as _CH_FALLBACK
+    from llm_extract import extract_channel as _extract_channel
+    _channel = _extract_channel()
+    return _decide_segments(
+        [(provenance or "system", text)],
+        session_id=None,
+        providers=list(providers) if providers else [],
+        fact_type=fact_type,
+        source_cwd=source_cwd,
+        transcript_path=None,
+        use_regex_channel=(_channel == _CH_REGEX),
+        use_fallback_auto=(_channel == _CH_FALLBACK),
+        allow_enqueue=False,
+    )
+
+
+def _decide_segments(
+    seg_list: list[tuple[str | None, str]],
+    *,
+    session_id: str | None,
+    providers: list,
+    fact_type: str,
+    source_cwd: str | None,
+    transcript_path: str | None,
+    use_regex_channel: bool,
+    use_fallback_auto: bool,
+    allow_enqueue: bool,
+) -> dict[str, int]:
+    """逐段提取 (通道分派) + Phase c 增量决策 (ADD/UPDATE/supersede/NOOP)。
+
+    ``seg_list`` = [(provenance, seg_text)]。通道分派: regex 档直走 gazetteer
+    占位链; llm/fallback:auto 走 LLM 直抽 — fallback:auto 档
+    :class:`ExtractFailed` 自动切 regex 兜底链 + 降级标记 (E10, 默认 llm 档
+    仍响亮上抛); 降级段零产出时 C 层语义兜底与 A 层入队照 regex 档在场
+    (⑤ 链 ①②③ 档; embedding 同挂时 C 层内部静默跳过 = 仅①③档)。
+    ``allow_enqueue=False`` (队列重跑入口) 时 A 层不重入队。
+    """
+    import llm_extract as llm_extract_mod
     active_providers = list(providers) if providers else []
     # 分段提取 + 三级空产出时序 (追加 A/C): 段提取零产出 →
     #   C 层 (零 LLM 兜底): CJK span 批量 embed → vec_entity ANN ≥0.45 →
@@ -384,31 +481,38 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     # wings 判「无事实」→ 合法 done, attempts≥3 封顶防重复浪费。
     seg_results: list[tuple[str, Any, str]] = []  # (prov, result, seg_text D-B b)
     seg_to_enqueue: list[tuple[int, str, Any]] = []
-    # batch 12 抽取通道门禁: MEM_EXTRACT_CHANNEL=llm (默认) → LLM 直抽主径
-    # (llm_extract, glm-5-turbo, 结构化 JSON + schema 校验, 失败响亮);
-    # =regex → 遗留占位通道 (词典+regex 三路, 暂闭但代码保留可开)。
-    # B 路语义链接与 resolver 不属于 regex 通道 — 两档下实体解析照常工作。
-    # LLM 通道零产出/失败语义: 提取异常上抛 (bootstrap 记 skip+errors,
-    # 绝不回落 regex); 队列入队已由上方 _queue_on 门控 (llm 通道停)。
-    import llm_extract as llm_extract_mod
-    for seg_idx, (seg_prov, seg_text) in enumerate(segments):
+    seg_degraded: set[int] = set()  # fallback:auto 下已降级 regex 兜底链的段
+    for seg_idx, (seg_prov, seg_text) in enumerate(seg_list):
         if use_regex_channel:
             result = gazetteer.extract(seg_text)
         else:
-            result = llm_extract_mod.extract(seg_text)  # 失败 ExtractFailed 上抛 (无降级红线)
-        if use_regex_channel and not result.entities and not result.edges:
+            try:
+                result = llm_extract_mod.extract(seg_text)  # 失败 ExtractFailed 上抛 (无降级红线)
+            except llm_extract_mod.ExtractFailed:
+                if not use_fallback_auto:
+                    raise  # 默认 llm 档: 响亮上抛不静默降级 (断供红线不变)
+                # v1.7⑤ E10: 显式 opt-in 降级档 — 自动切 ① 词典+regex 三路
+                # 兜底链, 产物 extractor=regex (lif_source 0.4, 编排者裁决:
+                # 不加 SOURCE_WEIGHT 新键) = fallback 来源降级标记。
+                seg_degraded.add(seg_idx)
+                result = gazetteer.extract(seg_text)
+        regex_lane = use_regex_channel or (seg_idx in seg_degraded)
+        if regex_lane and not result.entities and not result.edges:
             # C 层: 语义兜底实体声明 (与 B 共用 _link_spans 管道)。防御性
             # 兜底 — B 路在 extract 内对可语义命中的段恒先命中 (FINDING
             # c9: 对可命中段本分支不可达; 保留作 B 未覆盖形态的保险)。
+            # embedding 也挂 → 内部静默跳过 (⑤ 降级三档: 仅①③档)。
             c_ents = gazetteer.semantic_fallback_hits(seg_text)
             if c_ents:
                 result.entities = c_ents  # 实体声明接管; edges 保持空
-        if not result.edges and _queue_on:
+        if not result.edges and allow_enqueue and (
+                use_regex_channel or (use_fallback_auto and seg_idx in seg_degraded)):
             # A 层: 全文入队 — **与实体来源无关** (两档通道命中实体但无数
             # 谓词边的段同样语义内容未提, 皆入 A; FINDING c9 根因修复)。
             # 幂等由 enqueue 的 material_ref 拒重保证 (c10)。
-            # llm 通道 _queue_on=False: LLM 已看过全文没抽出边, 再喂 wings
-            # 是重复花钱 → 不入队 (队列退役清理 2026-08-27)。
+            # llm 通道: LLM 已看过全文没抽出边, 再喂 wings 是重复花钱 →
+            # 不入队 (队列退役清理 2026-08-27); fallback:auto 仅降级段入队
+            # (主径没看过这段 — 主径恢复后 sweep 补抽转正, ⑤链③档)。
             seg_to_enqueue.append((seg_idx, seg_text, seg_prov))
         # D-B b: seg_text 随产出下传 — Phase c 边处理时喂 dedupe 裁判
         # (名字族相关性 ≠ 同一性, "A 基于 B" 关系句是非同一性铁证)。
@@ -420,27 +524,17 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     if seg_to_enqueue:
         import embedding as embedding_mod
         import surprise as surprise_mod
-        embedding_mod.embed_batch(
-            [surprise_mod.novelty_sample(t) for _, t, _ in seg_to_enqueue])
+        try:
+            embedding_mod.embed_batch(
+                [surprise_mod.novelty_sample(t) for _, t, _ in seg_to_enqueue])
+        except Exception as exc:
+            # v1.7⑤ E12 N6: "embedding 也挂"档 embed raise → try/except 降级
+            # (novelty 退化为空向量入队), 不得炸 :319 单事务/消费循环。
+            print(f"AUTODREAM-WARN: embed_batch 预热失败 (novelty 降级): "
+                  f"{type(exc).__name__}: {exc}", flush=True)
         for seg_idx, seg_text, seg_prov in seg_to_enqueue:
-            upgrade.enqueue_segment(transcript_path, seg_idx, seg_text,
+            upgrade.enqueue_segment(transcript_path or "", seg_idx, seg_text,
                                     provenance=seg_prov)
-
-    # Initial 5-dim LIF at ingest (ADR-8v2): distinct_sessions=1 when session_id
-    # present (fact's seen_sessions starts with it). coherence=1.0 (no siblings
-    # queried; consolidate recomputes authoritatively).
-    import scoring as scoring_mod
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-
-    src_ref = f"session:{session_id}" if session_id else None
-    added = updated = deleted = noop = 0
-
-    # batch 13 谓词聚边 (用户裁决 2026-08-27: 开放词汇 + 近似度聚类 + 词频
-    # 统计): 段提取完成后、Phase c 增量决策前 — 去重/supersede 比较必须发生
-    # 在 canonical 谓词上 (同义异名谓词一跑内互躲去重)。「最后」位置 = 最后
-    # 的提取后步骤 / 第一个持久化前步骤。fact.predicate=canonical,
-    # raw_predicate=原文; registry 计数 = 词频统计机制。
     _raw_preds = [e.predicate for _p, _r, _t in seg_results for e in _r.edges]
     _canon_map: dict[str, str] = {}
     if _raw_preds:
@@ -453,6 +547,21 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
             print(f"AUTODREAM-WARN: predgate.cluster 失败, 谓词未聚边: "
                   f"{_raw_preds[:3]}…", flush=True)
             _canon_map = {}
+
+    # Initial 5-dim LIF at ingest (ADR-8v2): distinct_sessions=1 when session_id
+    # present (fact's seen_sessions starts with it). coherence=1.0 (no siblings
+    # queried; consolidate recomputes authoritatively).
+    import scoring as scoring_mod
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    src_ref = f"session:{session_id}" if session_id else None
+    # v1.7④ E3: bootstrap 通道 (session_id="memory:<file>#<ci>" 合成段) 的
+    # 两列 stamp 值统一虚拟会话 "self" — 同一 init_memory 全批同源, 解锁判据
+    # 天然 len=1 封顶不可凑; session_id 本体只进 source_refs 溯源不断链
+    # (勘误读法一)。非 bootstrap: stamp 值 = session_id 本身。
+    stamp_session = "self" if _is_bootstrap_session(session_id) else session_id
+    added = updated = deleted = noop = 0
 
     # Phase c — incremental decision per edge, per segment (M8: fact 继承段 provenance)。
     # R1 档 1: entities first (so declared types land), then edges. subject AND
@@ -473,9 +582,19 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 _edge_values.append(_v)
     if _edge_values:
         import embedding as _embedding_mod
-        _embedding_mod.embed_batch(_edge_values)
-    for seg_provenance, result, seg_text in seg_results:
+        try:
+            _embedding_mod.embed_batch(_edge_values)
+        except Exception as exc:
+            # v1.7⑤ E12 N6: fact value 预热 embed raise → 降级 (写侧 vec 条件
+            # 跳过), 不得炸 :319 单事务。
+            print(f"AUTODREAM-WARN: embed_batch 预热失败 (fact value 降级): "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+    for seg_idx, (seg_provenance, result, seg_text) in enumerate(seg_results):
         ext_label = result.source_meta.get("extractor_label", "llm")
+        # v1.7④ 主径判定: 产物 extractor=='llm' ⇔ 本边由主径 llm 通道触发
+        # (regex 通道/fallback:auto 降级链产物均 extractor='regex' — C1a
+        # 不计数与低初值判定共用此键)。
+        main_path = ext_label == "llm"
         lif_dims = scoring_mod.compute_lif(
             {"extractor": ext_label, "fact_type": fact_type, "created_at": now.isoformat()},
             access_count=0,
@@ -488,7 +607,10 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
         def _put_new_fact(**edge_kw):
             """Persist a new fact with confidence + initial LIF dims (used by both
             contradiction-supersede and brand-new ADD paths). M8: stamps the
-            segment's provenance (M2 column); veracity auto-maps via M3."""
+            segment's provenance (M2 column); veracity auto-maps via M3.
+            v1.7④: lif_source 可被调用方显式覆盖 (低初值裁决, ADD 路径);
+            缺省仍为 extractor 档位重算值。"""
+            edge_kw.setdefault("lif_source", lif_dims["lif_source"])
             return store.put_fact(
                 **edge_kw,
                 confidence=result.confidence,
@@ -496,7 +618,6 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 LIF=lif_dims["LIF"],
                 lif_freq=lif_dims["lif_freq"], lif_recency=lif_dims["lif_recency"],
                 lif_spread=lif_dims["lif_spread"], lif_coherence=lif_dims["lif_coherence"],
-                lif_source=lif_dims["lif_source"],
             )
 
         # perf/vec-index: 段级实体批式消解 — 一次 embed 批 (embed_batch 单次
@@ -584,17 +705,37 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 # fact already saw this session and nothing else moved, the refresh
                 # is a no-op on stored state ⇒ count as NOOP (idempotency).
                 seen_sessions = list(exact.get("seen_sessions") or [])
+                ext_sessions = list(exact.get("extract_sessions") or [])
                 source_refs = list(exact.get("source_refs") or [])
-                already_seen = session_id in seen_sessions
+                already_seen = (stamp_session in seen_sessions) \
+                    if stamp_session else True
                 already_ref = (src_ref in source_refs) if src_ref else True
-                if already_seen and already_ref:
+                # v1.7④ E3/E6 (C1a): 仅主径 llm 触发的 UPDATE 把 session stamp
+                # 进 extract_sessions 分账列 (JSON append; bootstrap 记 "self")
+                # — regex 通道/fallback 降级链复现同 (s,p,v) 不计数, 单通道
+                # 凑不满解锁; seen_sessions 照旧三口不动。
+                new_ext = bool(main_path and stamp_session
+                               and stamp_session not in ext_sessions)
+                if already_seen and already_ref and not new_ext:
                     noop += 1
                     continue
-                if session_id and session_id not in seen_sessions:
-                    seen_sessions.append(session_id)
+                if stamp_session and stamp_session not in seen_sessions:
+                    seen_sessions.append(stamp_session)
                 if src_ref and src_ref not in source_refs:
                     source_refs.append(src_ref)
-                _refresh_fact_meta(exact["id"], seen_sessions, source_refs)
+                if new_ext:
+                    ext_sessions.append(stamp_session)
+                # v1.7④ E5 毕业门: 解锁期 (env 开) 才消费判据 — 达
+                # len(extract_sessions)>=2 放行 lif_source 毕业到 extractor
+                # 真值档; 未达 → 锁现值 (regex 触发面/低初值不被非解锁性
+                # 刷新提权); 暂缓期 (门关, None) 走旧规则照 dims 重算。
+                graduated = None
+                if scoring_mod.coldstart_unlock_enabled():
+                    graduated = (len(ext_sessions)
+                                 >= scoring_mod.UNLOCK_EXTRACT_SESSIONS)
+                _refresh_fact_meta(exact["id"], seen_sessions, source_refs,
+                                   extract_sessions=ext_sessions,
+                                   graduated=graduated)
                 updated += 1
                 continue
 
@@ -611,6 +752,34 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                                  active_providers, subject_type, subject, predicate,
                                  value, s.get("value") or "")]
             if contradicting:
+                # v1.7⑤ E7 C1b 通道质量门槛 (勘误 C1 出口修复): 顶替者信任
+                # **严格低于**被处决者 (regex 档证据 vs llm 档 fact) → NOOP:
+                # 不 supersede 不改状态 + contradiction_pending 信号轻记录
+                # (七字段, 勘误 N5) + 矛盾段 segcontra: 前缀复活入队 (待主径
+                # 重抽仲裁; 不受 _queue_on 门控 — llm 通道开洞)。反向
+                # (高 vs 低) 与同档 → 下方 supersede 照旧; multivalue 短路
+                # 在 judge 前已返回, 通道门槛不覆盖 multivalue。
+                chal_tier = scoring_mod.SOURCE_WEIGHT.get(ext_label, 0.4)
+                if any(chal_tier < scoring_mod.SOURCE_WEIGHT.get(
+                        o.get("extractor") or "regex", 0.4)
+                       for o in contradicting):
+                    contra_ref = (f"segcontra:{transcript_path}#seg{seg_idx}"
+                                  if transcript_path
+                                  else f"segcontra:rerun#{seg_idx}")
+                    signals_mod.append("contradiction_pending", {
+                        "ref": contra_ref,
+                        "subject_id": subject_id,
+                        "predicate": predicate,
+                        "old_value": contradicting[0].get("value") or "",
+                        "new_value": value,
+                        "channel": ext_label,
+                    })
+                    if transcript_path:
+                        upgrade.enqueue_contra_segment(
+                            transcript_path, seg_idx, seg_text,
+                            provenance=seg_provenance)
+                    noop += 1
+                    continue
                 new_id = _put_new_fact(
                     subject_id=subject_id,
                     predicate=predicate,
@@ -620,7 +789,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                     fact_type=fact_type,
                     source_cwd=source_cwd,
                     source_refs=[src_ref] if src_ref else [],
-                    seen_sessions=[session_id] if session_id else [],
+                    seen_sessions=[stamp_session] if stamp_session else [],
                     topic=topic,
                     raw_predicate=raw_predicate,
                     task_outcome=getattr(edge, "task_outcome", None),
@@ -629,7 +798,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                     store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now(), reason="contradiction")  # M1: contradiction 必带 reason
                 # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
                 # llm 通道不入队 (队列退役清理 2026-08-27, 同 ADD 路径)。
-                if _queue_on:
+                if use_regex_channel:
                     fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
                 deleted += len(contradicting)
                 added += 1
@@ -637,6 +806,13 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
             # 多值共存 / 无矛盾 ⇒ 落到下方 brand-new ADD (不 continue)。
 
             # Brand new — ADD.
+            # v1.7④ 低初值 (编排者裁决, 写侧立即生效): 主径 llm 触发的
+            # brand-new ADD 显式低初值 lif_source=0.4 (待验证, 与 regex 同档;
+            # regex 产物本就 0.4 不动); "待验证"不新增 schema 值, 由
+            # (extractor, lif_source, len(extract_sessions)) 推导。主径 ADD
+            # 即首个独立提取证据 → extract_sessions 初始 stamp (bootstrap 记
+            # "self", len 天然封顶 1)。
+            init_stamp: list[str] = [stamp_session] if stamp_session else []
             new_id = _put_new_fact(
                 subject_id=subject_id,
                 predicate=predicate,
@@ -646,15 +822,18 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 fact_type=fact_type,
                 source_cwd=source_cwd,
                 source_refs=[src_ref] if src_ref else [],
-                seen_sessions=[session_id] if session_id else [],
+                seen_sessions=init_stamp,
+                lif_source=(scoring_mod.LOW_INIT_LIF_SOURCE
+                            if main_path else lif_dims["lif_source"]),
+                extract_sessions=(init_stamp if main_path else []),
                 topic=topic,
                 raw_predicate=raw_predicate,
                 task_outcome=getattr(edge, "task_outcome", None),
             )
             # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
-            # llm 通道 (_queue_on=False) 不收集: extractor='llm' 的 fact 已是
-            # 终态, wings 升级=重复消费 (队列退役清理 2026-08-27)。
-            if _queue_on:
+            # llm 通道 (use_regex_channel=False) 不收集: extractor='llm' 的
+            # fact 已是终态, wings 升级=重复消费 (队列退役清理 2026-08-27)。
+            if use_regex_channel:
                 fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
             added += 1
 
@@ -663,9 +842,15 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     if fact_enqueues:
         import embedding as embedding_mod
         import surprise as surprise_mod
-        embedding_mod.embed_batch(
-            [surprise_mod.novelty_sample(f"{s} {p} {o}".strip())
-             for _, s, p, o, _ in fact_enqueues])
+        try:
+            embedding_mod.embed_batch(
+                [surprise_mod.novelty_sample(f"{s} {p} {o}".strip())
+                 for _, s, p, o, _ in fact_enqueues])
+        except Exception as exc:
+            # v1.7⑤ E12 N6: "embedding 也挂"档 embed raise → 降级不炸消费
+            # 循环/:319 单事务 (novelty 退化空向量入队)。
+            print(f"AUTODREAM-WARN: embed_batch 预热失败 (fact 入队降级): "
+                  f"{type(exc).__name__}: {exc}", flush=True)
         for fid, s_, p_, o_, prov in fact_enqueues:
             upgrade.enqueue_fact(fid, subject=s_, predicate=p_, obj=o_,
                                  provenance=prov)
@@ -673,13 +858,22 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     return {"added": added, "updated": updated, "deleted": deleted, "noop": noop}
 
 
-def _refresh_fact_meta(fact_id: str, seen_sessions: list[str], source_refs: list[str]) -> None:
+def _refresh_fact_meta(fact_id: str, seen_sessions: list[str], source_refs: list[str],
+                       *, extract_sessions: list[str] | None = None,
+                       graduated: bool | None = None) -> None:
     """Write back absorbed seen_sessions + source_refs and recompute LIF.
 
     ADR-8v2: spread derives from distinct sessions, so absorbing a new session
     must lift lif_spread — recompute via the consolidate decay pass's
     ``compute_lif`` so the dim stays authoritative. We touch access_count/
     last_accessed_at too (a session re-seeing a fact is mild reinforcement).
+
+    v1.7④ E3/E5: ``extract_sessions`` 传新列表时随本 UPDATE 一并落列 (JSON
+    覆写, 分账 stamp; None = 保持现值)。``graduated`` 三态 (D6 双窗口):
+    ``None`` = 暂缓期旧规则 (lif_source 照 compute_lif 由 extractor 重算);
+    ``True`` = 解锁毕业 (lif_source 落 extractor 真值档); ``False`` = 解锁期
+    未毕业 (lif_source 锁现值 — 低初值 0.4 不被非解锁性刷新提权, regex 触发
+    面同理不得给 llm 档提源)。
     """
     from datetime import datetime, timezone
 
@@ -713,22 +907,27 @@ def _refresh_fact_meta(fact_id: str, seen_sessions: list[str], source_refs: list
         neighbors=neighbors,
         now=now,
     )
+    lif_source_val = (float(fact.get("lif_source") or 0.0)
+                      if graduated is False else dims["lif_source"])
+    ext_out = extract_sessions if extract_sessions is not None \
+        else list(fact.get("extract_sessions") or [])
     conn.execute(
         """UPDATE fact SET
                LIF = ?, lif_freq = ?, lif_recency = ?, lif_spread = ?,
                lif_coherence = ?, lif_source = ?,
                access_count = ?, last_accessed_at = ?,
-               seen_sessions = ?, source_refs = ?
+               seen_sessions = ?, source_refs = ?, extract_sessions = ?
            WHERE id = ?""",
         (
             dims["LIF"], dims["lif_freq"], dims["lif_recency"], dims["lif_spread"],
-            dims["lif_coherence"], dims["lif_source"],
+            dims["lif_coherence"], lif_source_val,
             access_count, now_iso,
             json.dumps(seen_sessions, ensure_ascii=False),
             json.dumps(source_refs, ensure_ascii=False),
+            json.dumps(ext_out, ensure_ascii=False),
             fact_id,
         ),
     )
 
 
-__all__ = ["autodream"]
+__all__ = ["autodream", "rerun_segment"]

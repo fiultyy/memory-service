@@ -35,9 +35,15 @@ stdin 字段 (实读): ``prompt`` / ``session_id`` 必用; CC ≥2.x 另含
   fact。纯 value 扫描候选全拒 — 长 prompt 稀释 bigram 会命中任意 value
   (实测跨项目噪声 0.44 分霸榜)。无锚定实体 → 跳过整个 recall (零 DB 写)。
   跨项目 KB 1205/1206 fact source_cwd=NULL → cwd 过滤无区分度, 不用。
-- **LIF 强化记账 (精确)**: recall 调用 boost=False (recall 内建 boost 会对
-  全部返回候选记账 — 未注入不该强化), 注入器只对**最终注入**的 ≤top_k 条
-  refresh_lif_on_recall — 注入即使用 (ADR-8v2 反馈环 = 记忆使用记账)。
+  v1.7③ 契约放行: 锚定命中 **or** ``fact.gate_keep`` (首轮档单 LLM gate
+  判 keep 的 B 翼 fact — gate 放行免锚, 键缺席时行为=现状)。
+- **LIF 强化记账 (精确, v1.7④⑤ A2/E9 分账)**: recall 调用 boost=False
+  (recall 内建 boost 会对全部返回候选记账 — 未注入不该强化), 注入器只对
+  **最终注入**的 ≤top_k 条记账 — 注入即使用 (ADR-8v2 反馈环)。分账语义:
+  每条统一吸收 ``recall_sessions`` 观测集; fallback 来源 (extractor=regex)
+  与 D6 解锁期待验证 fact **只写观测集** — 不刷 LIF 列/access_count/
+  last_accessed (受限刷: 注入面不看 MEM_DELAYED_REINFORCE 的直刷洞一并堵,
+  E9 双口全堵)。
 - **不建 mem-*.md**: 不传 cwd/mem_dir → mem_dir=None, 投影物化归
   SessionStart hook (synthesis-index 单点, 09-01 终裁A方案), 注入面保持
   只读+LIF 记账。
@@ -190,79 +196,121 @@ def main() -> int:
         # boost=False + 大候选窗: 稀释使被指名实体的关键 fact (~0.15) 排不进
         # 小 top_k; recall 内建 boost 会对**返回的全部**候选记 LIF 账 (污染
         # — 未注入不该强化)。这里纯读大窗, 记账只对最终注入的 ≤top_k 条做。
-        result = cli.recall(
-            query, session_id=session_id, top_k=cand_k,
-            boost=False, with_tag=True, use_vec=use_vec,
-            min_score=min_score,  # 长 prompt match 稀释 → 注入通道自校准低门槛
-        )
+        # v1.7③ 契约: 首轮档传 use_gate=True (B 翼+单 LLM gate 绑定首轮档,
+        # 15s 含 gate 往返); 常驻档不传 (与 use_vec 分档同处, 纯 A 路)。
+        # ③车道参数面缺席时自动省略该键 (键缺席=现状, 不依赖③先行)。
+        recall_kw = dict(session_id=session_id, top_k=cand_k, boost=False,
+                         with_tag=True, use_vec=use_vec, min_score=min_score)
+        if first_turn:
+            try:
+                import inspect as _inspect
+                if "use_gate" in _inspect.signature(cli.recall).parameters:
+                    recall_kw["use_gate"] = True
+            except (TypeError, ValueError):
+                pass
+        result = cli.recall(query, **recall_kw)
     except Exception as exc:  # 召回失败 → 零注入 + 记日志 (不降级, 不挡路)
         _log_fail(f"recall-fail: {type(exc).__name__}: {exc}")
         return 0
 
     results = result.get("results", []) if isinstance(result, dict) else []
+    # 锚定门放行 (v1.7③ 契约): 过滤条件从「锚定命中」扩为「锚定命中 or
+    # fact.gate_keep」— 首轮档单 LLM gate 判 keep 的 B 翼 fact 免锚入场
+    # (键缺席时 get() 返 None → 行为=现状)。
     candidates = [
         r for r in results if float(r.get("score", 0.0)) >= min_score
         and (r.get("fact", {}).get("subject_id") in anchor_ids
-             or r.get("fact", {}).get("object_id") in anchor_ids)
+             or r.get("fact", {}).get("object_id") in anchor_ids
+             or r.get("fact", {}).get("gate_keep"))
     ]
     # 每锚实体配额: 长 prompt 下 value 词重叠多的实体 (LLM) 会霸榜, 把
     # 低匹配但被指名实体的关键 fact (sqlite-vec 依赖关系) 挤出 top_k。
     # 分数序遍历 + 单锚配额 → 每个 prompt 指名实体都有代表。
+    # gate_keep fact 不占锚配额 (gate 放行=独立入场券, 无锚可挂)。
     per_anchor: dict[str, int] = {}
     hits = []
     for r in candidates:  # recall 已按 score 降序
         f = r.get("fact") or {}
+        gate_keep = bool(f.get("gate_keep"))
         a = f.get("subject_id") if f.get("subject_id") in anchor_ids \
             else f.get("object_id")
-        if a not in anchor_ids:
-            continue
-        if per_anchor.get(a, 0) >= per_anchor_quota:
-            continue
-        per_anchor[a] = per_anchor.get(a, 0) + 1
+        if not gate_keep:
+            if a not in anchor_ids:
+                continue
+            if per_anchor.get(a, 0) >= per_anchor_quota:
+                continue
+            per_anchor[a] = per_anchor.get(a, 0) + 1
         hits.append(r)
         if len(hits) >= top_k:
             break
     if not hits:
         return 0
 
-    # LIF 强化记账 (ADR-8v2 反馈环 = 记忆使用记账): 只对**最终注入**的
-    # ≤top_k 条做 — 注入即使用。refresh 是权威写 (access_count+1 /
-    # seen_sessions 吸收 / LIF 重算); 失败不挡注入 (记账尽力)。
+    # v1.7 E9/⑤a 注入端统一分账: 凡注入皆记 recall_sessions (记忆被使用过,
+    # 无论来源通道); LIF 强化 (access_count+1 / seen_sessions 吸收 / LIF
+    # 重算) 只给非受限 fact — fallback 产物与待验证暂缓期 fact 不因被召回
+    # 白得强化 (E9 分账)。逐条尽力而为, 单条失败不挡注入。
+    import scoring
     try:
         import db
-        import scoring
         conn = db.get_conn()
-        for r in hits:
-            scoring.refresh_lif_on_recall(
-                (r.get("fact") or {}).get("id"), session_id=session_id,
-                conn=conn)
-    except Exception as exc:
-        _log_fail(f"boost-fail: {type(exc).__name__}: {exc}")
-
-    lines = [f"## Memory recall (auto, {len(hits)} hits)"]
-    # 预算含 <memsvc-recall> 包裹开销 (32B ASCII, 见出口打标处)
-    budget = max_bytes - len("<memsvc-recall>\n\n</memsvc-recall>")
+    except Exception:
+        conn = None
     for r in hits:
+        f = r.get("fact") or {}
+        try:
+            scoring.record_recall_observation(
+                f.get("id"), session_id=session_id, conn=conn)
+            if not scoring.refresh_restricted(f):
+                scoring.refresh_lif_on_recall(
+                    f.get("id"), session_id=session_id, conn=conn,
+                    match_score=f.get("match_score"))
+        except Exception as exc:
+            _log_fail(f"boost-fail: {type(exc).__name__}: {exc}")
+
+    # ⑤a 降级标注: fallback 产物 (extractor==regex) 混入注入块时向读者
+    # 显式声明其未经主径 LLM 验证 — 全降级块打 quality="fallback" + 块顶
+    # 警示; 混合块在每条 fallback 条目前插警示行。
+    _FALLBACK_WARN = "产生于降级通道、未经主径 LLM 验证，需自行判断召回准确性"
+    all_fallback = all(
+        scoring.fact_is_fallback((r.get("fact") or {})) for r in hits)
+    lines = [f"## Memory recall (auto, {len(hits)} hits)"]
+    if all_fallback:
+        lines.append(f"[warning] 以下各条均{_FALLBACK_WARN}")
+    # 预算含 <memsvc-recall> 包裹开销 (ASCII, 全降级块含 quality 属性)
+    open_tag = ('<memsvc-recall quality="fallback">' if all_fallback
+                else "<memsvc-recall>")
+    budget = max_bytes - (len(open_tag) + len("\n\n</memsvc-recall>"))
+    emitted = 0
+    for r in hits:
+        f = r.get("fact") or {}
         tag = r.get("tag") or {}
         display = (tag.get("display") or "").strip() or "?"
-        val = ((r.get("fact") or {}).get("value") or "").strip()
+        val = (f.get("value") or "").strip()
         if len(val) > 80:
             val = val[:77] + "..."
         entry = f"- {display} — {val}  [{float(r.get('score', 0.0)):.2f}]" if val \
             else f"- {display}  [{float(r.get('score', 0.0)):.2f}]"
+        if not all_fallback and scoring.fact_is_fallback(f):
+            warn = f"- [warning] 本条{_FALLBACK_WARN}"
+            n = len(warn.encode("utf-8"))
+            if budget - n >= 0:
+                lines.append(warn)
+                budget -= n
         n = len(entry.encode("utf-8"))
         if budget - n < 0:
             break
         lines.append(entry)
         budget -= n
-    if len(lines) == 1:
+        emitted += 1
+    if emitted == 0:
         return 0  # 预算内一条都放不下 → 零输出
 
     # 出端打标 (2026-08-28 闭环): <memsvc-recall> 为 memsvc 自有中性标签 —
     # 非 harness 保留语法, cc/dsh/pi 解析器原样透传 (零适配器), 活会话 LLM
     # 读到即知是召回内容; 语料重入库时 corpus_prep COMMON 规则整块丢弃
     # (防召回回声自我重入库 — 结构层根治, U7 去重只是分数层兜底)。
-    ctx = "<memsvc-recall>\n" + "\n".join(lines) + "\n</memsvc-recall>"
+    ctx = open_tag + "\n" + "\n".join(lines) + "\n</memsvc-recall>"
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

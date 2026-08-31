@@ -41,6 +41,30 @@ SOURCE_WEIGHT: dict[str, float] = {
     "vote": 0.85,
 }
 
+# ── v1.7④ 冷启动分账 + D6 双窗口 (⑤b 受限刷共用推导面) ────────────────
+# 编排者裁决: llm 主径 brand-new ADD 显式低初值 lif_source=0.4 (待验证, 与
+# regex 同档); "待验证"不新增 schema 值, 以 (extractor, lif_source,
+# len(extract_sessions)) 推导; 解锁判据 = len(extract_sessions)>=2 (两个独立
+# 主径 llm session 重抽出同 (s,p,v) → spread≥2 解锁全信任)。
+#
+# D6 双窗口门 ``MEM_COLDSTART_UNLOCK`` (默认 "0" = 暂缓期):
+# - 暂缓期 (默认): 分账列只写不读 — extract_sessions 照常 stamp, 解锁判据
+#   暂不消费, 刷新面跑旧 LIF 规则 (行为面 = v1.7 前现状; 写侧 0.4 仍在场,
+#   spec gate_mod(0.4)≈0.79 数学以其为前提)。
+# - 解锁期 (env 置真): 判据开始消费 — 待验证 fact 的 refresh 走受限版
+#   (只写 recall_sessions 观测集), 主径 UPDATE stamp 达判据时毕业写
+#   lif_source 0.4→extractor 真值档。
+#
+# D6 切换程序 (一次性运维操作, 不建额外代码 — 派发书 E5 钉死):
+#   1. 设 env MEM_COLDSTART_UNLOCK=1 (D6 投影回声指纹完成后执行);
+#   2. 对库一次性 SQL 清零分账列重计 (防暂缓期污染合法化):
+#      ``UPDATE fact SET extract_sessions = '[]';``
+#   3. 之后由真实主径重抽自然重建 extract_sessions 证据。
+FALLBACK_EXTRACTOR = "regex"
+LOW_INIT_LIF_SOURCE = 0.4          # 待验证低初值 (regex 同档)
+UNLOCK_EXTRACT_SESSIONS = 2        # 解锁判据: 独立主径提取 session 数
+COLDSTART_UNLOCK_ENV = "MEM_COLDSTART_UNLOCK"
+
 # Composite weights (sum to 1.0): recency carries the most signal (decay heir),
 # then freq (recall saturation), then spread/coherence/source as tie-breakers.
 LIF_WEIGHTS: dict[str, float] = {
@@ -391,11 +415,107 @@ def compute_lif(
     }
 
 
+def coldstart_unlock_enabled() -> bool:
+    """D6 双窗口门 (env ``MEM_COLDSTART_UNLOCK``): False = 暂缓期 (默认,
+    分账列只写不读, 刷新面跑旧 LIF 规则); True = 解锁期 (判据消费 + 待验证
+    受限刷 + 毕业写生效)。切换程序见模块头 ``MEM_COLDSTART_UNLOCK`` 注释块。"""
+    return (os.environ.get(COLDSTART_UNLOCK_ENV, "") or "").strip().lower() \
+        in ("1", "true", "yes", "on")
+
+
+def fact_extract_sessions(fact: dict[str, Any]) -> list[str]:
+    """fact 行 ``extract_sessions`` 分账列的安全读 (缺列/坏 JSON → [])。"""
+    v = fact.get("extract_sessions")
+    if isinstance(v, list):
+        return [str(s) for s in v]
+    if isinstance(v, str) and v:
+        try:
+            d = json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        return [str(s) for s in d] if isinstance(d, list) else []
+    return []
+
+
+def fact_unlocked(fact: dict[str, Any]) -> bool:
+    """冷启动解锁判据 (纯函数, E5): ``len(extract_sessions) >= 2``。
+
+    两个独立主径 llm session UPDATE stamp 才凑满 — bootstrap 通道 stamp 恒
+    虚拟会话 "self" (去重) 天然 len=1 封顶; regex/fallback 通道 stamp 不入列
+    (C1a)。暂缓期本判据不被消费 (只写不读), 消费方须叠加
+    :func:`coldstart_unlock_enabled` 门。"""
+    return len(fact_extract_sessions(fact)) >= UNLOCK_EXTRACT_SESSIONS
+
+
+def fact_pending_verification(fact: dict[str, Any]) -> bool:
+    """待验证推导 (无新 schema 值, 编排者裁决): 主径 llm 产物且 lif_source
+    仍处低初值档 (< 真值 0.7) 且未达解锁判据。regex 产物不是"待验证" —
+    它们是 fallback 来源, 受限语义走 :func:`fact_is_fallback`。"""
+    if (fact.get("extractor") or "") != "llm":
+        return False
+    try:
+        src = float(fact.get("lif_source") or 0.0)
+    except (TypeError, ValueError):
+        src = 0.0
+    return src < SOURCE_WEIGHT.get("llm", 0.7) and not fact_unlocked(fact)
+
+
+def fact_is_fallback(fact: dict[str, Any]) -> bool:
+    """⑤b fallback 来源判定: extractor == 'regex' (⑤a 降级标记同源 —
+    手动 regex 通道与 fallback:auto 降级链产物均为该档)。"""
+    return (fact.get("extractor") or FALLBACK_EXTRACTOR) == FALLBACK_EXTRACTOR
+
+
+def refresh_restricted(fact: dict[str, Any]) -> bool:
+    """本次 refresh 是否受限 (只写 recall_sessions 观测集, 不刷 LIF 列/
+    access_count/last_accessed — ⑤b"仅衰减不可提权" + ④待验证不全额刷):
+
+    - fallback 来源 (extractor='regex'): 无条件受限 (C2 双口全堵);
+    - 待验证 (主径 llm 低初值未解锁): 仅 D6 解锁期受限 — 暂缓期 (门默认关)
+      跑旧规则全额刷 (行为面冻结)。
+    """
+    if fact_is_fallback(fact):
+        return True
+    return coldstart_unlock_enabled() and fact_pending_verification(fact)
+
+
+def record_recall_observation(
+    fact_id: str,
+    *,
+    session_id: str | None = None,
+    conn: Any = None,
+) -> bool:
+    """A2 注入观测记账: 只 ``recall_sessions`` JSON append (语义同
+    seen_sessions 先例), **不刷** LIF 列/access_count/last_accessed_at
+    (它们是 freq 输入 = 间接提权 — A2 修正)。
+
+    受限刷 (fallback/待验证) 的观测半边 + 非受限注入条的统一吸收半边 —
+    注入即曾被记录, 可观测不可提权。已有 session 幂等跳过 (仍算成功)。
+
+    Returns True = 列已落写 (或无新 session 无需写), False = fact 不存在。
+    """
+    import db
+    import store
+
+    c = conn or db.get_conn()
+    row = c.execute("SELECT * FROM fact WHERE id = ?", (fact_id,)).fetchone()
+    if row is None:
+        return False
+    fact = store._decode_fact(row)
+    sessions = list(fact.get("recall_sessions") or [])
+    if session_id and session_id not in sessions:
+        sessions.append(session_id)
+        c.execute("UPDATE fact SET recall_sessions = ? WHERE id = ?",
+                  (json.dumps(sessions, ensure_ascii=False), fact_id))
+    return True
+
+
 def refresh_lif_on_recall(
     fact_id: str,
     *,
     session_id: str | None = None,
     conn: Any = None,
+    match_score: float | None = None,
 ) -> dict[str, float] | None:
     """Recall-reinforcement: bump access stats, recompute LIF, write back (ADR-8v2).
 
@@ -416,6 +536,10 @@ def refresh_lif_on_recall(
             session change, only access_count/last_accessed_at advance.
         conn: Optional open connection (single-writer cli reuse); default opens
             via ``db.get_conn()``.
+        match_score: Optional ③ gate 契约连续分 (0-1)。v1.7④: 非 None 时作为
+            本次强化的抬升权重 — 连续信号替代离散 +1 (spec §④): freq 维的
+            增量输入 = ``match_score`` 而非 1, access_count 列恒整型 +1 不变
+            (列型/幂等不破)。None = 逐字旧行为 (既有调用方零改动)。
 
     Returns:
         The :func:`compute_lif` result dict, or None if ``fact_id`` not found.
@@ -429,12 +553,27 @@ def refresh_lif_on_recall(
         return None
     fact = store._decode_fact(row)
 
+    # v1.7⑤ E9/C2 分账自守 (纵深防御): 受限 fact (fallback 来源 / 解锁期
+    # 待验证) 只记 recall_sessions 观测集 — LIF 列/access_count/
+    # last_accessed_at 零变化 (仅衰减不可提权)。调用面 (注入/dream replay)
+    # 已各自门控, 此处兜底保证任何入口都不破分账。返回 None (未强化)。
+    if refresh_restricted(fact):
+        record_recall_observation(fact_id, session_id=session_id, conn=conn)
+        return None
+
     # ADR-8v2 ms-floor: match compute_lif/decay's floor so last_accessed_at
     # and the now passed to compute_lif carry no microseconds (precision
     # symmetry with the decay idempotency anchor — see consolidate.decay).
     now = datetime.now(timezone.utc).replace(microsecond=0)
     now_iso = now.isoformat()
+    # v1.7④ gate 契约: match_score 加权抬升 — 频次维的有效增量 = match_score
+    # (连续), 列仍 +1 (整型); 非法/越界值安全回落离散 +1 (None 语义)。
+    try:
+        ms = None if match_score is None else max(0.0, min(1.0, float(match_score)))
+    except (TypeError, ValueError):
+        ms = None
     access_count = int(fact.get("access_count") or 0) + 1
+    eff_freq_input = float(access_count) if ms is None else (access_count - 1) + ms
 
     sessions: list[str] = list(fact.get("seen_sessions") or [])
     if session_id and session_id not in sessions:
@@ -459,7 +598,7 @@ def refresh_lif_on_recall(
 
     dims = compute_lif(
         fact,
-        access_count=access_count,
+        access_count=eff_freq_input,
         last_accessed_at=now_iso,
         distinct_sessions=distinct_sessions,
         neighbors=neighbors,
@@ -485,6 +624,10 @@ def refresh_lif_on_recall(
 __all__ = [
     "query_tokens", "match_item", "score_fact", "mem_score",
     "ALPHA_MATCH", "BETA_CENTRALITY", "GAMMA_LIF", "DELTA_VEC", "BFS_WEIGHT",
-    "compute_lif", "refresh_lif_on_recall",
+    "compute_lif", "refresh_lif_on_recall", "record_recall_observation",
     "SOURCE_WEIGHT", "LIF_WEIGHTS", "LIF_HALF_LIFE_DAYS",
+    "LOW_INIT_LIF_SOURCE", "UNLOCK_EXTRACT_SESSIONS",
+    "COLDSTART_UNLOCK_ENV", "FALLBACK_EXTRACTOR",
+    "coldstart_unlock_enabled", "fact_extract_sessions", "fact_unlocked",
+    "fact_pending_verification", "fact_is_fallback", "refresh_restricted",
 ]

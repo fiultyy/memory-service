@@ -104,6 +104,21 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     fact_cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
     if "task_outcome" not in fact_cols:
         conn.execute("ALTER TABLE fact ADD COLUMN task_outcome TEXT")
+    # v1.7 Lane-0 migration (spec v1.7-FINAL ③④⑤ 共享接缝): fact 补
+    # extract_sessions / recall_sessions (JSON array 会话 stamp 集; 写入/吸收
+    # 语义由后续车道实现, 本批只铺列) + gate_score (累计 gate 分, 求和封顶)。
+    # 存量行不显式回填 — ALTER 声明缺省, legacy 行按 SQLite ADD COLUMN 语义
+    # 取声明缺省 ('[]'/'[]'/0.0), 与双源同步红线一致: schema.sql CREATE TABLE
+    # 与本 ALTER 两处列声明必须同在。
+    fact_cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
+    if "extract_sessions" not in fact_cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN extract_sessions TEXT NOT NULL DEFAULT '[]'")
+    fact_cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
+    if "recall_sessions" not in fact_cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN recall_sessions TEXT NOT NULL DEFAULT '[]'")
+    fact_cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
+    if "gate_score" not in fact_cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN gate_score REAL NOT NULL DEFAULT 0.0")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS predicate_registry (
                canonical TEXT PRIMARY KEY,

@@ -5,7 +5,7 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 
 # memsvc 手动操作
 
-**背景** (2026-08-27 定稿 + M18 增补): 唯一自动面 = **PreCompact 钩子**（compact 时蒸馏 assistant 每轮输出的 end step 入 KG，`endsteps.py` 过滤）；**召回与 consolidation 全手动走本 skill**。CC automemory 机制本身不动——例外: `recall --project` 会把**召回结果**投影成 `memory/recall-<DATE>.md` + MEMORY.md 索引行（用户明示裁决 2026-08-27）。
+**背景** (2026-08-27 定稿 + M18 增补 + 09-01 终裁A方案): 自动面 = **PreCompact 钩子**（compact 时蒸馏 assistant 每轮输出的 end step 入 KG，`endsteps.py` 过滤）+ **SessionStart 钩子**（synthesis-index 单点自动投影）+ **UserPromptSubmit 钩子**（召回注入）；**consolidation 手动走本 skill**。CC automemory 投影已恢复（09-01 终裁A：08-27「不动」红线取消，SessionStart 单点写 MEMORY.md 投影索引，ADR-A 原生格式）；`recall --project` 召回日志投影照旧（用户明示裁决 2026-08-27）。
 库: `data/memory.db`（~1900 active fact / 2300+ entity，SQLite WAL，词法召回毫秒级）。
 
 ## 意图 → 命令
@@ -82,5 +82,5 @@ python3 /home/yy/projects/memory-service/cli.py synthesis-index --scope "$PWD"
 
 - **绝不 regex 回退**：LLM 断供时入库命令报错/跳段是正确行为，不要绕。
 - 生产 `data/` 写入面 = 显式命令 + PreCompact 蒸馏入库（唯一自动面）；其余全手动。
-- **CC automemory 不动**：不跑 synthesis-index 写 CC memory 目录（投影已从管道移除），除非用户明确要求。**唯一例外** = `recall --project` 的 recall 日志投影（用户 2026-08-27 明示）。
-- 其余三个钩子（session-start/user-prompt-recall/post-tool-use）保持休眠；consolidation 手动。
+- **投影面（09-01 终裁A方案）**：SessionStart synthesis-index 单点写 CC memory 目录（MEMORY.md 投影索引 + mem-*.md 载体，ADR-A 原生格式，索引行无 `[mem]` 字面标记）+ `recall --project` 日志投影；两族之外不写 CC memory 目录。不做 T1 lazy reconcile（注入面保持只读+LIF 记账）。
+- 活钩子 = PreCompact（入库）+ SessionStart（投影）+ UserPromptSubmit（召回注入）；post-tool-use 仍休眠；consolidation 手动。

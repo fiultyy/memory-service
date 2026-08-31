@@ -427,6 +427,9 @@ def put_fact(
     veracity: float | None = None,
     raw_predicate: str | None = None,
     task_outcome: str | None = None,
+    extract_sessions: list[str] | None = None,
+    recall_sessions: list[str] | None = None,
+    gate_score: float = 0.0,
 ) -> str:
     """Insert a Fact (reified), return its id.
 
@@ -450,6 +453,13 @@ def put_fact(
     :data:`PROVENANCE_VERACITY` 由 provenance 自动映射 (user_prose 1.0 /
     tool_obs 0.9 / human 0.9 / agent_assert 0.5 / system 0.5); provenance
     亦缺省/表外 → NULL (不可考不臆测, legacy 档)。
+
+    ``extract_sessions``/``recall_sessions`` (v1.7 ③④ 共享接缝): JSON 数组
+    落列 — 主径 llm 通道 UPDATE stamp / 注入吸收观测的 session 串集 (写入与
+    吸收语义由后续车道实现, 本批只铺写入通道)。缺省 '[]'。
+
+    ``gate_score`` (v1.7 ⑤ 共享接缝): 累计 gate 分 (求和封顶语义由后续车道
+    实现), 缺省 0.0。
     """
     conn = db.get_conn()
     fid = fact_id or _uid()
@@ -468,8 +478,9 @@ def put_fact(
             status, supersedes_id, created_at,
             lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
             access_count, last_accessed_at, seen_sessions, source_cwd, topic,
-            provenance, veracity, raw_predicate, task_outcome)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            provenance, veracity, raw_predicate, task_outcome,
+            extract_sessions, recall_sessions, gate_score)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fid, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, frozen_lif, confidence,
@@ -482,6 +493,9 @@ def put_fact(
             provenance, veracity,
             raw_predicate,
             task_outcome,
+            json.dumps(extract_sessions or [], ensure_ascii=False),
+            json.dumps(recall_sessions or [], ensure_ascii=False),
+            gate_score,
         ),
     )
     if value:
@@ -534,6 +548,21 @@ def update_fact_status(fact_id: str, status: str, supersedes_id: str | None = No
         vec_index.delete_fact(fact_id)
 
 
+def _decode_session_list(row: Any, key: str) -> list[str]:
+    """v1.7 ③④ 共享接缝: 会话 stamp 集 JSON→list。
+
+    row-key 守卫兼容未迁移 db; 空串/NULL、解码失败、非 list 值一律回落 []
+    (不可考不臆测)。
+    """
+    try:
+        if key not in row.keys() or not row[key]:
+            return []
+        val = json.loads(row[key])
+    except (ValueError, TypeError):
+        return []
+    return val if isinstance(val, list) else []
+
+
 def _decode_fact(row: Any) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -567,6 +596,13 @@ def _decode_fact(row: Any) -> dict[str, Any]:
         "supersede_reason": row["supersede_reason"] if "supersede_reason" in row.keys() else None,
         "provenance": row["provenance"] if "provenance" in row.keys() else None,
         "veracity": row["veracity"] if "veracity" in row.keys() else None,
+        # v1.7 回补收尾: batch 13 开放谓词原文出口键 (row-key 守卫兼容未迁移 db)。
+        "raw_predicate": row["raw_predicate"] if "raw_predicate" in row.keys() else None,
         # prompt v5 (2026-08-28): 任务收尾分诊轴 (row-key 守卫兼容未迁移 db)。
         "task_outcome": row["task_outcome"] if "task_outcome" in row.keys() else None,
+        # v1.7 Lane-0 (③④⑤ 共享接缝): 会话 stamp 集 JSON→list (解码失败回落 []),
+        # gate 累计分 REAL (row-key 守卫兼容未迁移 db)。
+        "extract_sessions": _decode_session_list(row, "extract_sessions"),
+        "recall_sessions": _decode_session_list(row, "recall_sessions"),
+        "gate_score": row["gate_score"] if "gate_score" in row.keys() else None,
     }

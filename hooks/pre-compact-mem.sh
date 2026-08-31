@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # PreCompact hook (ADR-10): transcript 快照 → 后台蒸馏入库 (v2 重接线 2026-08-27)。
 #
-# v2 形态 (用户裁决): CC automemory 机制/使用完全不动; 本钩子只做一件事 —
+# v2 形态 (用户裁决; 2026-09-01 注: 「CC automemory 不动」红线已经 09-01 终裁
+# A方案取消 — SessionStart 恢复单点投影, 与本钩子正交): 本钩子只做一件事 —
 # 快照 transcript 进 spool, 由 spool-worker 蒸馏出 **assistant 每轮输出的
 # end step** (stop_reason=end_turn 主链 text) 入 KG。召回/consolidation 全
 # 手动 (skills/memsvc)。同步面 ~25ms (快照+nohup), compact 永不阻塞。

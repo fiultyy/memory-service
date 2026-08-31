@@ -208,9 +208,12 @@ def test_task_outcome_roundtrip_and_null_default():
     sid = store.put_entity("OutcomeSubj", "concept")
     cols = {r[1] for r in db.get_conn().execute("PRAGMA table_info(fact)")}
     assert "task_outcome" in cols, "迁移未补 task_outcome 列"
-    fid = store.put_fact(sid, "decided", "v", task_outcome="success")
+    fid = store.put_fact(sid, "decided", "v", task_outcome="success",
+                         raw_predicate="decided-raw")
     f = store.get_fact(fid)
     assert f["task_outcome"] == "success"
+    # v1.7 回补收尾: raw_predicate 出口键写读往返 (row.keys() 守卫)。
+    assert f["raw_predicate"] == "decided-raw"
     fid2 = store.put_fact(sid, "is_a", "plain v")
     assert store.get_fact(fid2)["task_outcome"] is None
     assert f["supersede_reason"] is None
@@ -336,3 +339,141 @@ def test_autodream_contradiction_writes_reason():
         "SELECT status, supersede_reason FROM fact WHERE id=? AND status='active'",
         (row["supersedes_id"],)).fetchone()
     assert new_row is not None and new_row["supersede_reason"] is None
+
+
+# ── v1.7 Lane-0: ③④⑤ 共享接缝三列 (extract_sessions/recall_sessions/gate_score) ──
+
+_LANE0_COLS = ("extract_sessions", "recall_sessions", "gate_score")
+
+
+def test_new_db_fact_has_lane0_three_columns():
+    """新库 db.init → PRAGMA table_info(fact) 必含三新列 (schema.sql 新装路径 +
+    db.py 迁移路径双通); decl 类型 sessions TEXT / gate_score REAL; 声明缺省
+    '[]'/'[]'/0.0。"""
+    tmp = tempfile.mkdtemp()
+    db.init(Path(tmp) / "lane0-new.db")
+    info = list(db.get_conn().execute("PRAGMA table_info(fact)"))
+    cols = {r[1] for r in info}
+    for col in _LANE0_COLS:
+        assert col in cols, f"新库 fact 表缺列 {col}, got {sorted(cols)}"
+    decl = {r[1]: r[2].upper() for r in info}
+    assert decl["extract_sessions"] == "TEXT"
+    assert decl["recall_sessions"] == "TEXT"
+    assert decl["gate_score"] == "REAL"
+    dflt = {r[1]: (r[4] or "") for r in info}
+    assert dflt["extract_sessions"].strip("'") == "[]", (
+        f"extract_sessions 声明缺省应为 '[]', got {dflt['extract_sessions']!r}")
+    assert dflt["recall_sessions"].strip("'") == "[]", (
+        f"recall_sessions 声明缺省应为 '[]', got {dflt['recall_sessions']!r}")
+    assert float(dflt["gate_score"]) == 0.0, (
+        f"gate_score 声明缺省应为 0.0, got {dflt['gate_score']!r}")
+
+
+def test_old_db_copy_migrates_lane0_columns_defaults_semantics():
+    """旧库副本 init → 幂等补三列; legacy 行内容不动, 三新列呈缺省语义
+    (sessions '[]' / gate_score 0.0 — ALTER 声明缺省, 不显式回填)。"""
+    tmp = tempfile.mkdtemp()
+    old_path = Path(tmp) / "old-lane0.db"
+    _make_old_db(old_path)
+    db.init(old_path)
+    cols = {r[1] for r in db.get_conn().execute("PRAGMA table_info(fact)")}
+    assert set(_LANE0_COLS) <= cols, f"老库迁移后仍缺列, got {sorted(cols)}"
+    row = db.get_conn().execute(
+        "SELECT value, status, extract_sessions, recall_sessions, gate_score "
+        "FROM fact WHERE id='legacy-1'").fetchone()
+    assert row["value"] == "legacy-val", "迁移不得动 legacy 行内容"
+    assert row["status"] == "active"
+    assert json.loads(row["extract_sessions"]) == [], (
+        f"legacy 行 extract_sessions 应为缺省 '[]', got {row['extract_sessions']!r}")
+    assert json.loads(row["recall_sessions"]) == [], (
+        f"legacy 行 recall_sessions 应为缺省 '[]', got {row['recall_sessions']!r}")
+    assert row["gate_score"] == 0.0, (
+        f"legacy 行 gate_score 应为缺省 0.0, got {row['gate_score']!r}")
+    # 解码出口一致: _decode_fact 对 legacy 行回落空集/0.0。
+    f = store.get_fact("legacy-1")
+    assert f["extract_sessions"] == [] and f["recall_sessions"] == []
+    assert f["gate_score"] == 0.0
+
+
+def test_repeated_init_no_side_effects_lane0():
+    """重复 init(强制重跑迁移路径) → 无异常、三新列不重复补、数据不变。"""
+    tmp = tempfile.mkdtemp()
+    old_path = Path(tmp) / "old-lane0-idem.db"
+    _make_old_db(old_path)
+    db.init(old_path)
+    db._conn = None
+    db._conn_path = None
+    db.init(old_path)  # 若 ALTER 未被列检测挡住, 此处 duplicate column name 抛错
+    cols = [r[1] for r in db.get_conn().execute("PRAGMA table_info(fact)")]
+    for col in _LANE0_COLS:
+        assert cols.count(col) == 1, f"重复 init 不得重复补列 {col}"
+    n = db.get_conn().execute("SELECT COUNT(*) FROM fact").fetchone()[0]
+    assert n == 1, f"重复 init 不得动行数, got {n}"
+
+
+def test_put_fact_lane0_roundtrip_and_defaults():
+    """写读契约: put_fact 三新参落列 + _decode_fact JSON list 往返; 显式覆盖
+    优先; 缺省不臆测 ('[]'/'[]'/0.0); 坏 JSON/非 list 解码回落 []。"""
+    tmp = tempfile.mkdtemp()
+    db.init(Path(tmp) / "lane0.db")
+    sid = store.put_entity("Lane0Subj", "concept")
+    fid = store.put_fact(
+        sid, "is_a", "v",
+        extract_sessions=["s-main-1", "sess-中文"],
+        recall_sessions=["s-obs-1"],
+        gate_score=1.25,
+    )
+    # 原始列确为 JSON 文本 (非 list 对象), 含非 ASCII session 原样往返。
+    raw = db.get_conn().execute(
+        "SELECT extract_sessions, recall_sessions, gate_score FROM fact WHERE id=?",
+        (fid,)).fetchone()
+    assert json.loads(raw["extract_sessions"]) == ["s-main-1", "sess-中文"]
+    assert json.loads(raw["recall_sessions"]) == ["s-obs-1"]
+    assert raw["gate_score"] == 1.25
+    # _decode_fact 回读: JSON 文本 → list。
+    f = store.get_fact(fid)
+    assert f["extract_sessions"] == ["s-main-1", "sess-中文"]
+    assert f["recall_sessions"] == ["s-obs-1"]
+    assert f["gate_score"] == 1.25
+    # 缺省: 不传 → '[]'/'[]'/0.0 (不臆测会话/分值)。
+    fid2 = store.put_fact(sid, "is_a", "v2")
+    f2 = store.get_fact(fid2)
+    assert f2["extract_sessions"] == [] and f2["recall_sessions"] == []
+    assert f2["gate_score"] == 0.0
+    # 解码失败回落 []: 坏 JSON 直接落列 (脏数据防线)。
+    db.get_conn().execute(
+        "UPDATE fact SET extract_sessions='{bad json' WHERE id=?", (fid,))
+    assert store.get_fact(fid)["extract_sessions"] == []
+    # 非 list JSON (对象/标量) 同回落 [] (契约类型是 list)。
+    db.get_conn().execute(
+        'UPDATE fact SET recall_sessions=\'{"not":"a list"}\' WHERE id=?', (fid,))
+    assert store.get_fact(fid)["recall_sessions"] == []
+    db.get_conn().execute(
+        "UPDATE fact SET recall_sessions='42' WHERE id=?", (fid,))
+    assert store.get_fact(fid)["recall_sessions"] == []
+
+
+# v1.7 回补扩面: 双源守卫对象 = 全部 ALTER 系五列 (db.py 逐列 PRAGMA 检测补列者)。
+_ALTER_LINEAGE_COLS = (
+    "raw_predicate", "task_outcome",
+    "extract_sessions", "recall_sessions", "gate_score",
+)
+
+
+def test_alter_lineage_columns_dual_source_guard():
+    """双源同步守卫 (红线, v1.7 回补扩面): ALTER 系五列必须 schema.sql 文本 与
+    PRAGMA table_info(fact) 两源同在 — 防「只在 db.py ALTER、schema.sql 缺失」
+    的不同步先例 (raw_predicate/task_outcome 本体) 重演。任一列单源缺席即红;
+    回补两列 decl 类型 TEXT 与 db.py ALTER 现状逐字对齐。"""
+    schema_text = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
+    for col in _ALTER_LINEAGE_COLS:
+        assert col in schema_text, f"schema.sql 缺 {col} 列声明 (双源不同步)"
+    tmp = tempfile.mkdtemp()
+    db.init(Path(tmp) / "guard.db")
+    info = list(db.get_conn().execute("PRAGMA table_info(fact)"))
+    cols = {r[1] for r in info}
+    for col in _ALTER_LINEAGE_COLS:
+        assert col in cols, f"PRAGMA table_info(fact) 缺 {col} (迁移路径缺列)"
+    decl = {r[1]: r[2].upper() for r in info}
+    assert decl["raw_predicate"] == "TEXT"
+    assert decl["task_outcome"] == "TEXT"

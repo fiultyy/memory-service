@@ -465,7 +465,7 @@ def recall(
                     s["fact"].update(authoritative)
 
     # ADR-15 Ch2: 命中 fact → 建/刷 mem-<id>.md (snaptag 物化) + 算 tag 嵌 _snaptag。
-    # 绝不碰 MEMORY.md(撞 autoMemory cache)。mem_dir 优先显式, 否则 cwd 推导;
+    # 只建散 index 载体, 不碰 MEMORY.md — 投影索引统一归 synthesis_index 唯一写入口 (09-01 终裁A方案: SessionStart 单点自动投影), 防双写竞争。mem_dir 优先显式, 否则 cwd 推导;
     # 都无则只算 tag 不建文件(测试/无 cwd 场景)。
     now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     ent_names: dict[str, str] = {}

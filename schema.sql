@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS fact (
     supersede_reason TEXT,                          -- M1: contradiction|dedup|upgrade|confirm (update_fact_status reason 参写入; NULL=legacy 不回填)
     provenance       TEXT,                          -- M2: user_prose|tool_obs|agent_assert|human|system (P21 出处轴; M8 块归因接线)
     veracity         REAL,                          -- M3: P21 f(provenance) 权重标量 (DR-5 b / DR-6 REAL; NULL=legacy 不回填)
+    raw_predicate    TEXT,                          -- v1.7 回补: 消除双源不同步先例 (batch 13: LLM 原文谓词; predicate 存聚类后 canonical)
+    task_outcome     TEXT,                          -- v1.7 回补: 消除双源不同步先例 (prompt v5: 任务收尾分诊; NULL=非任务/legacy)
+    extract_sessions TEXT NOT NULL DEFAULT '[]',    -- v1.7③: JSON array — 主径 llm 通道 UPDATE stamp 的 session 串 (语义由后续车道实现)
+    recall_sessions  TEXT NOT NULL DEFAULT '[]',    -- v1.7④: JSON array — 注入吸收观测 session 串 (语义由后续车道实现)
+    gate_score       REAL NOT NULL DEFAULT 0.0,     -- v1.7⑤: 累计 gate 分 (求和封顶), 缺省 0.0
     created_at    TEXT NOT NULL,
     FOREIGN KEY (subject_id) REFERENCES entity(id),
     FOREIGN KEY (object_id)  REFERENCES entity(id),

@@ -45,7 +45,7 @@ memsvc（mem-service）是一个独立 Python 记忆服务：把对话事实与�
 | `surprise.py` | M9 惊喜度：升级队列 upgrade_queue 的优先级源 |
 | `graphlive.py` | M20 实时图：ctypes inotify 盯 wal（零轮询）+ rowid 游标增量 + SSE + graph-export |
 | `web/graph_live.html` | sigma.js 单页：类型/度数过滤、时间窗、搜索聚焦、SSE 增量生长 |
-| `hooks/` | pre-compact-mem.sh（CC 唯一自动面）+ spool-worker.sh（endsteps 蒸馏进提取）+ 其余三钩子休眠 |
+| `hooks/` | pre-compact-mem.sh（PreCompact 入库）+ spool-worker.sh（endsteps 蒸馏进提取）+ user-prompt-recall.sh（UserPromptSubmit 召回注入）+ session-start-mem.sh（SessionStart 投影单点，09-01 终裁A方案）+ post-tool-use-reingest.sh 休眠 |
 
 ## 三、数据流
 

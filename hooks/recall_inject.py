@@ -1,15 +1,36 @@
-"""UserPromptSubmit 注入器 (harness P2) — stdin CC payload → additionalContext。
+"""UserPromptSubmit 注入器 (harness P2 + v1.7 ② 首n turn 召回) — stdin CC payload → additionalContext。
 
-管道: stdin JSON {prompt, session_id, cwd} → 词法 recall (top_k=8, **全局
+管道: stdin JSON payload → 词法 recall (top_k=8, **全局
 单体 KG**: 不传 cwd → 无 source_cwd 过滤, 跨项目记忆可召回 — ADR-14 默认)
 → 阈值/2KB 预算裁剪 → stdout::
 
     {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                             "additionalContext": "<markdown 记忆命中段>"}}
 
+stdin 字段 (实读): ``prompt`` / ``session_id`` 必用; CC ≥2.x 另含
+``transcript_path`` / ``cwd`` (2.1.179 hook 基座 schema: transcript_path 为
+必填 string; 老版本可能缺 → session_id 反查, 见下)。
+
+首 n turn 召回窗口 (v1.7 ②, 2026-09-01):
+- **时序终裁**: CC 2.1.179 二进制静态代码序 — UserPromptSubmit hooks 在
+  transcript append **之前**执行, 且 hook 输入 schema ``transcript_path``
+  必填。故 hook 触发时 transcript 只含既往 turn → **turn 判据 = ``count < n``**
+  (count = 已落盘既往 user_text 块数; 首 turn count=0 → 召回窗口内)。
+- **transcript 双路径**: 优先 ``payload["transcript_path"]``; 缺失时用
+  session_id 反查 ``transcripts._cc_project_dir(cwd)/<session_id>.jsonl``
+  (存在才用; 反查也落空 → 常驻档)。
+- **计数** (``_count_user_turns``): 逐行 json.loads(坏行跳) → type=="user" 且
+  非 isSidechain → ``transcripts._texts_of`` → ``corpus_prep.clean(txt,"cc")``
+  非空才计 (tool_result/thinking 块与 ``<memsvc-recall>`` 注入块天然滤除);
+  count 达 n **早停** (大 transcript 超时防线)。**不放** ``_cc_scenes`` — 它有
+  全会话去重/场景消耗/截断, 会三重低估; 复用的是其原语。任何异常 → None =
+  静默降级常驻档 (fail-open, 不挡路)。
+- **档位**: count < n = 首轮档 (use_vec=1 + 候选窗 MEM_RECALL_FIRST_TOPK 提升);
+  count >= n 或计数不可用 = 常驻档 (实体锚定零嵌入 — use_vec=False 把 recall
+  嵌入路全关, A 路常驻每 prompt; embedding 离线时首轮档 embed=[] 也被动回落
+  纯字面, 注入不炸)。compact 后 count 归零再进首轮档 (预期行为)。
+
 设计裁决 (P2):
-- **词法优先, 零 embed 依赖**: recall use_vec=False (默认) — LM Studio 不
-  在线注入照常工作; 向量融合留给后续版本按需开 (MEM_RECALL_USE_VEC=1)。
 - **实体锚定精度门**: 注入只收 prompt 指名实体 (search_entities 命中) 的
   fact。纯 value 扫描候选全拒 — 长 prompt 稀释 bigram 会命中任意 value
   (实测跨项目噪声 0.44 分霸榜)。无锚定实体 → 跳过整个 recall (零 DB 写)。
@@ -18,16 +39,22 @@
   全部返回候选记账 — 未注入不该强化), 注入器只对**最终注入**的 ≤top_k 条
   refresh_lif_on_recall — 注入即使用 (ADR-8v2 反馈环 = 记忆使用记账)。
 - **不建 mem-*.md**: 不传 cwd/mem_dir → mem_dir=None, 投影物化归
-  SessionStart hook (reconcile), 注入面保持只读+LIF 记账。
+  SessionStart hook (synthesis-index 单点, 09-01 终裁A方案), 注入面保持
+  只读+LIF 记账。
 - **query 截断**: prompt 前 N 字符 (默认 800) 作 query — 粘贴长文档不
   爆 token 扫描; CJK bigram 切分见 scoring.query_tokens。
 - **无命中零输出** (stdout 空 = CC 无感知); 任何异常 → data/hook-recall.log
   一行, exit 0 静默 — 注入是增强, 绝不阻塞 prompt。
 
-env: MEM_RECALL_MIN_SCORE (默认 0.15 — 长 prompt match 稀释自校准; 短 query
+env: MEM_RECALL_MIN_SCORE (默认 0.05 — 长 prompt match 稀释自校准; 短 query
 地板 0.3 是 recall 内部默认) /
-MEM_RECALL_TOP_K (8) / MEM_RECALL_MAX_BYTES (2048) /
-MEM_RECALL_QUERY_CHARS (800) / MEM_RECALL_USE_VEC (0)。
+MEM_RECALL_TOP_K (8) / MEM_RECALL_PER_ANCHOR (3) / MEM_RECALL_CAND_K (50;
+常驻档候选窗) / MEM_RECALL_MAX_BYTES (2048) /
+MEM_RECALL_QUERY_CHARS (800) /
+MEM_RECALL_FIRST_TURNS (1; <=0 = 关闭首turn窗口, 永远常驻档) /
+MEM_RECALL_FIRST_TOPK (50; 首轮档候选窗, 取 max(CAND_K, 本值))。
+(旧 MEM_RECALL_USE_VEC 不再治理钩子路 — 档位逻辑接管: 首轮档恒融合,
+常驻档恒零嵌入。)
 
 出端打标 (2026-08-28): additionalContext 整体包裹 ``<memsvc-recall>…``
 </memsvc-recall>`` 标记块 (预算扣除包裹开销 32B) — 重进语料时 corpus_prep
@@ -54,6 +81,43 @@ def _log_fail(msg: str) -> None:
         pass  # 日志失败也不挡 prompt
 
 
+def _count_user_turns(path: str | None, limit: int) -> int | None:
+    """transcript 里已落盘的既往 user_text 块数 (v1.7 ② turn 判据)。
+
+    逐行 json.loads(坏行跳) → type=="user" 且非 isSidechain →
+    ``transcripts._texts_of`` (只收 text 块, tool_result/thinking 天然排除)
+    → ``corpus_prep.clean(txt, "cc")`` 非空才计 (system-reminder /
+    ``<memsvc-recall>`` 注入块剥除后计, 防注入自计数)。**早停**: count 达
+    ``limit`` 即返回, 不读全文件 (大 transcript 超时防线)。任何异常 → None
+    = 调用方静默降级常驻档 (fail-open, 不挡路)。
+    """
+    if not path or limit <= 0:
+        return None
+    try:
+        import corpus_prep
+        import transcripts
+        n = 0
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue  # 坏行跳过 (半写行容错)
+                if not isinstance(d, dict) or d.get("type") != "user" \
+                        or d.get("isSidechain"):
+                    continue
+                msg = d.get("message")
+                msg = msg if isinstance(msg, dict) else {}
+                txt = transcripts._texts_of(msg.get("content"))
+                if corpus_prep.clean(txt, "cc"):
+                    n += 1
+                    if n >= limit:
+                        return n
+        return n
+    except Exception:
+        return None
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -64,13 +128,45 @@ def main() -> int:
         return 0
     session_id = payload.get("session_id") or None
 
+    # ── v1.7 ② 首 n turn 召回窗口 ────────────────────────────────────
+    # turn 判据 = count < n (依据: 时序终裁, 见头注 — hook 先于 transcript
+    # append, hook 瞬间 transcript 只含既往 turn)。transcript 双路径:
+    # payload.transcript_path 优先; 缺失时 session_id 反查
+    # ~/.claude/projects/<enc(cwd)>/<sid>.jsonl (存在才用)。计数缺失/失败
+    # → None → 常驻档 (fail-open 静默降级, 不挡路)。
+    try:
+        first_n = int(os.environ.get("MEM_RECALL_FIRST_TURNS", "1"))
+    except ValueError:
+        first_n = 1
+    transcript_path = payload.get("transcript_path") or None
+    if not transcript_path and session_id:
+        try:
+            import transcripts
+            cand = transcripts._cc_project_dir(
+                payload.get("cwd") or os.getcwd()) / f"{session_id}.jsonl"
+            transcript_path = str(cand) if cand.is_file() else None
+        except Exception:
+            transcript_path = None  # 反查也落空 → 常驻档
+    n_turns = _count_user_turns(transcript_path, first_n) \
+        if first_n > 0 and transcript_path else None
+    first_turn = first_n > 0 and n_turns is not None and n_turns < first_n
+
     min_score = float(os.environ.get("MEM_RECALL_MIN_SCORE", "0.05"))
     top_k = int(os.environ.get("MEM_RECALL_TOP_K", "8"))
     per_anchor_quota = int(os.environ.get("MEM_RECALL_PER_ANCHOR", "3"))
     cand_k = int(os.environ.get("MEM_RECALL_CAND_K", "50"))
     max_bytes = int(os.environ.get("MEM_RECALL_MAX_BYTES", "2048"))
     query_chars = int(os.environ.get("MEM_RECALL_QUERY_CHARS", "800"))
-    use_vec = os.environ.get("MEM_RECALL_USE_VEC", "0") == "1"
+    # 档位: 首轮档 use_vec=1 + 候选窗提升 (max(CAND_K, FIRST_TOPK), 接
+    # per-anchor 配额逻辑上游); 常驻档实体锚定零嵌入 — use_vec=False 把
+    # recall 嵌入路全关 (embedding 离线也零依赖, A 路照常)。
+    use_vec = bool(first_turn)
+    if first_turn:
+        try:
+            first_topk = int(os.environ.get("MEM_RECALL_FIRST_TOPK", "50"))
+        except ValueError:
+            first_topk = 50
+        cand_k = max(cand_k, first_topk)
 
     query = prompt[:query_chars]
     try:

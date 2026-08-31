@@ -451,6 +451,128 @@ def test_md_link_escape_bracket():
     print("✓ T6 md escape: topic 'a]b' → 索引行合法 markdown 链接(] 已转义)")
 
 
+# ── T13: 主题聚合 — 同 topic 只留 mem_score 最高代表 (09-01 终裁A方案) ────
+def test_topic_aggregation_keeps_best_representative(monkeypatch):
+    monkeypatch.delenv("MEM_SYNTH_MIN_SCORE", raising=False)
+    tmp = tempfile.mkdtemp()
+    try:
+        db.init(Path(tmp) / "mem.db")
+        mem_dir = Path(tmp) / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "MEMORY.md").write_text("# Index\n", encoding="utf-8")
+
+        topic = "用户使用 rust"
+        _, fid_hi = _mk_fact(value="rust new", LIF=0.9, conf=0.9, topic=topic)
+        _, fid_lo = _mk_fact(value="rust old", LIF=0.2, conf=0.2, topic=topic)
+        _, fid_go = _mk_fact(value="go", LIF=0.5, conf=0.5, topic="用户使用 go")
+        _write_mem_md(mem_dir, fid_hi, topic=topic)
+        _write_mem_md(mem_dir, fid_lo, topic=topic)
+        _write_mem_md(mem_dir, fid_go, topic="用户使用 go")
+
+        r = projection.synthesis_index(cwd="/test", mem_dir=mem_dir)
+        # 3 fact 同仓 → 同 topic 精确等值聚类只剩最高 mem_score 代表
+        assert r["projected"] == 2, f"3 fact → 2 代表: {r}"
+        assert r["deduped"] == 1, f"同 topic 聚合丢弃 1: {r}"
+        txt = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+        assert _mem_filename_for(fid_hi, topic) in txt, f"高分代表在场:\n{txt}"
+        assert _mem_filename_for(fid_lo, topic) not in txt, f"低分被聚合:\n{txt}"
+        assert _mem_filename_for(fid_go, "用户使用 go") in txt
+        assert _mem_line_count(txt) == 2
+
+        # 幂等重扫: 低分代表的 mem-*.md 文件留存 (orphan 判定按 KG presence,
+        # 不产生假 orphan), 重聚仍只出同一代表集
+        assert (mem_dir / _mem_filename_for(fid_lo, topic)).exists(), \
+            "非代表文件留存 (prune 语义不变)"
+        r2 = projection.synthesis_index(cwd="/test", mem_dir=mem_dir)
+        assert r2["projected"] == 2 and r2["deduped"] == 1, r2
+        txt2 = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+        assert txt2 == txt, "重扫投影幂等"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("✓ T13 主题聚合: 同 topic 只留最高 mem_score 代表, deduped=1, 幂等")
+
+
+# ── T14: 空/None topic 各成一组, 不互聚 (精确等值聚类的空值边界) ──────────
+def test_topic_aggregation_empty_topics_stay_solo(monkeypatch):
+    monkeypatch.delenv("MEM_SYNTH_MIN_SCORE", raising=False)
+    tmp = tempfile.mkdtemp()
+    try:
+        db.init(Path(tmp) / "mem.db")
+        mem_dir = Path(tmp) / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "MEMORY.md").write_text("# Index\n", encoding="utf-8")
+
+        _, fid_a = _mk_fact(value="alpha", LIF=0.8, conf=0.8, topic=None)
+        _, fid_b = _mk_fact(value="beta", LIF=0.8, conf=0.8, topic="")
+        _write_mem_md(mem_dir, fid_a, topic="")
+        _write_mem_md(mem_dir, fid_b, topic="")
+
+        r = projection.synthesis_index(cwd="/test", mem_dir=mem_dir)
+        assert r["projected"] == 2, f"空 topic 各成一组, 不互聚: {r}"
+        assert r["deduped"] == 0, f"无聚合丢弃: {r}"
+        txt = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+        assert _mem_line_count(txt) == 2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("✓ T14 空 topic 独立: None/空串各成一组, deduped=0")
+
+
+# ── T15: MEM_SYNTH_MIN_SCORE 地板 — 低于地板不投影, deduped 合计; 缺省 0 不过滤 ─
+def test_synth_min_score_floor(monkeypatch):
+    tmp = tempfile.mkdtemp()
+    try:
+        db.init(Path(tmp) / "mem.db")
+        mem_dir = Path(tmp) / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "MEMORY.md").write_text("# Index\n", encoding="utf-8")
+        _, fid_hi = _mk_fact(value="hi", LIF=0.9, conf=0.9, topic="t hi")
+        _, fid_lo = _mk_fact(value="lo", LIF=0.1, conf=0.1, topic="t lo")
+        _write_mem_md(mem_dir, fid_hi, topic="t hi")
+        _write_mem_md(mem_dir, fid_lo, topic="t lo")
+
+        # 缺省 0 = 不过滤 (两个都投影)
+        monkeypatch.delenv("MEM_SYNTH_MIN_SCORE", raising=False)
+        r = projection.synthesis_index(cwd="/test", mem_dir=mem_dir)
+        assert r["projected"] == 2 and r["deduped"] == 0, f"缺省不过滤: {r}"
+
+        # 地板 0.5: mem_score(lo)=0.1 被滤 (deduped 计入), hi (0.9) 留
+        monkeypatch.setenv("MEM_SYNTH_MIN_SCORE", "0.5")
+        r = projection.synthesis_index(cwd="/test", mem_dir=mem_dir)
+        assert r["projected"] == 1, f"地板滤后只投影 hi: {r}"
+        assert r["deduped"] == 1, f"地板滤计入 deduped: {r}"
+        txt = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+        assert _mem_filename_for(fid_hi, "t hi") in txt
+        assert _mem_filename_for(fid_lo, "t lo") not in txt
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("✓ T15 MIN_SCORE 地板: 缺省 0 不过滤; 地板上低分不投影且计入 deduped")
+
+
+# ── T16: 地板+聚合叠加 — deduped = 地板滤 + 聚合丢弃合计 ─────────────────
+def test_floor_and_aggregation_combine_in_deduped(monkeypatch):
+    tmp = tempfile.mkdtemp()
+    try:
+        db.init(Path(tmp) / "mem.db")
+        mem_dir = Path(tmp) / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "MEMORY.md").write_text("# Index\n", encoding="utf-8")
+        topic = "dup topic"
+        _, fid_hi = _mk_fact(value="hi", LIF=0.9, conf=0.9, topic=topic)
+        # lo 高于地板 0.5 (mem_score=0.6) 但低于代表 → 被聚合丢 (非地板丢)
+        _, fid_lo = _mk_fact(value="lo", LIF=0.6, conf=0.6, topic=topic)
+        _, fid_fl = _mk_fact(value="fl", LIF=0.1, conf=0.1, topic="solo low")
+        for f, t in ((fid_hi, topic), (fid_lo, topic), (fid_fl, "solo low")):
+            _write_mem_md(mem_dir, f, topic=t)
+        monkeypatch.setenv("MEM_SYNTH_MIN_SCORE", "0.5")
+        r = projection.synthesis_index(cwd="/test", mem_dir=mem_dir)
+        # mem_score: hi≈0.9 / lo≈0.6(聚合丢) / fl≈0.1(地板丢) → 只投影 hi
+        assert r["projected"] == 1, f"只留高分代表: {r}"
+        assert r["deduped"] == 2, f"deduped = 地板 1 + 聚合 1: {r}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("✓ T16 叠加: deduped = 地板滤 + 聚合丢弃合计")
+
+
 if __name__ == "__main__":
     test_basic_projection()
     test_cold_start()
@@ -467,4 +589,8 @@ if __name__ == "__main__":
     test_long_topic_filename()
     test_yaml_colon_description()
     test_md_link_escape_bracket()
+    test_topic_aggregation_keeps_best_representative(None)
+    test_topic_aggregation_empty_topics_stay_solo(None)
+    test_synth_min_score_floor(None)
+    test_floor_and_aggregation_combine_in_deduped(None)
     print("\n✓ All synthesis_index tests passed")

@@ -1,7 +1,8 @@
 """endsteps 过滤器测试 — end step 判定/长度门/侧链/去重/防御路径。
 
-新接线形态 (2026-08-27 用户裁决): PreCompact 只抽 assistant 每轮输出的
-end step 入 KG; CC automemory 不动; 召回/consolidation 手动。"""
+新接线形态 (09-01 终裁A方案): PreCompact 只抽 assistant 每轮输出的 end step
+入 KG; CC automemory 投影恢复 (SessionStart 单点); 召回注入走 UserPromptSubmit,
+consolidation 手动。"""
 import json
 
 import endsteps

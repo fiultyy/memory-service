@@ -1,11 +1,13 @@
 """endsteps — CC transcript 蒸馏过滤器 (PreCompact 入库前置, 2026-08-27 重接线)。
 
-用户裁决的接线形态:
-- CC automemory 原生机制/使用方式**完全不动** (例外: recall --project 的
-  recall-<DATE>.md 召回日志投影, 用户 2026-08-27 明示)。
+用户裁决的接线形态 (09-01 终裁A方案: 2026-08-27「CC automemory 不动」红线取消):
+- CC automemory 投影恢复 — SessionStart synthesis-index 单点写 CC memory
+  (MEMORY.md 投影索引, ADR-A 原生格式); recall --project 的 recall-<DATE>.md
+  召回日志投影照旧。本模块只管 transcript 蒸馏, 不碰投影。
 - PreCompact 钩子把 transcript 快照进 spool; worker 先经本模块过滤 — 只留
   **assistant 每一轮输出的 end step** — 再 autodream 入 KG。
-- 召回/consolidation 全手动 (skills/memsvc); 手动补近期会话 = cli ingest-recent。
+- 召回注入走 UserPromptSubmit 钩子 (recall_inject.py), consolidation 手动
+  (skills/memsvc); 手动补近期会话 = cli ingest-recent。
 
 end step 判定 (实测校准, 717 tool_use vs 9 end_turn 的大 transcript):
 - ``type == "assistant"`` 且 ``message.stop_reason == "end_turn"`` — API 语义上

@@ -2,16 +2,17 @@
 # spool-worker.sh — PreCompact 快照排干 worker (P1 → 2026-08-27 v2 重接线;
 # 2026-08-28 v3: --scenes 用户声音通道, Codex 阅读优先级采纳)。
 #
-# v2 形态 (用户裁决: CC automemory 不动 / 只抽 assistant end step 入 KG /
-# 召回+consolidation 手动):
+# v2 形态 (2026-08-27 用户裁决; 2026-09-01 终裁A方案修订: 「CC automemory 不动」
+# 红线取消, 投影恢复 SessionStart 单点):
 #   1. 逐 spool 文件先经 endsteps.py --scenes 蒸馏 — 每个 assistant end
 #      step (stop_reason=end_turn 主链 text, 长度门 120, 文内去重) 配对其前
 #      累积的用户原话块 (≤4 块/1200 字, v3), 合成 autodream 可吃的
 #      transcript ([用户]/[助手结论] 角色标记)。
 #   2. 蒸馏为空 (纯工具会话) → 视为成功, 删文件零 LLM。
 #   3. autodream 入 KG (LLM 直抽, 断供响亮跳过留重试)。
-#   4. **不再 synthesis-index** — 那会写 CC memory 目录 (投影/MEMORY.md),
-#      违背「不改变 CC automemory 机制」; KG 是唯一 sink。
+#   4. 不在本 worker 内跑 synthesis-index — MEMORY.md 投影索引统一归
+#      SessionStart 单点 (09-01 终裁A方案: 红线取消, 恢复 ADR-A 原生格式投影);
+#      本 worker 职责止于 KG 入库, 避免双写入口。
 #
 # 单例锁 (flock) 防并发双跑; 处理中 .lock 后缀可回收重试; 失败文件留在
 # spool 下次重试 (不丢记忆, 只延迟)。排空即退出, 无 daemon。

@@ -32,7 +32,7 @@ mem-service 是一个独立 Python CLI（无 daemon / 无端口），为 Claude 
 ```
 Claude Code
   MEMORY.md  (热层 · 开局自动入 context)
-      ↑  projection: KG → CC  (synthesis-index, recall 驱动散 index 对账)
+      ↑  projection: KG → CC  (SessionStart synthesis-index 单点 + recall 驱动散 index 对账, 09-01 终裁A方案)
       │
 mem-service (KG 叠加层)
       │
@@ -41,7 +41,7 @@ mem-service (KG 叠加层)
        ├─ consolidate           (LIF decay + dedup)
        ├─ autodream ──────────┐ (session → KG 增量)
        ├─ init-memory ────────┤ (CC memory → KG permanent 种子)
-       └─ synthesis-index ─────┘ (KG → CC 散 index 对账)
+       └─ synthesis-index ─────┘ (KG → CC 散 index 对账; SessionStart 单点触发)
                                ↓
                             store → db (SQLite)
                                │
@@ -55,7 +55,7 @@ mem-service (KG 叠加层)
 - **写入**：`ingest` / `autodream` → `adapter`（蝴蝶翼 N-wing 抽取 + 投票）→ `store.put_fact`（on-ingest 预计算向量入 L2 cache）→ SQLite KG
 - **读取**：`recall` → 字面 match + pagerank centrality + LIF + 向量 sim 加权排序 → Fact 列表
 - **巩固**：`consolidate` → LIF decay（half_life）+ 精确重复 supersede
-- **投影**：`synthesis-index` → 扫散 `mem-*.md` → 回 KG 取 mem_score → 对账重写 MEMORY `[mem]`(recall 驱动, MEMORY [mem] 唯一写入口, ADR-15 P2)
+- **投影**：`synthesis-index` → 扫散 `mem-*.md` → 回 KG 取 mem_score → 主题聚合(同 topic 唯一) → 对账重写 MEMORY.md 投影索引(ADR-A 原生格式, 无 `[mem]` 字面标记; SessionStart 单点自动 + cli 手动, MEMORY.md 投影行唯一写入口, ADR-15 P2 / 09-01 终裁A方案)
 
 ### 模块
 

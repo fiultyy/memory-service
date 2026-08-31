@@ -12,7 +12,13 @@ native(``mem-service-*`` 的 ``serv`` 非 4-hex, 不匹配)。
 ADR-C (topic): LLM 抽取时每条 edge 附一句话可读 topic, 流经 adapter._vote 透传 →
 cli/autodream 消费 → 投影用作 slug 源 + 索引标题 + description。
 
-触发: PreCompact(autodream 后)+ SessionStart hook / cli synthesis-index(P3 已清退 build-index)。
+触发: SessionStart hook(单点自动, 09-01 终裁A方案)/ cli synthesis-index(手动;
+P3 已清退 build-index)。PreCompact 链不再触发投影 — spool-worker 职责止于 KG 入库。
+
+主题聚合 (09-01 终裁A方案): 投影前按 topic **精确等值**聚类, 同 topic 只留
+``scoring.mem_score`` 最高代表(空 topic 各成一组); ``MEM_SYNTH_MIN_SCORE`` 地板
+滤无用/无关(缺省 0 = 不过滤)。被滤+被聚合合计入返回值 ``deduped``; 非代表的
+mem-*.md 文件留存, orphan 判定/prune 语义不变。不做 embedding 聚类(后续项)。
 
 ADR-15 P2: ``synthesis_index`` 是 MEMORY 投影行的**唯一写入口**——扫散落
 mem-{4hex}-{slug}.md(各路径建/刷的 snaptag 载体)→ 回 KG 取现值 → 对账重写 MEMORY 投影段。
@@ -182,6 +188,39 @@ def _is_mem_index_line(ln: str) -> bool:
     return bool(_MEM_LINE_NEW_RE.search(ln)) or _MEM_LINE_OLD_MARKER in ln
 
 
+def _synth_min_score() -> float:
+    """``MEM_SYNTH_MIN_SCORE`` 投影地板(缺省 0 = 不过滤): mem_score 低于地板的
+    fact 不进 MEMORY 投影索引(「无用/无关」滤除, 09-01 终裁A方案主题聚合配套)。
+    非法值按缺省 0 处理 — 投影是增强面, 不因 env 手误炸 SessionStart。"""
+    raw = (os.environ.get("MEM_SYNTH_MIN_SCORE") or "").strip()
+    try:
+        return float(raw) if raw else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _topic_representatives(facts: list[dict]) -> tuple[list[dict], int]:
+    """主题聚合 (09-01 终裁A方案): topic **精确等值**聚类 — 同 topic 只留
+    ``scoring.mem_score`` 最高代表; 空/空白 topic 各成一组(不互聚)。
+
+    精确等值: topic 是 LLM 自由文本, 近义/变体不聚(embedding 聚类属后续项,
+    本实现不建 DB 索引不做向量聚类)。入参约定已按 mem_score desc 排序
+    (synthesis_index 步骤 5), 同分 tie 保守取先见者(排序稳定 → 幂等)。
+    返回 ``(代表列表[mem_score desc], 被聚合丢弃数)``; 被聚合掉的 fact 只影响
+    索引行, 其 mem-*.md 文件照旧留存(orphan 判定仍按 KG presence, 不产生假
+    orphan, ``MEM_SYNTH_PRUNE_ORPHANS`` 默认 off 语义不变)。"""
+    import scoring
+    best: dict[str, dict] = {}
+    for f in facts:
+        key = (f.get("topic") or "").strip() or f"\x00solo:{f.get('id')}"
+        cur = best.get(key)
+        if cur is None or scoring.mem_score(f) > scoring.mem_score(cur):
+            best[key] = f
+    reps = sorted(best.values(), key=lambda f: scoring.mem_score(f),
+                  reverse=True)
+    return reps, len(facts) - len(reps)
+
+
 def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None) -> dict:
     """对账散 ``mem-{4hex}-{slug}.md`` → 回 KG 取现值 → 重写 MEMORY.md 投影索引(唯一写入口)。
 
@@ -193,13 +232,17 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
        orphan = fact_ids 不在 present。
     4. 批量 ``entity WHERE id IN (present.subject_id)`` 取实体名。
     5. ``scoring.mem_score`` desc 排序(PPR 默认关, 留 .env MEM_SYNTH_PPR 占位)。
+    5.5 主题聚合(09-01 终裁A方案): ``MEM_SYNTH_MIN_SCORE`` 地板先滤无用/无关
+        (缺省 0 = 不过滤), 再 ``_topic_representatives`` 同 topic 精确等值聚类
+        只留最高 mem_score 代表; 被滤+被聚合合计入 ``deduped``(不投影的
+        present fact 数)。
     6. 对账写 MEMORY: 删所有投影索引行(_is_mem_index_line, orphan/旧格式永远删),
        保 CC 原生行, append 本次 present facts(原生格式, ADR-A)。
     7. orphan 文件: ``MEM_SYNTH_PRUNE_ORPHANS=1`` 才删(``MEM_SYNTH_ORPHAN_BACKUP=1`` rename
        ``.orphan.bak`` 否则 unlink);默认 off 留文件。
 
     Returns:
-        ``{projected, orphans, pruned, cold_start}``。
+        ``{projected, deduped, orphans, pruned, cold_start}``。
     """
     import db
 
@@ -225,7 +268,8 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
     # 2. 冷启动: 无有效 fact_id → 清投影行(保非投影), 不兜底。
     if not fact_ids:
         _rewrite_mem_lines(memory_md, [])
-        return {"projected": 0, "orphans": 0, "pruned": 0, "cold_start": True}
+        return {"projected": 0, "deduped": 0, "orphans": 0, "pruned": 0,
+                "cold_start": True}
 
     # 3. 批量回 KG(WHERE id IN (...), 一次非 N+1)。取 topic(ADR-C)投影用。
     conn = db.get_conn()
@@ -268,6 +312,20 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
     import scoring
     facts.sort(key=lambda f: scoring.mem_score(f), reverse=True)
 
+    # 5.5 主题聚合投影 (09-01 终裁A方案: 08-27 红线取消, SessionStart 单点恢复
+    # 投影): MEM_SYNTH_MIN_SCORE 地板先滤「无用/无关」(缺省 0 = 不过滤), 再同
+    # topic 精确等值聚类只留 mem_score 最高代表。deduped = 地板滤 + 聚合丢弃
+    # 合计(不投影的 present fact 数)。非代表的 mem-*.md 文件留存(下次扫描重聚,
+    # 幂等); orphan 判定按 KG presence 不变, 聚合不产生假 orphan。
+    deduped = 0
+    floor = _synth_min_score()
+    if floor > 0.0:
+        kept = [f for f in facts if scoring.mem_score(f) >= floor]
+        deduped += len(facts) - len(kept)
+        facts = kept
+    facts, agg_dropped = _topic_representatives(facts)
+    deduped += agg_dropped
+
     # 6. 对账写 MEMORY.md: 删 orphan/旧投影行(永远删), append 本次 present(原生格式, 已排序)。
     new_lines = [
         _format_mem_line(
@@ -294,6 +352,7 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
 
     return {
         "projected": len(facts),
+        "deduped": deduped,
         "orphans": len(orphan_ids),
         "pruned": pruned,
         "cold_start": False,
@@ -321,9 +380,10 @@ def _rewrite_mem_lines(memory_md: Path, new_lines: list[str]) -> None:
 
 # ── M18 recall log 投影 (recall-<DATE>.md + MEMORY 索引行, 用户裁决 2026-08-27) ──
 # 手动召回的内容正文按日落一文件 ``recall-YYYYMMDD.md``, MEMORY.md 注入当日索引行。
-# 这是对「CC automemory 不动」红线的**用户明示放宽**: 只限 recall 日志这一族文件,
-# 其余 (synthesis-index 等) 仍保持手动/休眠。与 ADR-15 per-hit ``mem-<id>.md`` 投影
-# 互补: mem-*.md 是单 fact 载体(Ch2), recall-*.md 是当日召回流水(查询+命中合集)。
+# 09-01 终裁A方案: 08-27「CC automemory 不动」红线已取消, synthesis-index 恢复
+# SessionStart 单点自动投影; recall 日志投影与 MEMORY.md 投影索引是两族正交投影
+# (重写互不误删), 本段仅负责 recall 日志族。与 ADR-15 per-hit ``mem-<id>.md``
+# 投影互补: mem-*.md 是单 fact 载体(Ch2), recall-*.md 是当日召回流水(查询+命中合集)。
 
 RECALL_FILE_RE = re.compile(r"^recall-\d{8}\.md$")
 _RECALL_INDEX_HEADING = "## KG recall logs"

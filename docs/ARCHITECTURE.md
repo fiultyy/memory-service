@@ -33,7 +33,7 @@ memsvc（mem-service）是一个独立 Python 记忆服务：把对话事实与�
 | `resolver.py` | D3 两步实体合并：精确/别名闸 → 向量 top-k + LLM 去重；跨 ingest 同实体异写消解 |
 | `predgate.py` | 谓词聚边（batch 13）：开放谓词词汇 + 近似度聚类，压 connected_to 大锅饭 |
 | `consolidate.py` | LIF 五维重算 + 精确重复合并（ADR-8v2/ADR-6）；type-aware decay：ephemeral 7d / stable 90d / permanent ∞ |
-| `recall.py` | KG 召回：词法 seed → 候选 → 打分；--vector/--bfs/--as-of/--cwd/--json/--project |
+| `recall.py` | KG 召回：词法 seed → 候选 → 打分；--vector/--bfs/--as-of/--cwd/--json/--project/--gate(--no-gate) |
 | `scoring.py` | `score = α·match + β·centrality + γ·LIF + δ·vec_sim`（ADR-4v2）；on-the-fly pagerank |
 | `embedding.py` | OpenAI-compat REST 嵌入客户端（LM Studio 127.0.0.1:16666 qwen3-embedding-4b） |
 | `vec_index.py` | sqlite-vec 向量索引面：vec_entity/vec_fact 虚表 + 回填 |
@@ -51,7 +51,7 @@ memsvc（mem-service）是一个独立 Python 记忆服务：把对话事实与�
 
 进端（写）：transcript → endsteps 蒸馏（只留 assistant 轮末结论段）→ autodream → 提取器（gazetteer 占位即时入库 / wings LLM 异步升级经 upgrade_queue+surprise 排队 / ingest 子命令蝴蝶翼直抽）→ resolver 合并实体 → store 落 fact（provenance 随源块：user_prose 1.0 / tool_obs·human 0.9 / agent_assert·system 0.5）。
 
-出端（读）：recall query → 分词 → entity.name LIKE 锚定 seed → 候选（subject/object 邻域）→ α·match + β·centrality(pagerank) + γ·LIF + δ·vec 打分 → top-k；`--bfs` 图扩展补字面盲区（入图门槛 lif_source≥0.7）；`--as-of` bi-temporal 点时回放。
+出端（读）：recall query → 分词 → entity.name LIKE 锚定 seed → 候选（subject/object 邻域）→ α·match + β·centrality(pagerank) + γ·LIF + δ·vec 打分 → top-k；`--bfs` 图扩展补字面盲区（v1.7③ M3 终裁: B翼硬门槛摘除, 改软惩罚 gate_mod=0.5+0.5·min(1, lif_source/0.7) 仅乘 B翼专属集；单LLM gate 绑定注入首轮档，CLI `--gate` 默认开/`--no-gate` 逃生，手动面不入解锁累计）；`--as-of` bi-temporal 点时回放。
 
 实时图（M20）：inotify 盯 data/ 目录 wal/shm/db 事件 → 去抖 250ms → rowid 游标增量（端点并集补发防悬空边，degree>0 过滤）→ SSE 推送 → sigma.js 增量加点/边。graph-export 产出 Cosmograph/Gephi Lite 口径 csv。
 
@@ -70,6 +70,6 @@ memsvc（mem-service）是一个独立 Python 记忆服务：把对话事实与�
 
 - 正本：`/home/yy/projects/memory-service/`；调用约束：`cd` 到服务目录或用绝对路径（模块裸 import，脚本目录自动进 sys.path，任意 cwd 可用）。
 - 软链：`~/.dsh/skills/memsvc`、`~/.claude/skills/memsvc`（pi 经 claude 兼容发现层扫 ~/.claude/skills 零安装）。
-- 依赖门：词法召回零依赖；--vector/--bfs 需 LM Studio 16666；入库类走 glm-5-turbo（.env ZHIPU_API_KEY），LLM 断供响亮失败绝不回落 regex。
+- 依赖门：词法召回零依赖；--vector/--bfs 需 LM Studio 16666；入库类走 glm-5-turbo（.env ZHIPU_API_KEY），LLM 断供响亮失败，默认 llm 档绝不静默回落；仅显式 `MEM_EXTRACT_CHANNEL=fallback:auto` opt-in 才降级 regex（v1.7⑤）。
 - 实时图：`cli.py graph-live --port 8766`（默认 8765 被 rt_gateway 占用）；部署裁决 = 不常驻，按需手动拉起，无状态秒起。
 - 迭代史：`docs/mem-service-iteration-log.md`（M 系列 + 接线裁决）；实现 ledger：`~/research/LEDGER-memsvc-impl.md`。

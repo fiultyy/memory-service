@@ -314,6 +314,8 @@ def recall(query: str, verbose: bool = False,
            min_score: float | None = None,
            project: bool = False,
            use_gate: bool = False,
+           gate_account: bool = False,
+           gate_scope: str | None = None,
            gate_provider=None) -> list[dict[str, Any]] | dict[str, Any]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
@@ -328,10 +330,16 @@ def recall(query: str, verbose: bool = False,
     ``as_json=True`` (M15a) 输出稳定 JSON 契约 shape: ``{"query", "facts":
     [structured...]}`` — 见 :func:`_json_contract_facts` (字段名即 ABI)。
     ``use_gate=True`` (v1.7③, CLI ``--gate`` 默认开): query 自动升格三字段
-    {keywords=确定性实体提取, intent=原文, scope:"manual"} 并对 B 翼 fact 跑
-    单 LLM gate — 输出与注入面同一 gate schema 零分叉; **本 wrapper 即手动面**,
-    恒以 ``gate_account=False`` 下传 (v7 三句之三: 手动面 match_score 不入
-    gate_score 解锁累计, 防 CLI 探测污染账本; recall boost 记账路径照旧)。
+    {keywords=确定性实体提取, intent=原文} 并对 B 翼 fact 跑单 LLM gate —
+    输出与注入面同一 gate schema 零分叉。
+    ``gate_account`` (F1 接线): gate_score N2 解锁累计记账开关, 下传
+    recall.recall 同名参数。默认 False = 手动面 (v7 三句之三: 手动面
+    match_score 不入 gate_score 解锁累计, 防 CLI 探测污染账本; recall boost
+    记账路径照旧); 注入面首轮档 (hooks/recall_inject.py, 与 use_gate 同一
+    能力探测守卫) 显式传 True → keep 的 match_score 生产入账 (N2 暂缓期
+    只写不读的写入面)。
+    ``gate_scope`` (F1 c): gate 请求 scope 面标签透传 (None ⇒ 按调用面:
+    gate_account=True→"recall" / False→"manual"); 新面可用它显式钉标签。
     ``gate_provider``: gate LLM 依赖注入 seam (照 recall.recall 同名参数;
     测试零网络注入 mock; argv 面不暴露 flag, key 走 env)。
     """
@@ -340,7 +348,8 @@ def recall(query: str, verbose: bool = False,
                                with_tag=with_tag, use_bfs=use_bfs, bfs_hops=bfs_hops,
                                as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped,
                                min_score=min_score, use_gate=use_gate,
-                               gate_account=False, gate_provider=gate_provider)
+                               gate_account=gate_account, gate_scope=gate_scope,
+                               gate_provider=gate_provider)
     if project:
         # M18: 召回正文 → recall-<DATE>.md + MEMORY.md 索引行 (用户裁决 2026-08-27)。
         # dir = cc_memory_dir(--cwd 或 $PWD); 空命中不投影(不写空日志)。报告走

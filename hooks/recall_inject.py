@@ -206,6 +206,7 @@ def main() -> int:
                 import inspect as _inspect
                 if "use_gate" in _inspect.signature(cli.recall).parameters:
                     recall_kw["use_gate"] = True
+                    recall_kw["gate_account"] = True  # F1 b) 授权一行: 首轮档 keep 入 N2 账
             except (TypeError, ValueError):
                 pass
         result = cli.recall(query, **recall_kw)

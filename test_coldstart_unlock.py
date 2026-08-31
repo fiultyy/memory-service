@@ -392,3 +392,24 @@ def test_e7_llm_challenger_supersede_unchanged(monkeypatch):
 # ExtractFailed 可导入性自检 (E10 红线引用面, 防 import 漂移)。
 def test_extract_failed_is_runtime_error():
     assert issubclass(ExtractFailed, RuntimeError)
+
+
+# ── F2 微修单 (编排者): N2 解锁阈值 env 非法值回退专测 ────────────────
+
+def test_unlock_match_score_cap_invalid_env_falls_back_default(monkeypatch):
+    """store.unlock_match_score_cap 非法 env 值回落默认 2.0 (不可考不臆测)。
+
+    实际回退条件 = float() 解析失败 (ValueError/TypeError) — 非法值如
+    "abc"/"1.2.3" 命中回退; 负数/零可正常解析、按原样放行 (无值域校验,
+    不属本回退分支射程, 此处不断言以免锁死潜在值域校验演进)。仅测公共
+    读取口, store.py 零改动。"""
+    monkeypatch.setenv("MEM_UNLOCK_MATCH_SCORE", "abc")
+    assert store.unlock_match_score_cap() == 2.0, "非数值串必须回落默认 2.0"
+    monkeypatch.setenv("MEM_UNLOCK_MATCH_SCORE", "1.2.3")
+    assert store.unlock_match_score_cap() == 2.0, "多小数点等非法形态同样回落"
+    # 合法值照常透传 (回退分支不得误伤正常配置)。
+    monkeypatch.setenv("MEM_UNLOCK_MATCH_SCORE", "3.5")
+    assert store.unlock_match_score_cap() == 3.5
+    # env 未设 = 默认 2.0。
+    monkeypatch.delenv("MEM_UNLOCK_MATCH_SCORE", raising=False)
+    assert store.unlock_match_score_cap() == 2.0

@@ -171,7 +171,7 @@ mem consolidate
 ## 何时不该用
 
 - 即时对话上下文(CC memory md 已是即时派热/温层,够用)
-- 需要 per-turn 自动注入记忆(三频 hook defer)
+- 需要 per-turn 自动注入记忆(v1.7①② 已交付: UserPromptSubmit 注入器常驻, 首 n turn 绑定 B翼/gate 增强档)
 
 ---
 
@@ -212,7 +212,7 @@ KG 是增量演化的:写入 → 召回验证 → dreaming 日频整合(晋升/�
 
 ## 实现边界(见 Spec §3/§9)
 
-**已实现**:LLM 蝴蝶翼抽取(ADR-5b)+ `α·match+β·centrality+γ·LIF+δ·vec` 召回(ADR-4v2)+ 向量召回 `--vector`(ADR-13)+ PreCompact autoDream hook(ADR-10/11)+ type-aware decay(ADR-8v2)+ 多值谓词共存 + KG→CC 投影 `synthesis-index`(ADR-15 P2)+ BFS 图召回(D5,入图门槛 lif_source≥0.7)+ bi-temporal 点时召回(D4)+ autoDream daemon `dream-daemon`(operational #1)。
+**已实现**:LLM 蝴蝶翼抽取(ADR-5b)+ `α·match+β·centrality+γ·LIF+δ·vec` 召回(ADR-4v2)+ 向量召回 `--vector`(ADR-13)+ PreCompact autoDream hook(ADR-10/11)+ type-aware decay(ADR-8v2)+ 多值谓词共存 + KG→CC 投影 `synthesis-index`(ADR-15 P2)+ BFS 图召回(D5, v1.7③ M3 终裁: B翼硬门槛摘除, 改软惩罚 gate_mod 乘子)+ bi-temporal 点时召回(D4)+ autoDream daemon `dream-daemon`(operational #1)。
 
 **新实态(2026-08 统一记忆系统改造后)**:
 

@@ -409,6 +409,35 @@ def test_manual_face_match_score_not_accounted(fresh_db):
     assert isinstance(req["keywords"], list)
 
 
+def test_injection_face_gate_account_wired(fresh_db):
+    """F1 a)+b) 接线: 注入面形态 (cli.recall 带 gate_account=True — 与
+    recall_inject 首轮档 recall_kw 同款) 下 gate keep → gate_score 生产入账
+    (N2 暂缓期只写不读的写入面可达); scope 面标签按调用面="recall"。"""
+    f_ab, f_bc = _chain()
+    p = GateMockProvider(keep=True, match_score=0.9, anchor="Alpha")
+    out = cli.recall("Alpha", use_bfs=True, bfs_hops=2, boost=False,
+                     session_id="s-first-turn", use_gate=True,
+                     gate_account=True, gate_provider=p)
+    ids = {f["id"] for f in (out["results"] if isinstance(out, dict) else out)}
+    assert f_bc in ids and f_ab in ids
+    assert store.get_fact(f_bc)["gate_score"] == pytest.approx(0.9), (
+        "注入首轮档 gate keep 必须入 N2 解锁累计 (F1: 生产写入面不可达漏洞已修)")
+    req = json.loads(p.calls[0][1][0]["content"])
+    assert req["scope"] == "recall", "注入面 gate 请求 scope 面标签应为 recall"
+    # 手动面对照: 默认 gate_account=False 仍不入账 (v7 三句之三不被回归);
+    # 累计语义 = 求和 (0.9 注入面 + 0.9 直调 recall_mod.recall 默认 True 面)。
+    _recall("Alpha", use_gate=True, gate_provider=p)
+    assert store.get_fact(f_bc)["gate_score"] == pytest.approx(1.8)
+
+
+def test_recall_inject_capability_guard_sees_gate_account():
+    """F1 b) 前提钉死: recall_inject 首轮档签名能力探测守卫 (同一 if) 对
+    gate_account 可见 — use_gate 与 gate_account 同波落地, 守卫代理成立。"""
+    import inspect
+    params = inspect.signature(cli.recall).parameters
+    assert "use_gate" in params and "gate_account" in params
+
+
 def test_cli_gate_default_on_and_no_gate_escape(fresh_db, monkeypatch):
     """--gate 默认开 (N3 选 a) / --no-gate 逃生。"""
     captured = []

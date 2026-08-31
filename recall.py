@@ -255,6 +255,7 @@ def recall(
     min_score: float | None = None,
     use_gate: bool = False,
     gate_account: bool = True,
+    gate_scope: str | None = None,
     gate_provider: Any = None,
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
@@ -298,6 +299,10 @@ def recall(
             :func:`store.bump_gate_score` 求和封顶入账; False (CLI 手动
             --gate 面) → **不入解锁累计** (v7 三句之三: 防 CLI 探测污染账本),
             gate 判定与输出 schema 仍零分叉。
+        gate_scope: gate 请求 scope 面标签显式覆盖 (F1 c)。None (默认) ⇒
+            按调用面解析: gate_account=True (注入首轮档) → "recall" /
+            False (手动面) → "manual" — 与记账开关同键分面, 但语义独立:
+            scope 只是请求 payload 的面标签, 不控制入账。
         gate_provider: gate LLM 依赖注入 seam (照 ``llm_extract.extract``
             provider= 先例; 测试零网络注入 mock)。None ⇒ gate 内部按断供
             红线自检 (env 无 ZHIPU_API_KEY 直接短路"无 gate")。
@@ -467,10 +472,14 @@ def recall(
                     (f.get("value") or "") + "\n" + (f.get("topic") or "")
                 ).strip()
         try:
+            # F1 c) scope 按调用面显式: gate_scope 显式传参优先 (新面预留);
+            # 缺省按 gate_account 映射调用面 — True(注入首轮档)→"recall" /
+            # False(手动面)→"manual"。scope 只是面标签, 与入账开关语义独立。
             verdicts = gate.run_gate(
                 cand_texts, query,
                 provider=gate_provider,
-                scope=("manual" if not gate_account else "recall"),
+                scope=(gate_scope if gate_scope is not None
+                       else ("manual" if not gate_account else "recall")),
             )
         except Exception:  # noqa: BLE001 — gate 任何失败 ≡ 不可用, 契约只要求 A 路
             verdicts = None

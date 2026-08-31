@@ -60,7 +60,8 @@ def test_dry_run_zero_side_effects(tmp_path, monkeypatch):
     reg = tmp_path / "reg.json"
     r = cli.ingest_recent(cwd=str(cwd), dry_run=True, registry_path=reg)
     assert r["files"] == 1 and r["would_ingest"] == 1
-    assert r["details"][0]["steps"] == 1  # tool_use 被滤
+    assert r["details"][0]["scenes"] == 1  # tool_use 被滤 (M21: 场景口径)
+    assert r["details"][0]["user_blocks"] == 0  # 无用户原话块
     assert not reg.exists()  # dry-run 零注册表
     assert r["facts"] == {}  # 零 KG 写
 
@@ -71,7 +72,8 @@ def test_ingest_and_registry_skip(tmp_path, monkeypatch):
     calls = []
     import autodream as autodream_mod
 
-    def fake_autodream(session_id, transcript_path, source_cwd=None):
+    def fake_autodream(session_id, transcript_path, source_cwd=None,
+                       harness="cc"):
         """契约桩: 记 (session, 合成 transcript 内容, source_cwd), 返回通道档计。"""
         calls.append((session_id,
                       Path(transcript_path).read_text(encoding="utf-8"),
@@ -86,10 +88,11 @@ def test_ingest_and_registry_skip(tmp_path, monkeypatch):
     r1 = cli.ingest_recent(cwd=str(cwd), registry_path=reg)
     assert r1["ingested"] == 1 and r1["errors"] == 0
     assert r1["facts"] == {"added": 2, "noop": 1}  # 通道计数聚合
-    # 契约: session = transcript 文件名 uuid; 合成 transcript = endstep 形状; source_cwd 标记
+    # 契约: session = transcript 文件名 uuid; 合成 transcript = 场景形状; source_cwd 标记
     assert calls[0][0] == "bbbb2222-2222-2222-2222-222222222222"
     assert '"type": "user"' in calls[0][1]
-    assert "结论乙" in calls[0][1] and "tool_use" not in calls[0][1]
+    assert "[助手结论] 结论乙" in calls[0][1]  # M21 角色标记
+    assert "tool_use" not in calls[0][1]
     assert calls[0][2] == str(cwd)
     assert reg.exists()
     # 二跑: 同 sha → skipped-unchanged, 不重复烧通道

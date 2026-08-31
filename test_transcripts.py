@@ -173,12 +173,14 @@ def test_omp_locate_and_ingest_recent(tmp_path, monkeypatch):
     calls = []
     import autodream as autodream_mod
     monkeypatch.setattr(autodream_mod, "autodream",
-                        lambda sid, tp, source_cwd=None: calls.append(
-                            (sid, open(tp).read())) or {"added": 1})
+                        lambda sid, tp, source_cwd=None, harness="cc":
+                        calls.append((sid, open(tp).read())) or {"added": 1})
     r = cli.ingest_recent(cwd=cwd, harness="omp",
                           registry_path=tmp_path / "reg.json")
     assert r["harness"] == "omp" and r["ingested"] == 1 and r["errors"] == 0
     assert LONG in calls[0][1]
+    # M21 用户声音通道: 合成 transcript 带角色标记 (prompt v5 阅读优先级依赖)
+    assert "[助手结论] " + LONG in calls[0][1]
 
 
 def test_pi_adapter_dsh_style_encoding(tmp_path, monkeypatch):
@@ -218,3 +220,227 @@ def test_cc_adapter_passthrough(tmp_path):
         "content": [{"type": "text", "text": LONG}]}}) + "\n", encoding="utf-8")
     assert transcripts.end_steps(p, "cc") == [LONG]
     assert transcripts.session_id(p, "cc") == "t"
+
+
+# ── M21 用户声音场景 (2026-08-28, Codex 阅读优先级采纳) ───────────────
+
+def _cc_rec(t, content, sidechain=False, stop_reason=None):
+    return json.dumps({"type": t, "isSidechain": sidechain,
+                       "message": {"role": t, "stop_reason": stop_reason,
+                                   "content": content}}, ensure_ascii=False)
+
+
+def test_cc_scenes_pairing_and_recent_cap():
+    """每个 end step 配对其前累积用户块; cap 保最近 4 块 (时间序)。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.jsonl"
+        u1, u2, u3, u4, u5 = ("用户语境一", "用户语境二", "用户语境三",
+                              "用户语境四", "用户语境五")
+        p.write_text("\n".join([
+            _cc_rec("user", u1),
+            _cc_rec("assistant", [{"type": "text", "text": LONG}],
+                    stop_reason="end_turn"),
+            _cc_rec("user", u2), _cc_rec("user", u3),
+            _cc_rec("user", u4), _cc_rec("user", u5),
+            _cc_rec("assistant", [{"type": "text", "text": LONG2}],
+                    stop_reason="end_turn"),
+        ]) + "\n", encoding="utf-8")
+        sc = transcripts.scenes(p, "cc")
+        assert [s["end_step"] for s in sc] == [LONG, LONG2]
+        assert sc[0]["user_blocks"] == [u1]
+        assert sc[1]["user_blocks"] == [u2, u3, u4, u5]  # 保最近, 时间序
+
+
+def test_cc_scenes_cleans_injected_blocks_and_tool_results():
+    """user 块过 corpus_prep (system-reminder 剥); tool_result 块不混入
+    (cc 的 tool_result 由 user role 携带, _texts_of 只取 text 块)。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.jsonl"
+        p.write_text("\n".join([
+            _cc_rec("user",
+                    "<system-reminder>注入上下文</system-reminder>真裁决: 先杀掉"),
+            _cc_rec("user", [{"type": "tool_result",
+                              "content": "工具观测不应进用户语料"}]),
+            _cc_rec("assistant", [{"type": "text", "text": LONG}],
+                    stop_reason="end_turn"),
+        ]) + "\n", encoding="utf-8")
+        sc = transcripts.scenes(p, "cc")
+        assert len(sc) == 1
+        assert sc[0]["user_blocks"] == ["真裁决: 先杀掉"]
+        assert "工具观测" not in "".join(sc[0]["user_blocks"])
+
+
+def test_dsh_scenes_structural_source_kind_filter():
+    """dsh 结构化注入判别 (288 文件扫描: source.kind 是最强判别器) —
+    只有 kind=user 是真人; skill-catalog/plugin(compact) 注入全弃。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.jsonl"
+
+        def _user(txt, kind):
+            return _dsh_evt("user/message", turn=1,
+                            source={"kind": kind},
+                            message={"role": "user",
+                                     "content": [{"type": "text", "text": txt}]})
+
+        def _user_real_shape(txt, kind):
+            """实测形态 (session-4a37e718): content 直挂 data, message 键缺省。"""
+            return _dsh_evt("user/message", turn=1,
+                            source={"kind": kind, "rpcId": "r1"},
+                            content=[{"type": "text", "text": txt}],
+                            role="user")
+
+        p.write_text("\n".join([
+            json.dumps({"type": "session", "cwd": "/x", "delegationDepth": 0}),
+            _user("用户真实语境: 端口挪到 8766", "user"),
+            _user_real_shape("实测形态: 先杀掉常驻, 手动拉起", "user"),
+            _user("<system-reminder>skill 目录注入</system-reminder>", "skill-catalog"),
+            _user("<compacted-summary>压缩重注入</compacted-summary>", "plugin"),
+            _dsh_assistant(LONG, turn=1),
+            _dsh_evt("turn/end", turn=1, reason={"kind": "completed"}),
+        ]) + "\n", encoding="utf-8")
+        sc = transcripts.scenes(p, "dsh")
+        assert len(sc) == 1
+        assert sc[0]["user_blocks"] == ["用户真实语境: 端口挪到 8766",
+                                        "实测形态: 先杀掉常驻, 手动拉起"]
+        assert sc[0]["end_step"] == LONG
+
+
+def test_pi_scenes_envelope_unwrap():
+    """pi 桥信封 (62% user 文本的污染源): bridge_* 剥, user_input 拆包保内文。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.jsonl"
+        env = ('<bridge_context>\n{"chatId":"oc_x","senderId":"ou_y"}\n'
+               '</bridge_context>\n<user_input>\n{"text":"桥上真实输入语境"}\n</user_input>')
+        p.write_text("\n".join([
+            _omp_msg("user", None, [{"type": "text", "text": env}]),
+            _omp_msg("assistant", "stop", [{"type": "text", "text": LONG}]),
+        ]) + "\n", encoding="utf-8")
+        sc = transcripts.scenes(p, "pi")
+        assert len(sc) == 1 and sc[0]["end_step"] == LONG
+        assert sc[0]["user_blocks"] == ['{"text":"桥上真实输入语境"}']
+
+
+def test_scenes_unknown_harness_loud():
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            transcripts.scenes(Path(td) / "x.jsonl", "vscode")
+            raise AssertionError("must raise ValueError")
+        except ValueError:
+            pass
+
+
+# ── M22 codex 适配器 (yaml 节点3 过滤逻辑映射) ────────────────────────
+
+def _codex_line(t, **payload):
+    return json.dumps({"timestamp": "2026-08-09T10:00:00Z", "type": t,
+                       "payload": payload}, ensure_ascii=False)
+
+
+def _codex_injected_user():
+    """role=user 伪装注入 (实测 65% 形态) — 绝不可进用户语料。"""
+    return _codex_line(
+        "response_item", type="message", role="user",
+        content=[{"type": "input_text",
+                  "text": "# AGENTS.md instructions for /w/proj\n\n"
+                          "<INSTRUCTIONS>\n## Skills\n技能投影说明\n</INSTRUCTIONS>"}])
+
+
+def _mk_codex(pdir, name, meta_cwd, sid="0199dd9c-ddea-7662-95a7-7b3d6feacd39",
+              extra_lines=()):
+    d = pdir / "2026" / "08" / "09"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / name
+    lines = [
+        json.dumps({"timestamp": "2026-08-09T10:00:00Z", "type": "session_meta",
+                    "payload": {"id": sid, "cwd": meta_cwd,
+                                "cli_version": "0.98.0"}},
+                   ensure_ascii=False),
+        _codex_injected_user(),
+    ]
+    lines.extend(extra_lines)
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return f
+
+
+def test_codex_locate_by_meta_cwd_and_session_id(tmp_path, monkeypatch):
+    """无项目目录结构 → locate 按会话头 session_meta.cwd 结构匹配过滤。"""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    pdir = tmp_path / "home" / ".codex" / "sessions"
+    f_hit = _mk_codex(pdir, "rollout-2026-08-09T10-00-00-aaaa.jsonl",
+                      "/w/proj", sid="0199dd9c-ddea-7662-95a7-7b3d6feacd39")
+    _mk_codex(pdir, "rollout-2026-08-09T11-00-00-bbbb.jsonl",
+              "/other/place", sid="0199dd9c-ffff-7662-95a7-7b3d6feacd39")
+    got = transcripts.locate("/w/proj", "codex")
+    assert got == [f_hit]  # cwd 不匹配的会话被结构过滤
+    assert transcripts.session_id(f_hit, "codex") == \
+        "0199dd9c-ddea-7662-95a7-7b3d6feacd39"  # 会话头 id, 非文件名
+
+
+def test_codex_end_steps_and_scenes(tmp_path):
+    """end step = response_item assistant output_text (无 stop_reason 语义);
+    用户语料只来自 event_msg/user_message — role=user 注入绝不混入。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "rollout-x.jsonl"
+        ev_real1 = _codex_line("event_msg", type="user_message",
+                               message="提取这个备份包", kind="plain")
+        ev_real2 = _codex_line("event_msg", type="user_message",
+                               message="放到外置盘根目录", kind="plain")
+        asst_long = _codex_line(
+            "response_item", type="message", role="assistant",
+            content=[{"type": "output_text",
+                      "text": LONG + "\n补充: 解包校验通过。"}])
+        extra = [
+            ev_real1, ev_real2,
+            _codex_line("response_item", type="message", role="assistant",
+                        content=[{"type": "output_text", "text": SHORT}]),  # 门
+            asst_long,
+            _codex_line("response_item", type="message", role="assistant",
+                        content=[{"type": "output_text", "text": LONG + "\n补充: 解包校验通过。"}]),  # 去重
+        ]
+        f = _mk_codex(Path(td), "rollout-x.jsonl", "/w/proj",
+                      extra_lines=extra)
+        assert transcripts.end_steps(f, "codex") == [LONG + "\n补充: 解包校验通过。"]
+        sc = transcripts.scenes(f, "codex")
+        assert len(sc) == 1
+        assert sc[0]["end_step"] == LONG + "\n补充: 解包校验通过。"
+        # 用户语料 = event_msg 真人输入; 注入块不在
+        assert sc[0]["user_blocks"] == ["提取这个备份包", "放到外置盘根目录"]
+        assert all("技能投影说明" not in b for b in sc[0]["user_blocks"])
+
+
+def test_codex_facade_clean_strips_injected_echo(tmp_path):
+    """assistant 回显注入块 → facade 清洗口剥 (corpus_prep codex 规则)。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        extra = [
+            _codex_line("response_item", type="message", role="assistant",
+                        content=[{"type": "output_text", "text":
+                                  "<environment_context>\n<cwd>/x</cwd>\n"
+                                  "</environment_context>\n" + LONG}]),
+        ]
+        f = _mk_codex(Path(td), "rollout-y.jsonl", "/w/proj",
+                      extra_lines=extra)
+        assert transcripts.end_steps(f, "codex") == [LONG]
+
+
+def test_codex_exec_session_zero_user_voice(tmp_path):
+    """SDK/exec 型会话无 event_msg → 用户语料自然为零 (无真人交互)。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        extra = [
+            _codex_line("response_item", type="message", role="user",
+                        content=[{"type": "input_text",
+                                  "text": "执行某任务的指令文本足够长吗并不"}]),
+            _codex_line("response_item", type="message", role="assistant",
+                        content=[{"type": "output_text", "text": LONG}]),
+        ]
+        f = _mk_codex(Path(td), "rollout-z.jsonl", "/w/proj",
+                      extra_lines=extra)
+        sc = transcripts.scenes(f, "codex")
+        assert len(sc) == 1 and sc[0]["user_blocks"] == []

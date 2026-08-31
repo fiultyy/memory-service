@@ -80,7 +80,30 @@ def extract_end_steps(lines, min_chars: int | None = None,
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # --scenes (M21, 2026-08-28, Codex 阅读优先级采纳): 输出用户声音场景 —
+    # 每个 end step 配对其前累积的用户原话块, [用户]/[助手结论] 角色标记
+    # (prompt v5 阅读优先级依赖)。缺省行为不变 (纯 end step, 兼容旧管道)。
+    scenes_mode = "--scenes" in argv
+    argv = [a for a in argv if a != "--scenes"]
     src = open(argv[0], encoding="utf-8") if argv else sys.stdin
+    if scenes_mode:
+        import transcripts as transcripts_mod  # 延迟导入 (transcripts 顶层 import 本模块)
+        sc = transcripts_mod._cc_scenes(src)
+        n_blocks = 0
+        for s in sc:
+            for ub in s["user_blocks"]:
+                print(json.dumps(
+                    {"type": "user",
+                     "message": {"content": f"[用户] {ub}"}},
+                    ensure_ascii=False))
+                n_blocks += 1
+            print(json.dumps(
+                {"type": "user",
+                 "message": {"content": f"[助手结论] {s['end_step']}"}},
+                ensure_ascii=False))
+        print(f"endsteps: scenes={len(sc)} user_blocks={n_blocks}",
+              file=sys.stderr)
+        return 0
     steps = extract_end_steps(src)
     for txt in steps:
         print(json.dumps(

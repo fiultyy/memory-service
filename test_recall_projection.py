@@ -45,10 +45,29 @@ def test_project_recall_skeleton_and_sections(tmp_path):
     assert "# Recall log 2026-08-27" in text
     assert "## 14:32 — query one" in text
     assert "1. 甲结论 — 值1" in text
+    assert "<memsvc-recall>" in text and "</memsvc-recall>" in text  # 出端打标
     # MEMORY.md 骨架 + 索引行
     mem = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
     assert "## KG recall logs" in mem
     assert "- [recall 2026-08-27](recall-20260827.md)" in mem
+
+
+def test_recall_sections_wrapped_marker_reingest_dropped(tmp_path):
+    """出端闭环: 正文节包 <memsvc-recall> → corpus_prep 重进语料整块丢弃
+    (前端骨架与 MEMORY.md 索引行不打标)。"""
+    from corpus_prep import clean
+    projection.project_recall(tmp_path, "q1", [_fact(topic="甲", value="v1")],
+                              now=datetime(2026, 8, 28, 10, 0))
+    projection.project_recall(tmp_path, "q2", [_fact(topic="乙", value="v2")],
+                              now=datetime(2026, 8, 28, 11, 0))
+    text = (tmp_path / "recall-20260828.md").read_text(encoding="utf-8")
+    assert text.index("# Recall log") < text.index("<memsvc-recall>")  # 骨架不包
+    assert text.count("<memsvc-recall>") == 2 and text.count("</memsvc-recall>") == 2
+    stripped = clean(text, "cc")
+    assert "v1" not in stripped and "v2" not in stripped
+    assert "q1" not in stripped and "q2" not in stripped  # 正文节全部剥净
+    mem = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+    assert "<memsvc-recall>" not in mem  # 索引行不打标
 
 
 def test_same_day_idempotent_index_multi_section(tmp_path):

@@ -426,6 +426,7 @@ def put_fact(
     provenance: str | None = None,
     veracity: float | None = None,
     raw_predicate: str | None = None,
+    task_outcome: str | None = None,
 ) -> str:
     """Insert a Fact (reified), return its id.
 
@@ -467,8 +468,8 @@ def put_fact(
             status, supersedes_id, created_at,
             lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
             access_count, last_accessed_at, seen_sessions, source_cwd, topic,
-            provenance, veracity, raw_predicate)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            provenance, veracity, raw_predicate, task_outcome)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fid, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, frozen_lif, confidence,
@@ -480,6 +481,7 @@ def put_fact(
             source_cwd, topic,
             provenance, veracity,
             raw_predicate,
+            task_outcome,
         ),
     )
     if value:
@@ -565,4 +567,6 @@ def _decode_fact(row: Any) -> dict[str, Any]:
         "supersede_reason": row["supersede_reason"] if "supersede_reason" in row.keys() else None,
         "provenance": row["provenance"] if "provenance" in row.keys() else None,
         "veracity": row["veracity"] if "veracity" in row.keys() else None,
+        # prompt v5 (2026-08-28): 任务收尾分诊轴 (row-key 守卫兼容未迁移 db)。
+        "task_outcome": row["task_outcome"] if "task_outcome" in row.keys() else None,
     }

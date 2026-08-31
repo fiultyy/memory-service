@@ -16,8 +16,8 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 | 查记忆 + 落盘到当日 recall 日志 | 同上 + `--project`（正文→`memory/recall-<DATE>.md`，MEMORY.md 注入索引行；dir=cc_memory_dir(`--cwd` 或 `$PWD`)；空命中不投影） |
 | 召回（向量融合，解字面盲区） | 同上 + `--vector`（**需 LM Studio 127.0.0.1:16666 在线**） |
 | 召回（图近字面远） | 同上 + `--bfs` |
-| **补最近会话结论入库**（当前项目最近 N 个 transcript 的 end step 走 LLM） | `python3 …/cli.py ingest-recent [--cwd <项目目录>] [--harness cc\|dsh\|pi\|omp] [--limit 10]`；先 `--dry-run` 预览（零 LLM 零写入）。harness 判定：cc=`stop_reason=end_turn`，dsh=`turn/end(completed)` 前最后一条 assistant text（zstd 自动解压），pi/omp=`stopReason=stop`。**omp 暂搁置**（内建 mnemopi 记忆语义冲突未裁决，用户 2026-08-27 裁决先不接） |
-| 单个 transcript 入库 | `python3 …/cli.py autodream --session <id> --transcript <path.jsonl> [--cwd <项目目录>]`（可先 `endsteps.py <t.jsonl> > /tmp/e.jsonl` 蒸馏） |
+| **补最近会话结论入库**（当前项目最近 N 个 transcript 的场景蒸馏走 LLM） | `python3 …/cli.py ingest-recent [--cwd <项目目录>] [--harness cc\|dsh\|pi\|omp\|codex] [--limit 10]`；先 `--dry-run` 预览（零 LLM 零写入，details 报 scenes/user_blocks 计数）。**M21 用户声音通道**：每个 end step 配对其前累积的用户原话块（≤4 块/1200 字，`MEM_USERVOICE_*` 可调），合成 transcript 带 `[用户]`/`[助手结论]` 角色标记（prompt v5 阅读优先级依赖）。harness 判定：cc=`stop_reason=end_turn`，dsh=`turn/end(completed)` 前最后一条 assistant text（zstd 自动解压；真人判定按 `source.kind=user` 结构过滤 + DSHMSG 信箱载荷剔除），pi/omp=`stopReason=stop`，**codex**=`response_item` assistant `output_text`（用户语料取 `event_msg/user_message` 镜像层天然滤注入；无项目目录，按会话头 `session_meta.cwd` 结构匹配——**必须传 `--cwd`**，不传匹配 `$PWD`）。**omp 暂搁置**（内建 mnemopi 记忆语义冲突未裁决，用户 2026-08-27 裁决先不接） |
+| 单个 transcript 入库 | `python3 …/cli.py autodream --session <id> --transcript <path.jsonl> [--cwd <项目目录>] [--harness cc\|codex\|dsh\|pi\|omp]`（可先 `endsteps.py --scenes <t.jsonl> > /tmp/e.jsonl` 场景蒸馏，缺省纯 end step） |
 | 导入 memory 目录 | `python3 …/cli.py init-memory --memory-dir <dir> [--cwd <项目目录>]` |
 | 单 md 重灌（编辑后） | `python3 …/cli.py re-ingest <file.md> [--cwd <项目目录>]` |
 | md 删除同步 | `python3 …/cli.py prune --scope <cwd> --dry-run`（先 dry-run 预览） |
@@ -34,6 +34,7 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 
 - **词法召回零依赖**（默认路径，离线可用）；`--vector`/`--bfs` 才需要 LM Studio `127.0.0.1:16666`（qwen3-embedding-4b）。
 - **入库类**（ingest-recent / autodream / init-memory / re-ingest）走 LLM 直抽（glm-5-turbo，`.env` 里 `ZHIPU_API_KEY`）——**LLM 不可达即响亮跳过该段，绝不回落 regex**。速度预期 ~12–60s/段；ingest-recent 10 文件 × 多段可能要几十分钟，建议 nohup。
+- **语料预处理 (corpus_prep, 2026-08-28)**：喂提取器前按 harness 映射表清洗（cc/codex/dsh/pi 各有 DROP/UNWRAP 规则：system-reminder、AGENTS.md 投影、桥信封、压缩重注入等注入块剥除）+ 密钥脱敏（`redact_secrets` 8 类，LLM 调用前终防线）。接缝三道幂等：`transcripts` 蒸馏口 / `autodream._read_transcript` 逐块 / `llm_extract.extract` 脱敏。**白名单制**——cc 语料 90% 尖括号是代码回显泛型，新增规则必须对真实语料验证防误杀。
 - 幂等：autodream/init-memory 重跑按 fact 级 NOOP 去重，安全但**重抽仍花 LLM 时间**——别为单文件重跑全目录，用 re-ingest 单文件。ingest-recent 另有 **sha256 注册表**（`data/transcript-registry.json`）：同文件未变 → 二跑直接 skip 不烧 LLM；transcript 变更 → 自动重跑。
 
 ## 陷阱（实测在案）
@@ -45,8 +46,9 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 5. ingest-recent 定位目录按 harness 不同：cc=`~/.claude/projects/<enc>/`（`/`和`.`→`-`）、dsh/pi=`~/.dsh|~/.pi/agent/sessions/-<enc>--/`（`/`→`-`，点保留）、omp=`~/.omp/agent/sessions/<home相对enc>/`。找 transcript 前先 `ls` 确认目录存在，别拿不存在的路径空跑。
 6. ingest-recent 与 PreCompact spool 的注册表**不共享**：已被 PreCompact 处理过的会话手动再跑会重复蒸馏一遍（KG fact 层面幂等吸收，多为 noop，但花 LLM 时间）。
 7. recall-<DATE>.md 是 mem-service 产物（frontmatter `source: mem-service-recall`），init-memory/re-ingest 扫描会自动跳过（ADR-16f 防自指循环）——不要手动把它灌进 KG。
-8. **实时图 (M20) 语义边界**：`graph-live` 只跟踪 **INSERT 生长**（LIF 衰减/状态流转不推）；页面上删除不反映，要全量态**刷新页面**即可（重新快照）。快照/增量只画 degree>0 实体（孤儿与纯字面事实不成图）；增量对新边端点做**并集补发**（老实体从未下发过、新边连上时必须补，否则悬空）。服务器同源无 CORS；SSE 断线自动重连并按游标补拉错过的增量。
-9. **跨 harness 现状**（用户裁决 2026-08-27：接 cc/dsh/pi，omp 搁置）：
+8. **召回出端打标（2026-08-28 闭环）**：所有召回注入/投影内容整体包 `<memsvc-recall>…</memsvc-recall>` 标记块——两个面：UserPromptSubmit 钩子 `recall_inject.py` 的 additionalContext、`recall --project` 的 recall-<DATE>.md 正文节（MEMORY.md 索引行不打标）。标记是 memsvc 自有中性语法，harness 解析器原样透传（**零适配器**），LLM 读到即知是召回内容；语料重进时 corpus_prep COMMON 规则（五 harness 各表之首）整块丢弃——召回回声不重入库。
+9. **实时图 (M20) 语义边界**：`graph-live` 只跟踪 **INSERT 生长**（LIF 衰减/状态流转不推）；页面上删除不反映，要全量态**刷新页面**即可（重新快照）。快照/增量只画 degree>0 实体（孤儿与纯字面事实不成图）；增量对新边端点做**并集补发**（老实体从未下发过、新边连上时必须补，否则悬空）。服务器同源无 CORS；SSE 断线自动重连并按游标补拉错过的增量。
+10. **跨 harness 现状**（用户裁决 2026-08-27：接 cc/dsh/pi，omp 搁置）：
    - skill 入口：cc=`~/.claude/skills/memsvc`、dsh=`~/.dsh/skills/memsvc`（watcher 热加载）、pi **零安装**（pi 的 claude 兼容发现层直接扫 `~/.claude/skills`）——三处全是 symlink 指向 repo 正本，单一源。
    - 进端：`ingest-recent --harness cc|dsh|pi` 全通（omp 适配器代码保留但搁置）。
    - 出端：`recall --json` 任何 harness 裸调即可；文件投影（`--project`）只有 CC 布局。dsh/pi 的等价面是 `APPEND_SYSTEM.md` 约定（全局系统提示追加、用户自有文件），接不接待裁决，别擅自动。

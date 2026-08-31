@@ -28,6 +28,10 @@ env: MEM_RECALL_MIN_SCORE (默认 0.15 — 长 prompt match 稀释自校准; 短
 地板 0.3 是 recall 内部默认) /
 MEM_RECALL_TOP_K (8) / MEM_RECALL_MAX_BYTES (2048) /
 MEM_RECALL_QUERY_CHARS (800) / MEM_RECALL_USE_VEC (0)。
+
+出端打标 (2026-08-28): additionalContext 整体包裹 ``<memsvc-recall>…``
+</memsvc-recall>`` 标记块 (预算扣除包裹开销 32B) — 重进语料时 corpus_prep
+COMMON 规则整块丢弃, 召回回声不重入库。
 """
 from __future__ import annotations
 
@@ -140,7 +144,8 @@ def main() -> int:
         _log_fail(f"boost-fail: {type(exc).__name__}: {exc}")
 
     lines = [f"## Memory recall (auto, {len(hits)} hits)"]
-    budget = max_bytes
+    # 预算含 <memsvc-recall> 包裹开销 (32B ASCII, 见出口打标处)
+    budget = max_bytes - len("<memsvc-recall>\n\n</memsvc-recall>")
     for r in hits:
         tag = r.get("tag") or {}
         display = (tag.get("display") or "").strip() or "?"
@@ -157,7 +162,11 @@ def main() -> int:
     if len(lines) == 1:
         return 0  # 预算内一条都放不下 → 零输出
 
-    ctx = "\n".join(lines)
+    # 出端打标 (2026-08-28 闭环): <memsvc-recall> 为 memsvc 自有中性标签 —
+    # 非 harness 保留语法, cc/dsh/pi 解析器原样透传 (零适配器), 活会话 LLM
+    # 读到即知是召回内容; 语料重入库时 corpus_prep COMMON 规则整块丢弃
+    # (防召回回声自我重入库 — 结构层根治, U7 去重只是分数层兜底)。
+    ctx = "<memsvc-recall>\n" + "\n".join(lines) + "\n</memsvc-recall>"
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

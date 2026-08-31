@@ -44,6 +44,11 @@ ENTITY_TYPES = frozenset({
     "technical_term", "named_entity", "quoted_term", "identifier", "concept",
 })
 
+# 任务收尾分诊枚举 (prompt v5, 采纳 Codex Phase1 task-outcome triage)。
+# 判定优先级照抄: 显式用户反馈 > 环境验证 > 启发式; 末态无验证信号保守
+# uncertain。校验宽松: 表外值收 None (元数据面非正确性面, 不整体拒重试)。
+TASK_OUTCOMES = frozenset({"success", "partial", "fail", "uncertain"})
+
 # 抽取通道门禁 (§2.1): llm 默认 | regex 遗留可显式重开。读取函数供测试 pin。
 CHANNEL_LLM = "llm"
 CHANNEL_REGEX = "regex"
@@ -61,7 +66,7 @@ def extract_channel() -> str:
 
 # ── prompt (资产版本化: docs/llm-extract-prompt.md 是唯一权威文本) ────
 
-PROMPT_VERSION = "v4"
+PROMPT_VERSION = "v5"
 
 # 单段输入 token 预算 (chars): bootstrap CHUNK=4000 同量级; LLM 通道在
 # autodream 段级调用 (段已 ≤ 预算), 此处再设硬顶防 transcript 超长段。
@@ -69,7 +74,7 @@ MAX_SEGMENT_CHARS = 4000
 
 
 def system_prompt() -> str:
-    """system prompt 全文 (与 docs/llm-extract-prompt.md v4 逐字一致)。
+    """system prompt 全文 (与 docs/llm-extract-prompt.md v5 逐字一致)。
 
     版本化: 改 prompt 必须同步改 docs + bump PROMPT_VERSION (资产纪律)。
     """
@@ -77,6 +82,11 @@ def system_prompt() -> str:
 
 
 _SYSTEM_PROMPT = """你是双语记忆抽取员, 从输入文本段抽取知识图谱实体与事实。必须通过调用 emit_extraction 工具报告结果, 不要输出解释、markdown 或自由文本 JSON。
+
+## 信号门槛 (先读, 最小信号原则)
+- 只抽对未来工作有实际影响的事实。每条自问: 未来的代理因为我写的这条会做得更好吗? 寒暄、过程复述、对已知内容的转述、未被采纳的提案——跳过。
+- 输入段可能混有角色标记: 以 [用户] 开头的行是用户原话, 以 [助手结论] 开头的行是助手总结。阅读优先级: 用户原话 > 助手结论 — 用户的明确裁决/纠正/要求优先于助手的事后转述; 引用用户说的话保留归属 (evidence 用用户原句, 不得改写成无主陈述)。
+- 整段都没有高信号内容就调用工具传 {"entities": [], "facts": []} (no-op 优先, 不要硬凑产出)。
 
 ## 实体 (entities)
 - name: 原文中的专有名词/技术术语/概念原样 (保留大小写/连字符/缩写原形, 如 A2A / pydantic-ai / 护理担保)
@@ -102,6 +112,10 @@ _SYSTEM_PROMPT = """你是双语记忆抽取员, 从输入文本段抽取知识�
   二元关系事实 value 留 null, 不要把 object 名复制进 value
 - confidence: 0.0-1.0 浮点, 你对这条事实确实在原文中有依据的置信度
 - evidence: 原文中支持这条事实的逐字 span (必须从输入段原文复制, 不改写)
+- task_outcome: 可选任务收尾分诊, 仅当这条事实关于一个已收尾的任务/工作时填,
+  从 [success, partial, fail, uncertain] 选一个。判定优先级: 显式用户反馈
+  (用户确认/否定) > 环境验证 (测试通过/命令成功退出) > 启发式推断;
+  会话末尾刚收尾、还没有验证信号的任务保守填 uncertain。非任务事实留 null。
 
 ## 硬规则
 1. 只抽原文有据的事实 — evidence 字段必须能逐字在输入段中找到。禁止用世界知识补全、推断或脑补。
@@ -267,8 +281,14 @@ def validate(doc: Any, segment: str | None = None) -> tuple[list[EntityOut], lis
             raise SchemaViolation(
                 f"evidence 非原文逐字: {evidence.strip()[:40]!r} "
                 "(必须从输入段原文复制, 禁止改写/缩略/脑补)")
+        # task_outcome (v5): 元数据面宽松 — 表外值收 None, 不整体拒重试
+        # (实体 type 表外收拢 concept 同哲学; 分诊错只损召回加权, 不损事实)。
+        outcome = f.get("task_outcome")
+        if outcome is not None and outcome not in TASK_OUTCOMES:
+            outcome = None
         edges.append(EdgeOut(subject=subj, predicate=pred, object=obj,
-                             topic=evidence.strip(), confidence=conf))
+                             topic=evidence.strip(), confidence=conf,
+                             task_outcome=outcome))
         confs.append(conf)
 
     aggregate = (sum(confs) / len(confs)) if confs else 0.0
@@ -325,6 +345,10 @@ _TOOL_DEF: dict = {
                                        "description": "0-1"},
                         "evidence": {"type": "string",
                                      "description": "原文逐字引用片段"},
+                        "task_outcome": {"type": "string",
+                                         "enum": ["success", "partial",
+                                                  "fail", "uncertain"],
+                                         "description": "任务收尾分诊 (判定优先级: 用户反馈>环境验证>启发式; 末态无验证信号保守 uncertain); 非任务事实留空"},
                     },
                     "required": ["subject", "predicate", "object",
                                  "evidence"],
@@ -372,6 +396,12 @@ def extract(segment: str, provider=None) -> Extraction:
     """
     if len(segment) > MAX_SEGMENT_CHARS:
         segment = segment[:MAX_SEGMENT_CHARS]
+    # 密钥脱敏终防线 (采纳 Codex redact_secrets, 2026-08-28): 任何 LLM 调用
+    # 前跑一遍 — 密钥不进 prompt 不进 evidence 不进 KG。幂等; evidence 逐字
+    # 断言以脱敏后文本为准 (LLM 只可能引用脱敏态, 断言自洽)。语料层标记块
+    # 清洗在 corpus_prep.clean (transcripts/autodream 接缝), 此处只兜直接调用。
+    import corpus_prep
+    segment = corpus_prep.redact_secrets(segment)
     if provider is None:
         from llm_provider import ZhipuAnthropicProvider
         provider = ZhipuAnthropicProvider()
@@ -425,4 +455,5 @@ def extract(segment: str, provider=None) -> Extraction:
 
 __all__ = ["extract", "validate", "extract_channel", "ExtractFailed",
            "SchemaViolation", "PREDICATES", "ENTITY_TYPES", "PROMPT_VERSION",
+           "TASK_OUTCOMES",
            "CHANNEL_LLM", "CHANNEL_REGEX", "MAX_SEGMENT_CHARS"]

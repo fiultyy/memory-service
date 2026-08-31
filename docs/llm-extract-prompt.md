@@ -1,6 +1,6 @@
 # llm-extract prompt 资产 (batch 12)
 
-> 版本: **v4** (2026-08-28) · 代码: `llm_extract.py::_SYSTEM_PROMPT` (与本文逐字一致, 改动必须双同步 + bump 版本)
+> 版本: **v5** (2026-08-28) · 代码: `llm_extract.py::_SYSTEM_PROMPT` (与本文逐字一致, 改动必须双同步 + bump 版本)
 > 模型: glm-5-turbo (智谱 Anthropic 协议直连) · 调用 seam: `llm_provider.ZhipuAnthropicProvider.chat()`
 
 ## 迭代记录
@@ -15,10 +15,17 @@
 
 | v4·校验 | 2026-08-28 | evidence 逐字校验代码侧硬断言 (`validate(doc, segment=...)`, extract() 恒传; 严格子串+空白归一容差; 伪造→重试反馈→两轮败响亮)。prompt 文本不变, 版本仍 v4 | 迭代建议 #1 落地 (用户「遗留做完」) |
 
-## System prompt 全文 (v4)
+| v5 | 2026-08-28 | **信号门槛** (最小信号原则: 「未来的代理因为我写的这条会做得更好吗」+ no-op 优先) / **阅读优先级** ([用户] > [助手结论] 角色标记 + 归属保留) / **task_outcome 任务收尾分诊** (success/partial/fail/uncertain; 判定优先级 用户反馈>环境验证>启发式, 末态无验证信号保守 uncertain) 新增 facts 可选字段。配套: corpus_prep.py 语料标记块清洗 (cc/codex/dsh/pi 映射表) + extract() 密钥脱敏 + M21 ingest-recent 用户声音通道 | Codex memories pipeline 对照采纳 #1/#2/#3/#4 (用户裁决「1234都做」; 三路真实语料扫描证据) |
+
+## System prompt 全文 (v5)
 
 ```
 你是双语记忆抽取员, 从输入文本段抽取知识图谱实体与事实。必须通过调用 emit_extraction 工具报告结果, 不要输出解释、markdown 或自由文本 JSON。
+
+## 信号门槛 (先读, 最小信号原则)
+- 只抽对未来工作有实际影响的事实。每条自问: 未来的代理因为我写的这条会做得更好吗? 寒暄、过程复述、对已知内容的转述、未被采纳的提案——跳过。
+- 输入段可能混有角色标记: 以 [用户] 开头的行是用户原话, 以 [助手结论] 开头的行是助手总结。阅读优先级: 用户原话 > 助手结论 — 用户的明确裁决/纠正/要求优先于助手的事后转述; 引用用户说的话保留归属 (evidence 用用户原句, 不得改写成无主陈述)。
+- 整段都没有高信号内容就调用工具传 {"entities": [], "facts": []} (no-op 优先, 不要硬凑产出)。
 
 ## 实体 (entities)
 - name: 原文中的专有名词/技术术语/概念原样 (保留大小写/连字符/缩写原形, 如 A2A / pydantic-ai / 护理担保)
@@ -44,6 +51,10 @@
   二元关系事实 value 留 null, 不要把 object 名复制进 value
 - confidence: 0.0-1.0 浮点, 你对这条事实确实在原文中有依据的置信度
 - evidence: 原文中支持这条事实的逐字 span (必须从输入段原文复制, 不改写)
+- task_outcome: 可选任务收尾分诊, 仅当这条事实关于一个已收尾的任务/工作时填,
+  从 [success, partial, fail, uncertain] 选一个。判定优先级: 显式用户反馈
+  (用户确认/否定) > 环境验证 (测试通过/命令成功退出) > 启发式推断;
+  会话末尾刚收尾、还没有验证信号的任务保守填 uncertain。非任务事实留 null。
 
 ## 硬规则
 1. 只抽原文有据的事实 — evidence 字段必须能逐字在输入段中找到。禁止用世界知识补全、推断或脑补。
@@ -57,7 +68,7 @@
  "facts": [{"subject": "...", "predicate": "uses", "object": "...", "value": null, "confidence": 0.9, "evidence": "原文 span"}]}
 ```
 
-## Schema (v1, 同 v2 — tool input_schema 与此一致)
+## Schema (v1, tool input_schema 与此一致; v5 补 task_outcome)
 
 ```json
 {
@@ -67,16 +78,17 @@
   ],
   "facts": [
     {"subject": "str (entities[].name 引用)",
-     "predicate": "is_a|uses|depends_on|contains|belongs_to|implements|connected_to|located_in|causes|based_on|prefers|decided",
+     "predicate": "开放词汇 (snake_case; 核心集见上文, 可自造精确谓词)",
      "object": "str (entities[].name 引用)",
      "value": "str? (可选字面值)",
      "confidence": "float 0-1",
-     "evidence": "str (原文逐字 span, 必填)"}
+     "evidence": "str (原文逐字 span, 必填)",
+     "task_outcome": "success|partial|fail|uncertain (可选, 任务收尾分诊)"}
   ]
 }
 ```
 
-校验规则 (`llm_extract.validate`): predicate 表外 → 整体拒; subject/object 未声明 → 整体拒; confidence clamp 0-1; evidence 缺失/**非原文逐字** → 整体拒 (v4 起 `extract()` 恒传 segment, 逐字硬断言 + 空白归一容差 — 迭代建议 #1 落地); type 表外 → concept 收拢 (不拒); 自环 → 静默弃。整体拒 → 1 次重试 (附违规原因) → 仍败 `ExtractFailed` 响亮抛出。
+校验规则 (`llm_extract.validate`): predicate 表外 → 整体拒; subject/object 未声明 → 整体拒; confidence clamp 0-1; evidence 缺失/**非原文逐字** → 整体拒 (v4 起 `extract()` 恒传 segment, 逐字硬断言 + 空白归一容差 — 迭代建议 #1 落地); type 表外 → concept 收拢 (不拒); task_outcome 表外 → None 收拢 (不拒 — 元数据面非正确性面, v5); 自环 → 静默弃。整体拒 → 1 次重试 (附违规原因) → 仍败 `ExtractFailed` 响亮抛出。v5 起 `extract()` 对 segment 先跑 `corpus_prep.redact_secrets` — 密钥不进 prompt 不进 evidence, 逐字断言以脱敏后文本为准。
 
 ## Few-shot (用户消息模板内嵌, 语料取 claw 真实段)
 
@@ -142,6 +154,10 @@ regex 通道 (`extractor.py`) 是这套边界的硬编码兜底 — 将来重开
 
 ## 迭代建议 (v2 候选, 见报告)
 
-1. evidence 逐字校验 (代码侧 `evidence in segment` 硬断言 — v1 只强制非空)
+1. evidence 逐字校验 (代码侧 `evidence in segment` 硬断言 — v1 只强制非空) ✅ v4·校验
 2. ~~few-shot 扩到 4 例~~ (v4 已达成: 补抽象宾语与数量短语两例; 「零产出段」正例仍缺)
 3. 吸尘器实体的事前拦截 (LLM 侧少声明泛指词, 靠停用词表收敛是被动式)
+
+v5 落地补记 (2026-08-28, Codex 对照采纳): 信号门槛/no-op 优先/阅读优先级已入
+system prompt (上文); 「零产出段」正例 few-shot 仍缺 (候选 v6); 输入侧角色标记
+依赖 corpus_prep + ingest-recent 用户声音通道 (`transcripts.scenes`)。

@@ -390,26 +390,37 @@ def test_prompt_version_synced_with_doc():
     assert llm_extract._SYSTEM_PROMPT.splitlines()[-1] in text
 
 
-def test_prompt_v4_disciplines():
-    """v4 资产守卫: object 纪律 / connected_to 抑制 / 数量短语反例 + docs 逐字同步。"""
+def test_prompt_v5_disciplines():
+    """v5 资产守卫: v4 纪律全保留 + 信号门槛/阅读优先级/task_outcome + docs 逐字同步。"""
     import re
-    assert llm_extract.PROMPT_VERSION == "v4"
+    assert llm_extract.PROMPT_VERSION == "v5"
     sp = llm_extract._SYSTEM_PROMPT
-    # object 纪律: 逐字可寻 + 抽象宾语先声明 + 数量短语不抽
+    # ── v4 纪律 (回归锚) ──
     assert "entities 数组里逐字找到" in sp
     assert "幂等" in sp and "concept 实体" in sp
     assert "eight concurrent workers" in sp
-    # connected_to 抑制
     assert "找不到任何更精确谓词时才可用" in sp
-    # value 纪律
     assert "不要把 object 名复制进 value" in sp
-    # few-shot 4 例
+    # ── v5 新纪律: 信号门槛 (Codex minimal-signal gate 采纳) ──
+    assert "未来的代理因为我写的这条会做得更好吗" in sp
+    assert "no-op 优先" in sp
+    # 阅读优先级 + 归属保留 (Codex attribution preservation 采纳)
+    assert "阅读优先级: 用户原话 > 助手结论" in sp
+    assert "[用户]" in sp and "[助手结论]" in sp
+    assert "不得改写成无主陈述" in sp
+    # task_outcome 分诊轴 (Codex task-outcome triage 采纳)
+    assert "task_outcome" in sp
+    assert "success, partial, fail, uncertain" in sp
+    assert "显式用户反馈" in sp and "环境验证" in sp and "启发式" in sp
+    assert llm_extract.TASK_OUTCOMES == frozenset(
+        {"success", "partial", "fail", "uncertain"})
+    # few-shot 4 例 (不变)
     assert len(re.findall(r"## 示例 \d", llm_extract._USER_TEMPLATE)) == 4
     # docs 逐字同步 (纪律强制, 升级自锚点比对)
     doc = (Path(__file__).parent / "docs" / "llm-extract-prompt.md").read_text(
         encoding="utf-8")
-    m = re.search(r"## System prompt 全文 \(v4\)\n\n```\n(.*?)\n```", doc, re.S)
-    assert m, "docs 缺 v4 prompt 全文块"
+    m = re.search(r"## System prompt 全文 \(v5\)\n\n```\n(.*?)\n```", doc, re.S)
+    assert m, "docs 缺 v5 prompt 全文块"
     assert m.group(1) == llm_extract._SYSTEM_PROMPT
 
 
@@ -463,3 +474,66 @@ def test_validate_without_segment_keeps_legacy_semantics():
     """不传 segment (旧调用方) → 逐字断言不生效, 只查非空 (向后兼容)。"""
     entities, edges, _ = llm_extract.validate(_FABRICATED)
     assert len(edges) == 1
+
+
+# ── v5: task_outcome 分诊轴 + 密钥脱敏 (2026-08-28, Codex 对照采纳) ───
+
+def test_task_outcome_valid_enum_preserved():
+    """合法枚举逐字透传 EdgeOut.task_outcome。"""
+    doc = {
+        "entities": [{"name": "dais", "type": "technical_term", "aliases": []},
+                     {"name": "logseq-cli", "type": "technical_term", "aliases": []}],
+        "facts": [{"subject": "dais", "predicate": "depends_on",
+                   "object": "logseq-cli", "value": None, "confidence": 0.9,
+                   "evidence": "依赖 logseq-cli", "task_outcome": "success"}],
+    }
+    _, edges, _ = llm_extract.validate(doc, segment="dais 依赖 logseq-cli")
+    assert edges[0].task_outcome == "success"
+
+
+def test_task_outcome_invalid_collapses_to_none():
+    """表外值 (元数据面) → None 收拢, 不整体拒重试 (实体 type 表外同哲学)。"""
+    doc = {
+        "entities": [{"name": "dais", "type": "technical_term", "aliases": []},
+                     {"name": "logseq-cli", "type": "technical_term", "aliases": []}],
+        "facts": [{"subject": "dais", "predicate": "depends_on",
+                   "object": "logseq-cli", "value": None, "confidence": 0.9,
+                   "evidence": "依赖 logseq-cli", "task_outcome": "won"}],
+    }
+    _, edges, _ = llm_extract.validate(doc, segment="dais 依赖 logseq-cli")
+    assert edges[0].task_outcome is None
+
+
+def test_task_outcome_missing_is_none():
+    """缺省 (非任务事实) → None; EdgeOut 默认值兼容旧调用方。"""
+    _, edges, _ = llm_extract.validate(_GOOD_DOC, segment="dais 依赖 logseq-cli")
+    assert edges[0].task_outcome is None
+
+
+def test_extract_redacts_secrets_before_llm():
+    """extract() 密钥脱敏终防线: segment 里 sk-/Bearer/key= → [REDACTED_...],
+    prompt 收到的用户消息不含密钥原文 (mock provider 侧捕获验证)。"""
+    seg = ("部署用了 sk-ZupKey1234567890abcdef 和 Bearer a1b2c3d4e5f6g7h8i9j0k1, "
+           "api_key=ZZZsecret999888777 且 dais 依赖 logseq-cli")
+    p = MockProvider(json.dumps(_GOOD_DOC, ensure_ascii=False))
+    r = extract(seg, provider=p)
+    assert len(r.edges) == 1
+    user_msg = p.calls[0][1][0]["content"]
+    assert "sk-ZupKey1234567890abcdef" not in user_msg
+    assert "a1b2c3d4e5f6g7h8i9j0k1" not in user_msg
+    assert "ZZZsecret999888777" not in user_msg
+    assert "[REDACTED_SECRET]" in user_msg
+    # 脱敏后段仍含事实句 — evidence 逐字断言以脱敏文本为准 (自洽收货)
+    assert "dais 依赖 logseq-cli" in user_msg
+
+
+def test_redact_secrets_idempotent_and_git_sha_safe():
+    """redact_secrets 幂等; git SHA/sha256 摘要等合法长 hex 不误伤 (证据否决
+    裸长 hex 规则: 三库 562 处合法长 hex vs 0 密钥)。"""
+    import corpus_prep
+    txt = ("commit 39e5d82aabbccddeeff00112233445566778899 已推; "
+           "镜像 sha256:0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd")
+    once = corpus_prep.redact_secrets(txt)
+    assert once == txt  # 长 hex 全保留
+    twice = corpus_prep.redact_secrets(once)
+    assert twice == once  # 幂等

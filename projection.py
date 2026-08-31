@@ -390,6 +390,8 @@ def project_recall(memory_dir: Path | str, query: str, facts: list[dict],
       跳过, 防自指循环。
     - 正文: 每查询一节 ``## HH:MM — query``, 下挂命中条目 (``_recall_fact_line``:
       topic + value 摘要 + score + mem-<id>.md 溯源)。追加写(当日多查询共存)。
+      每节整体包裹 ``<memsvc-recall>`` 标记块 — 出端打标 → 重进语料
+      corpus_prep 整块丢弃 (防召回回声重入库; MEMORY.md 索引行不打标)。
     - MEMORY.md: ``_inject_recall_index_line`` 幂等注入。
     - ``facts`` 空 → 调用方自行跳过(不写空日志; 本函数仍可被显式调用)。
     """
@@ -409,8 +411,13 @@ def project_recall(memory_dir: Path | str, query: str, facts: list[dict],
             f"# Recall log {date_str}\n\n",
             encoding="utf-8")
     q = (query or "").replace("\r", " ").replace("\n", " ").strip() or "(empty query)"
-    body = [f"## {now.strftime('%H:%M')} — {q}\n"]
+    # 出端打标 (2026-08-28 闭环): 正文节整体包 <memsvc-recall> — 该文件被
+    # CC/harness Read 后的回声进语料时 corpus_prep COMMON 规则整块丢弃
+    # (防召回回声自我重入库)。前端骨架/frontmatter 不打标; MEMORY.md 索引
+    # 行不打标 (单行索引非内容)。
+    body = ["<memsvc-recall>", f"## {now.strftime('%H:%M')} — {q}", ""]
     body.extend(_recall_fact_line(f, i) for i, f in enumerate(facts or [], 1))
+    body.append("</memsvc-recall>")
     with p.open("a", encoding="utf-8") as fh:
         fh.write("\n".join(body) + "\n\n")
     index_added = _inject_recall_index_line(mem_dir / "MEMORY.md", fname,

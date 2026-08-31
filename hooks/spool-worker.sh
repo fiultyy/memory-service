@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# spool-worker.sh — PreCompact 快照排干 worker (P1 → 2026-08-27 v2 重接线)。
+# spool-worker.sh — PreCompact 快照排干 worker (P1 → 2026-08-27 v2 重接线;
+# 2026-08-28 v3: --scenes 用户声音通道, Codex 阅读优先级采纳)。
 #
 # v2 形态 (用户裁决: CC automemory 不动 / 只抽 assistant end step 入 KG /
 # 召回+consolidation 手动):
-#   1. 逐 spool 文件先经 endsteps.py 蒸馏 — 只留 assistant 每轮输出的
-#      end step (stop_reason=end_turn 主链 text, 长度门 120, 文内去重),
-#      合成 autodream 可吃的 transcript。
+#   1. 逐 spool 文件先经 endsteps.py --scenes 蒸馏 — 每个 assistant end
+#      step (stop_reason=end_turn 主链 text, 长度门 120, 文内去重) 配对其前
+#      累积的用户原话块 (≤4 块/1200 字, v3), 合成 autodream 可吃的
+#      transcript ([用户]/[助手结论] 角色标记)。
 #   2. 蒸馏为空 (纯工具会话) → 视为成功, 删文件零 LLM。
 #   3. autodream 入 KG (LLM 直抽, 断供响亮跳过留重试)。
 #   4. **不再 synthesis-index** — 那会写 CC memory 目录 (投影/MEMORY.md),
@@ -49,8 +51,10 @@ for f in "${SPOOL}"/*.jsonl; do
     # 占位: 处理中改名 .lock (中断可回收)。
     mv -- "$f" "$f.lock" 2>/dev/null || continue
 
-    # ① 蒸馏: raw transcript → assistant end steps 合成 transcript。
-    if ! python3 "${ENDSTEPS}" "$f.lock" > "$f.endsteps" 2>>"${SPOOL}/worker.log"; then
+    # ① 蒸馏: raw transcript → 用户声音场景合成 transcript (M21, 2026-08-28:
+    # --scenes = end step + 配对用户原话块, [用户]/[助手结论] 标记; 注入块
+    # 由 autodream 侧 corpus_prep 逐块清洗)。缺省 endsteps 行为不变。
+    if ! python3 "${ENDSTEPS}" --scenes "$f.lock" > "$f.endsteps" 2>>"${SPOOL}/worker.log"; then
         mv -- "$f.lock" "$f" 2>/dev/null || true
         echo "$(date -Is) filter-fail: ${base}" >>"${SPOOL}/worker.log"
         continue

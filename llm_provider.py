@@ -51,12 +51,15 @@ class EdgeOut:
     name appearing in ``EntityOut.name`` (enforced by prompt + cli/autodream
     resolve both sides to entities). predicate from the closed 9-set.
     ``topic`` (ADR-C) is a one-sentence human-readable fact the LLM emits per
-    edge — projection uses it as filename slug + index title + description."""
+    edge — projection uses it as filename slug + index title + description.
+    ``task_outcome`` (v5, Codex task-outcome triage 采纳): success|partial|
+    fail|uncertain — 任务收尾分诊元数据; None=非任务事实/legacy。"""
     subject: str
     predicate: str
     object: str
     topic: str = ""
     confidence: float | None = None  # per-edge (batch 12 llm_extract; None=use aggregate)
+    task_outcome: str | None = None  # v5 任务分诊轴 (store fact.task_outcome)
 
 
 @dataclass

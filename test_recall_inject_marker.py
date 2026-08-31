@@ -1,0 +1,83 @@
+"""UserPromptSubmit 注入器出端打标验收 (2026-08-28 出端闭环)。
+
+覆盖:
+1. 命中注入 → additionalContext 整体包 <memsvc-recall> 标记块 (LLM 可读,
+   harness 不解释=零适配器), 且该 ctx 被 corpus_prep 五 harness 整块剥净
+   (闭环: 打标面 = 清洗面)。
+2. prompt 未指名已知实体 → 零输出 (既有精度门, 回归锚)。
+3. 预算扣除包裹开销后条目照常注入 (MAX_BYTES 承诺不破)。
+
+零网络零 LLM (cli.recall / search_entities / LIF 记账全 monkeypatch)。
+"""
+import io
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "hooks"))
+
+import recall_inject as ri
+
+
+def _payload(prompt="专家职位 的结论是什么"):
+    return json.dumps({"prompt": prompt, "session_id": "s1",
+                       "cwd": "/tmp/fake-proj"})
+
+
+def _patch_recall(monkeypatch, n_hits=2, max_bytes="4096"):
+    import cli
+    import db
+    import recall as recall_mod
+    import scoring
+    monkeypatch.setenv("MEM_RECALL_MIN_SCORE", "0.05")
+    monkeypatch.setenv("MEM_RECALL_MAX_BYTES", max_bytes)
+    monkeypatch.setattr(recall_mod, "search_entities",
+                        lambda toks: [{"id": "e1", "name": "专家职位"}])
+    hits = [{"score": 0.42, "tag": {"display": "专家职位"},
+             "fact": {"id": f"f{i}", "subject_id": "e1", "object_id": None,
+                      "value": f"结论 {i}"}}
+            for i in range(n_hits)]
+    monkeypatch.setattr(cli, "recall", lambda *a, **k: {"results": hits})
+    monkeypatch.setattr(db, "get_conn", lambda: None)
+    monkeypatch.setattr(scoring, "refresh_lif_on_recall", lambda *a, **k: None)
+
+
+def test_additional_context_wrapped_in_memsvc_recall_marker(monkeypatch):
+    _patch_recall(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_payload()))
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    assert ri.main() == 0
+    ctx = json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith("<memsvc-recall>") and ctx.endswith("</memsvc-recall>")
+    assert "## Memory recall (auto, 2 hits)" in ctx
+    assert "结论 0" in ctx and "[0.42]" in ctx
+    # 闭环: 打标面 = 清洗面 — 五 harness 剥完都是空 (语料重进不重入库)
+    from corpus_prep import HARNESSES, clean
+    for h in HARNESSES:
+        assert clean(ctx, h) == "", h
+
+
+def test_no_anchor_entities_zero_output(monkeypatch):
+    import recall as recall_mod
+    monkeypatch.setattr(sys, "stdin",
+                        io.StringIO(_payload("完全无关的提问内容")))
+    monkeypatch.setattr(recall_mod, "search_entities",
+                        lambda toks: [{"id": "e1", "name": "专家职位"}])
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    assert ri.main() == 0
+    assert out.getvalue() == ""  # 精度门: 未指名实体 → 零注入
+
+
+def test_budget_still_injects_after_wrap_overhead(monkeypatch):
+    _patch_recall(monkeypatch, n_hits=1, max_bytes="1024")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_payload()))
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    assert ri.main() == 0
+    raw = out.getvalue()
+    assert raw  # 预算远大于包裹开销 32B → 照常注入
+    ctx = json.loads(raw)["hookSpecificOutput"]["additionalContext"]
+    assert len(ctx.encode("utf-8")) <= 1024

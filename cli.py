@@ -392,13 +392,15 @@ def consolidate() -> dict[str, int]:
 # ── autodream ──────────────────────────────────────────────────────
 
 def autodream(session_id: str, transcript_path: str,
-              cwd: str | None = None) -> dict[str, int]:
+              cwd: str | None = None, harness: str = "cc") -> dict[str, int]:
     """PreCompact autoDream: session transcript raw→KG incremental (ADR-10/11).
 
     Thin wrapper over ``autodream.autodream`` (LLM 蝴蝶翼 直连, 无 regex 降级 —
     LLM 不可用即 block)。``cwd`` ADR-14 b 方案: 记 source_cwd, recall --cwd 过滤。
+    ``harness``: corpus_prep 语料标记块清洗表键 (缺省 cc)。
     """
-    return autodream_mod.autodream(session_id, transcript_path, source_cwd=cwd)
+    return autodream_mod.autodream(session_id, transcript_path, source_cwd=cwd,
+                                   harness=harness)
 
 
 # ── ingest-recent (M18: 手动补近期会话结论入库) ──────────────────────
@@ -407,13 +409,14 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
                   dry_run: bool = False,
                   registry_path: str | Path | None = None,
                   harness: str = "cc") -> dict[str, Any]:
-    """当前 cwd 最近 N 个 transcript 的 end step → 蒸馏 → LLM 入 KG (手动)。
+    """当前 cwd 最近 N 个 transcript 的用户声音场景 → 蒸馏 → LLM 入 KG (手动)。
 
-    ``harness`` (M19): ``cc`` / ``dsh`` / ``omp`` — 落盘定位与 end step 判定
-    见 ``transcripts.py`` 适配层 (三家实测校准); 默认 cc。
+    ``harness`` (M19/M22): ``cc`` / ``dsh`` / ``omp`` / ``codex`` — 落盘定位
+    与 end step 判定见 ``transcripts.py`` 适配层 (实测校准); 默认 cc。
 
-    每个: 蒸馏(与 PreCompact worker 同口径) → 合成 transcript →
-    ``autodream(session=文件名 uuid, source_cwd=cwd)``。
+    每个: 场景蒸馏 (end step + 配对用户原话块, M21 用户声音通道) → 合成
+    transcript (``[用户]`` / ``[助手结论]`` 角色标记) →
+    ``autodream(session=文件名 uuid, source_cwd=cwd, harness=harness)``。
 
     - 空 end step → skip 不调 LLM (仍记注册表, 免重复蒸馏空跑)。
     - 注册表 ``data/transcript-registry.json``: path → sha256[:16]; 未变 → skip
@@ -459,13 +462,14 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
             details.append(entry)
             continue
         try:
-            steps = transcripts_mod.end_steps(p, harness)
+            scenes_ = transcripts_mod.scenes(p, harness)
         except (OSError, RuntimeError, ValueError) as e:
             entry.update(status="error", error=f"extract: {e}")
             details.append(entry)
             continue
-        entry["steps"] = len(steps)
-        if not steps:
+        entry["scenes"] = len(scenes_)
+        entry["user_blocks"] = sum(len(s["user_blocks"]) for s in scenes_)
+        if not scenes_:
             entry["status"] = "skipped-empty"
             if not dry_run:
                 registry[str(p)] = sha
@@ -475,16 +479,26 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
             entry["status"] = "would-ingest"
             details.append(entry)
             continue
-        # 合成 transcript (与 spool-worker 同形状) → autodream
+        # 合成 transcript (M21 用户声音通道): 场景按 [用户]/[助手结论] 标记
+        # 写入 (prompt v5 阅读优先级依赖角色标记); 均 type=user → autodream
+        # 块文法合并为同 provenance 段, 提取器在段内同看两侧。
         fd, tmp_name = tempfile.mkstemp(suffix=".jsonl", prefix="endsteps-")
         tmp = Path(tmp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as out:
-                for txt in steps:
+                for sc in scenes_:
+                    for ub in sc["user_blocks"]:
+                        out.write(json.dumps(
+                            {"type": "user",
+                             "message": {"content": f"[用户] {ub}"}},
+                            ensure_ascii=False) + "\n")
                     out.write(json.dumps(
-                        {"type": "user", "message": {"content": txt}},
+                        {"type": "user",
+                         "message": {"content":
+                                     f"[助手结论] {sc['end_step']}"}},
                         ensure_ascii=False) + "\n")
-            r = autodream_mod.autodream(sid, str(tmp), source_cwd=cwd)
+            r = autodream_mod.autodream(sid, str(tmp), source_cwd=cwd,
+                                        harness=harness)
             entry["status"] = "ingested"
             entry["facts"] = r
             for k, v in (r or {}).items():
@@ -669,13 +683,19 @@ def _main(argv: list[str] | None = None) -> int:
         "--cwd", dest="cwd", default=None,
         help="ADR-14 记 source_cwd(来源 cwd, 从 hook stdin cwd 传)",
     )
+    dream.add_argument(
+        "--harness", dest="harness", default="cc",
+        choices=("cc", "codex", "dsh", "pi", "omp"),
+        help="语料标记块清洗表键 (corpus_prep; 默认 cc — PreCompact spool 即 CC)",
+    )
 
     ir = sub.add_parser("ingest-recent",
                         help="当前 cwd 最近 N 个 transcript end-step 蒸馏 → LLM 入 KG (手动补口, M18)")
     ir.add_argument("--cwd", dest="cwd", default=None,
                     help="项目 cwd (默认 $PWD; 定位 harness 的项目 transcript 目录)")
-    ir.add_argument("--harness", choices=("cc", "dsh", "pi", "omp"), default="cc",
-                    help="transcript 来源 harness (默认 cc; dsh=~/.dsh/sessions, pi=~/.pi/agent/sessions, omp=~/.omp/agent/sessions)")
+    ir.add_argument("--harness",
+                    choices=("cc", "dsh", "pi", "omp", "codex"), default="cc",
+                    help="transcript 来源 harness (默认 cc; dsh=~/.dsh/sessions, pi=~/.pi/agent/sessions, omp=~/.omp/agent/sessions, codex=~/.codex/sessions 按会话头 cwd 匹配)")
     ir.add_argument("--limit", type=int, default=10,
                     help="取最近 N 个 transcript 按 mtime (默认 10)")
     ir.add_argument("--dry-run", dest="dry_run", action="store_true",
@@ -782,7 +802,8 @@ def _main(argv: list[str] | None = None) -> int:
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":
-        print(json.dumps(autodream(args.session, args.transcript, cwd=args.cwd), ensure_ascii=False))
+        print(json.dumps(autodream(args.session, args.transcript, cwd=args.cwd,
+                               harness=args.harness), ensure_ascii=False))
     elif args.cmd == "ingest-recent":
         print(json.dumps(ingest_recent(args.cwd, limit=args.limit,
                                        dry_run=args.dry_run,

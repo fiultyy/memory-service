@@ -197,6 +197,22 @@ def test_put_fact_roundtrip_via_get_fact():
     f = store.get_fact(fid)
     assert f["provenance"] == "tool_obs"
     assert f["veracity"] == 0.9
+
+
+def test_task_outcome_roundtrip_and_null_default():
+    """prompt v5 任务分诊轴 (2026-08-28): task_outcome 落列 + _decode_fact
+    回读; 缺省 None (非任务事实/legacy); 表外值收拢在 llm_extract 层 (store
+    不设门 — 单源校验在 TASK_OUTCOMES)。"""
+    tmp = tempfile.mkdtemp()
+    db.init(Path(tmp) / "outcome.db")
+    sid = store.put_entity("OutcomeSubj", "concept")
+    cols = {r[1] for r in db.get_conn().execute("PRAGMA table_info(fact)")}
+    assert "task_outcome" in cols, "迁移未补 task_outcome 列"
+    fid = store.put_fact(sid, "decided", "v", task_outcome="success")
+    f = store.get_fact(fid)
+    assert f["task_outcome"] == "success"
+    fid2 = store.put_fact(sid, "is_a", "plain v")
+    assert store.get_fact(fid2)["task_outcome"] is None
     assert f["supersede_reason"] is None
 
 

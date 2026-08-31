@@ -98,6 +98,12 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     fact_cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
     if "raw_predicate" not in fact_cols:
         conn.execute("ALTER TABLE fact ADD COLUMN raw_predicate TEXT")
+    # prompt v5 (2026-08-28, Codex task-outcome triage 采纳): fact 补
+    # task_outcome 任务收尾分诊 (success|partial|fail|uncertain; NULL=非任务/
+    # legacy)。校验宽松 (表外收 NULL, llm_extract.TASK_OUTCOMES 单源)。
+    fact_cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
+    if "task_outcome" not in fact_cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN task_outcome TEXT")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS predicate_registry (
                canonical TEXT PRIMARY KEY,

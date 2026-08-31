@@ -43,7 +43,8 @@ import resolver
 import upgrade
 
 
-def _read_transcript(transcript_path: str | Path) -> list[tuple[str, str]]:
+def _read_transcript(transcript_path: str | Path,
+                     harness: str = "cc") -> list[tuple[str, str]]:
     """Read a CC transcript JSONL as a ``(block_type, text)`` sequence (M8/S1).
 
     Block grammar preserved — tool_use/tool_result blocks are NO LONGER
@@ -57,10 +58,16 @@ def _read_transcript(transcript_path: str | Path) -> list[tuple[str, str]]:
       ``text``/``content`` 字段, 无文本的 item 跳过。
     - ``system`` — 其余带可读文本的块 (thinking 等, G2: 其余→system)。
 
+    每块文本先过 ``corpus_prep.clean(harness)`` (2026-08-28, Codex 节点3
+    输入过滤采纳): 系统注入/命令回显/压缩重注入块在进提取管道前剥除 —
+    幂等, 与 transcripts 接缝叠加无害。
+
     Tolerates missing fields and malformed lines (hook transcript is
     async-written, may be partial — ADR-10 Consequences) by skipping the
     line/block. Missing file → ``[]``.
     """
+    import corpus_prep
+
     p = Path(transcript_path)
     if not p.is_file():
         return []
@@ -80,7 +87,8 @@ def _read_transcript(transcript_path: str | Path) -> list[tuple[str, str]]:
             content = msg.get("content")
             if isinstance(content, str):
                 if content:
-                    blocks.append((f"{rec.get('type')}_text", content))
+                    blocks.append((f"{rec.get('type')}_text",
+                                   corpus_prep.clean(content, harness)))
                 continue
             if not isinstance(content, list):
                 continue
@@ -91,22 +99,26 @@ def _read_transcript(transcript_path: str | Path) -> list[tuple[str, str]]:
                 if btype == "text":
                     t = block.get("text")
                     if isinstance(t, str) and t:
-                        blocks.append((f"{rec.get('type')}_text", t))
+                        blocks.append((f"{rec.get('type')}_text",
+                                       corpus_prep.clean(t, harness)))
                 elif btype == "tool_use":
                     t = _tool_use_text(block)
                     if t:
-                        blocks.append(("tool_use", t))
+                        blocks.append(("tool_use",
+                                       corpus_prep.clean(t, harness)))
                 elif btype == "tool_result":
                     t = _tool_result_text(block)
                     if t:
-                        blocks.append(("tool_result", t))
+                        blocks.append(("tool_result",
+                                       corpus_prep.clean(t, harness)))
                 else:
                     # 其余块 (thinking 等): 常见可读字段兜底, 无文本跳过。
                     t = block.get("text")
                     if not isinstance(t, str) or not t:
                         t = block.get("thinking")
                     if isinstance(t, str) and t:
-                        blocks.append(("system", t))
+                        blocks.append(("system",
+                                       corpus_prep.clean(t, harness)))
     return blocks
 
 
@@ -295,20 +307,21 @@ def _entity_hygiene_gate(name: str) -> bool:
         return False
     return True
 
-def autodream(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable", source_cwd: str | None = None) -> dict[str, int]:
+def autodream(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable", source_cwd: str | None = None, harness: str = "cc") -> dict[str, int]:
     """Incrementally整理 a session transcript into the KG (ADR-10) — 公共入口。
 
     perf/vec-index: 批量写包单事务 (``db.transaction()`` — 消逐语句 commit
     fsync; autodream 是 PreCompact hook 单写者, 失败整段回滚, 幂等重跑可
-    重入)。实际管道在 :func:`_autodream_inner`。
+    重入)。实际管道在 :func:`_autodream_inner`。``harness`` (2026-08-28):
+    语料标记块清洗表键 (corpus_prep), 缺省 cc (PreCompact spool 即 CC)。
     """
     db.get_conn()  # ensure schema initialised on first call
     with db.transaction():
         return _autodream_inner(session_id, transcript_path, providers,
-                                fact_type, source_cwd)
+                                fact_type, source_cwd, harness)
 
 
-def _autodream_inner(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable", source_cwd: str | None = None) -> dict[str, int]:
+def _autodream_inner(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable", source_cwd: str | None = None, harness: str = "cc") -> dict[str, int]:
     """Incrementally整理 a session transcript into the KG (ADR-10).
 
     Pipeline (ADR-10 Decision (a)/(b)/(c)):
@@ -343,7 +356,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     # (M2 通道; veracity 由 M3 映射自动生成, 不另传)。wings (adapter LLM)
     # 退役为异步升级 — 主径 provider 断供不再 RuntimeError (反 ADR-5)。
     # TODO(M4) 已落地: 段/事实标记待升级 — 两个 wire 点接 upgrade 队列(下)。
-    blocks = _read_transcript(transcript_path)
+    blocks = _read_transcript(transcript_path, harness)
     truncated_segs: list[tuple[int, str]] = []
     segments = _build_segments(blocks, truncated=truncated_segs)
     # M8→M4 wire: 超长段截尾的全文 ref 入升级队列 (wings 异步升级; M9 入队时算 surprise)。
@@ -610,6 +623,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                     seen_sessions=[session_id] if session_id else [],
                     topic=topic,
                     raw_predicate=raw_predicate,
+                    task_outcome=getattr(edge, "task_outcome", None),
                 )
                 for old in contradicting:
                     store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now(), reason="contradiction")  # M1: contradiction 必带 reason
@@ -635,6 +649,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
                 seen_sessions=[session_id] if session_id else [],
                 topic=topic,
                 raw_predicate=raw_predicate,
+                task_outcome=getattr(edge, "task_outcome", None),
             )
             # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
             # llm 通道 (_queue_on=False) 不收集: extractor='llm' 的 fact 已是

@@ -79,10 +79,15 @@ sys.path.insert(0, str(SVC_DIR))
 
 
 def _log_fail(msg: str) -> None:
+    """台账行带 [pid=N argv0] 溯源前缀 (A1-RW-001-F1): 区分 pytest 进程与
+    hook 子进程写入 — A1 排查曾因 pytest 夹具写的行无溯源被误读为桥 spawn
+    故障 (findings: ~/.dsh/maestro/state/tickets/A1-RW-001-findings.md)。"""
     try:
+        argv0 = Path(sys.argv[0]).name if sys.argv[0] else "?"
         log = SVC_DIR / "data" / "hook-recall.log"
         with log.open("a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}\n")
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                     f"[pid={os.getpid()} {argv0}] {msg}\n")
     except Exception:
         pass  # 日志失败也不挡 prompt
 

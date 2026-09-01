@@ -229,6 +229,8 @@ def test_three_port_fallback_accounting(monkeypatch):
                     "value": "笔记工具", "extractor": "regex",
                     "lif_source": 0.4}}
     monkeypatch.setattr(cli, "recall", lambda *a, **k: {"results": [hit]})
+    # A1-RW-001-F1: 日志路径隔离 — 零真台账污染 (A1 误诊教训)。
+    monkeypatch.setattr(ri, "_log_fail", lambda m: None)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
         {"prompt": "Logseq 的结论是什么", "session_id": "sz",
          "cwd": "/tmp/fake-proj"})))
@@ -268,6 +270,8 @@ def test_mixed_block_plain_tag_per_entry_warning(monkeypatch):
                   "value": "插件", "extractor": "regex", "lif_source": 0.4}},
     ]
     monkeypatch.setattr(cli, "recall", lambda *a, **k: {"results": hits})
+    # A1-RW-001-F1: 日志路径隔离 — 零真台账污染 (A1 误诊教训)。
+    monkeypatch.setattr(ri, "_log_fail", lambda m: None)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
         {"prompt": "Logseq 的结论是什么", "session_id": "sm",
          "cwd": "/tmp/fake-proj"})))

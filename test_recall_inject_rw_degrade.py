@@ -42,6 +42,9 @@ def _mk_lexical_kg(tmp_path) -> str:
 
 def _run_inject(monkeypatch, tmp_path, transcript_lines=()):
     """count=0 (空 transcript) → 首轮档窗内 → 跑到记账段。返回 stdout 文本。"""
+    # A1-RW-001-F1: 日志路径统一隔离 (与 _run_main 同款), 零真台账污染。
+    logged: list[str] = []
+    monkeypatch.setattr(ri, "_log_fail", logged.append)
     tpath = tmp_path / "t.jsonl"
     tpath.write_text("\n".join(transcript_lines) + "\n", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", io.StringIO(_payload(str(tpath))))
@@ -109,3 +112,17 @@ def test_probe_rw_logs_fs_and_sqlite_failure(tmp_path, monkeypatch):
     assert ri._probe_rw() is False
     assert len(logged) == 1 and "rw-probe" in logged[0]
     assert "fs=FAIL" in logged[0] and "readonly database" in logged[0]
+
+
+def test_log_fail_line_carries_pid_argv0_trace(tmp_path, monkeypatch):
+    """F1 溯源字段: 真实 _log_fail 落盘行带 `[pid=N argv0]` 前缀 —
+    pytest 进程与 hook 子进程写入一眼可分 (A1 误诊教训的回归锚)。"""
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(ri, "SVC_DIR", tmp_path)  # _log_fail 写 SVC_DIR/data/
+    ri._log_fail("rw-probe: trace-check")
+    line = (tmp_path / "data" / "hook-recall.log").read_text(
+        encoding="utf-8").strip()
+    assert "[pid=" in line and "] rw-probe: trace-check" in line, line
+    # argv0 字段在场 (pytest 下为 pytest, hook 子进程下为 recall_inject.py)
+    argv0 = line.split("[pid=", 1)[1].split("]", 1)[0].split(" ", 1)[1]
+    assert argv0, f"argv0 字段不得为空: {line}"

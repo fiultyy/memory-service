@@ -12,6 +12,7 @@
 """
 import io
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -24,6 +25,15 @@ import recall_inject as ri
 def _payload(prompt="专家职位 的结论是什么"):
     return json.dumps({"prompt": prompt, "session_id": "s1",
                        "cwd": "/tmp/fake-proj"})
+
+
+def _readonly_conn(*a, **k):
+    """连接失败 raise 形态 (先例 test_recall_inject_rw_degrade.py:105-108)。
+
+    A1-RW-001-F1: 弃 `get_conn→lambda:None` 裸夹具 — None 会沿
+    `conn or db.get_conn()` 流入 `.execute` 产生误导性的
+    AttributeError(NoneType), 正是 A1 台账误诊的根源。"""
+    raise sqlite3.OperationalError("attempt to write a readonly database")
 
 
 def _patch_recall(monkeypatch, n_hits=2, max_bytes="4096"):
@@ -40,7 +50,11 @@ def _patch_recall(monkeypatch, n_hits=2, max_bytes="4096"):
                       "value": f"结论 {i}"}}
             for i in range(n_hits)]
     monkeypatch.setattr(cli, "recall", lambda *a, **k: {"results": hits})
-    monkeypatch.setattr(db, "get_conn", lambda: None)
+    # A1-RW-001-F1: 日志路径隔离 — 注入器任何台账写入落 capture, 绝不污染
+    # 真实 data/hook-recall.log (历史: pytest 写入的行曾被误读为桥 spawn 故障)。
+    logged: list[str] = []
+    monkeypatch.setattr(ri, "_log_fail", logged.append)
+    monkeypatch.setattr(db, "get_conn", _readonly_conn)
     monkeypatch.setattr(scoring, "refresh_lif_on_recall", lambda *a, **k: None)
 
 

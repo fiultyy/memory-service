@@ -117,6 +117,10 @@ def _spy_refresh(monkeypatch) -> list:
 
 
 def _run_main(monkeypatch, payload: str) -> str:
+    # A1-RW-001-F1: 日志路径统一隔离 — main 内 probe/boost 任何台账写入落
+    # capture, 绝不污染真实 data/hook-recall.log (A1 台账误诊教训)。
+    logged: list[str] = []
+    monkeypatch.setattr(ri, "_log_fail", logged.append)
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     out = io.StringIO()
     monkeypatch.setattr(sys, "stdout", out)

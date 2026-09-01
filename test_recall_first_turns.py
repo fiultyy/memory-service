@@ -9,13 +9,15 @@ user_text 块数, 首 turn count=0)。
 1. 首 turn (count=0<n) → 首轮档: use_vec=True + FIRST_TOPK 候选窗, 命中含
    向量融合 (fact 基础分 < min_score, 唯一靠 δ·vec_sim 越地板 → 命中即融合
    证明; embedding stub 照 test_bfs_recall._patch_embed_deterministic 先例)。
-2. count >= n → 常驻档: use_vec=False, embedding 调用计数 == 0 (零输出场景);
-   另有字面命中场景证明 A 路常驻照常注入且零嵌入。
-3. transcript 缺失 / session_id 反查落空 → 静默降级常驻档 (不炸, 零嵌入)。
-4. MEM_RECALL_FIRST_TURNS=0 → 窗口关闭, 永远常驻档。
+2. **D2 裁决 (2026-09-01): count >= n → 窗口外静默早退 (零召回零记账零输出;
+   旧规"常驻档照常注入"已废)** — 早退发生在锚定/召回之前 (cli.recall 零调用)。
+3. transcript 缺失 / session_id 反查落空 → count 未知 → fail-open 常驻档
+   (不炸, 零嵌入, 不挡路契约)。
+4. MEM_RECALL_FIRST_TURNS=0 → n_turns 恒 None → fail-open 常驻档 (窗口关闭)。
 5. 计数过滤: tool_result 块 / isSidechain / <memsvc-recall> 注入块 / 坏行 /
    assistant 条目均不计入。
 6. 早停: count 达 n 即返回, 不读全文件 (open 行计数器断言)。
+7. 窗口边界: count = n-1 仍首轮档 (use_vec=True)。
 
 fixture 风格照 test_recall_inject_marker.py (monkeypatch/StringIO); KG 用
 db.init(tmp) 隔离, embedding 全 stub — 零网络零 LLM。
@@ -144,44 +146,35 @@ def test_first_turn_vec_fusion_tier(tmp_path, monkeypatch):
     assert refresh == [fid], "记账语义不变: 只对最终注入条 refresh"
 
 
-# ── 2a. count>=n: 常驻档零嵌入 + 零输出 (fact 基础分不达地板, 无融合兜底) ──
-def test_resident_tier_zero_embedding_zero_output(tmp_path, monkeypatch):
+# ── 2. count>=n: 窗口外静默早退 (D2 裁决) — 零输出且 cli.recall 零调用 ────
+def test_beyond_window_exits_before_recall(tmp_path, monkeypatch):
     calls = _patch_embed_deterministic(monkeypatch)
     _mk_vec_only_kg(tmp_path)
     calls["n"] = 0  # put_fact 入库预热会 embed 值 — 探针只量 recall 路径
     rec = _spy_recall(monkeypatch)
-    # 1 条既往 user turn; n 默认 1 → count=1 >= n → 常驻档
+    # 1 条既往 user turn; n 默认 1 → count=1 >= n → 早退
     tpath = _write_transcript(tmp_path / "t.jsonl",
                               [_user_line("早前一轮真人原话, 语气自然")])
     monkeypatch.setenv("MEM_RECALL_MIN_SCORE", "0.05")
     raw = _run_main(monkeypatch, _payload(transcript_path=tpath))
-    assert raw == "", "常驻档无融合: fact 基础分 0.002 < 0.05 → 零输出"
-    assert calls["n"] == 0, "常驻档: 嵌入调用必须为 0"
-    kw = rec["kwargs"][0]
-    assert kw["use_vec"] is False, "常驻档: 实体锚定零嵌入"
-    assert kw["top_k"] == 50, "常驻档候选窗 = CAND_K 默认 (无 FIRST_TOPK 提升)"
+    assert raw == "", "窗口外: 零输出"
+    assert rec["kwargs"] == [], "窗口外: cli.recall 不得被调用 (早退在锚定之前)"
+    assert calls["n"] == 0, "窗口外: 嵌入调用必须为 0"
 
 
-# ── 2b. count>=n 常驻档: A 路常驻 — 字面命中照常注入, 仍零嵌入 ───────────
-def test_resident_tier_still_injects_lexical_hits(tmp_path, monkeypatch):
+# ── 2b. 窗口边界: count = n-1 仍在窗内 → 首轮档 (use_vec=True) ────────────
+def test_window_boundary_count_n_minus_1_still_first_tier(tmp_path, monkeypatch):
     calls = _patch_embed_deterministic(monkeypatch)
-    db.init(tmp_path / "mem.db")
-    import store
-    eid = store.put_entity("专家职位", "inferred")
-    store.put_fact(eid, "uses", "专家职位 依赖 sqlite-vec 向量索引",
-                   extractor="llm", fact_type="permanent", LIF=0.7,
-                   confidence=0.8)
+    _mk_vec_only_kg(tmp_path)
     calls["n"] = 0  # 入库预热 embed 不算 — 只量 recall 路径
     rec = _spy_recall(monkeypatch)
-    tpath = _write_transcript(tmp_path / "t.jsonl",
-                              [_user_line("早前一轮真人原话")])
     monkeypatch.setenv("MEM_RECALL_MIN_SCORE", "0.05")
+    monkeypatch.setenv("MEM_RECALL_FIRST_TURNS", "2")
+    tpath = _write_transcript(tmp_path / "t.jsonl",
+                              [_user_line("早前一轮真人原话")])  # count=1 < n=2
     raw = _run_main(monkeypatch, _payload(transcript_path=tpath))
-    assert raw, "A 路常驻每 prompt: 字面命中照常注入"
-    ctx = json.loads(raw)["hookSpecificOutput"]["additionalContext"]
-    assert "sqlite-vec" in ctx
-    kw = rec["kwargs"][0]
-    assert kw["use_vec"] is False and calls["n"] == 0, "常驻档零嵌入"
+    assert raw, "count=1 < n=2: 仍在窗内 → 首轮档向量融合命中"
+    assert rec["kwargs"][0]["use_vec"] is True
 
 
 # ── 3a. payload 无 transcript_path 且反查落空 → 静默降级常驻档 (fail-open) ──

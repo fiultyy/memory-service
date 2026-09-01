@@ -87,6 +87,37 @@ def _log_fail(msg: str) -> None:
         pass  # 日志失败也不挡 prompt
 
 
+def _probe_rw() -> bool:
+    """A1 降级探测 (2026-09-01): hook 上下文 DB 可能只读 — fs 写与 sqlite 写
+    分开探, 区分 会话沙箱 (fs FAIL) 与 sqlite/WAL 态 (fs ok + sqlite FAIL)。
+    不可写 → False (调用方跳过 LIF 记账, 注入照常); 异常落台账供鉴别。
+    探测写 = 真库上建/删临时表 (零残留); fs 写 = data/.rw_probe 一字节。"""
+    fs_ok = True
+    try:
+        p = SVC_DIR / "data" / ".rw_probe"
+        p.write_text("1")
+        p.unlink()
+    except Exception:
+        fs_ok = False
+    try:
+        import db
+        conn = db.get_conn()
+        conn.execute("CREATE TABLE IF NOT EXISTS _rw_probe (k TEXT)")
+        conn.execute("DROP TABLE IF EXISTS _rw_probe")
+        conn.commit()
+        return True
+    except Exception as exc:
+        try:
+            import db as _dbmod
+            db_src = getattr(_dbmod, "__file__", "?")
+        except Exception:
+            db_src = "?"
+        _log_fail(f"rw-probe: fs={'ok' if fs_ok else 'FAIL'} "
+                  f"sqlite=FAIL ({type(exc).__name__}: {exc}) db={db_src} "
+                  f"→ 记账降级, 注入继续")
+        return False
+
+
 def _count_user_turns(path: str | None, limit: int) -> int | None:
     """transcript 里已落盘的既往 user_text 块数 (v1.7 ② turn 判据)。
 
@@ -156,6 +187,12 @@ def main() -> int:
     n_turns = _count_user_turns(transcript_path, first_n) \
         if first_n > 0 and transcript_path else None
     first_turn = first_n > 0 and n_turns is not None and n_turns < first_n
+    # D2 裁决 (2026-09-01): 注入只在首 n turn 窗口内触发 (n = MEM_RECALL_FIRST_TURNS)。
+    # count >= n → 静默早退 (零召回零记账零输出) — 消除桥 pre-step 每模型步的
+    # 注入税与 LIF 强化膨胀 (旧规: 窗口外降常驻档照常注入, 已废)。
+    # count 未知 (transcript 缺失/失败) → fail-open 常驻档不变 (不挡路契约)。
+    if n_turns is not None and n_turns >= first_n:
+        return 0
 
     min_score = float(os.environ.get("MEM_RECALL_MIN_SCORE", "0.05"))
     top_k = int(os.environ.get("MEM_RECALL_TOP_K", "8"))
@@ -251,13 +288,22 @@ def main() -> int:
     # 无论来源通道); LIF 强化 (access_count+1 / seen_sessions 吸收 / LIF
     # 重算) 只给非受限 fact — fallback 产物与待验证暂缓期 fact 不因被召回
     # 白得强化 (E9 分账)。逐条尽力而为, 单条失败不挡注入。
+    # A1 降级 (2026-09-01 裁决): hook 上下文 DB 可能只读 (readonly database,
+    # 疑会话沙箱/WAL 态) → 探测写能力, 不可写则整段跳过记账 (零 boost-fail
+    # 噪声), 注入照常 — 召回是纯读, 不因写缺失而放弃。异常落台账兼作
+    # fs(沙箱)/sqlite(WAL) 鉴别信号。
     import scoring
-    try:
-        import db
-        conn = db.get_conn()
-    except Exception:
-        conn = None
+    db_ok = _probe_rw()
+    conn = None
+    if db_ok:
+        try:
+            import db
+            conn = db.get_conn()
+        except Exception:
+            conn = None
     for r in hits:
+        if not db_ok:
+            break
         f = r.get("fact") or {}
         try:
             scoring.record_recall_observation(

@@ -78,6 +78,15 @@ else
         && mv -- "${SPOOL_FILE}.tmp" "${SPOOL_FILE}" 2>/dev/null || true
 fi
 
+# ①′ harness 溯源 sidecar (MF2-B, TM1 W2-R1): <spool>.harness 记快照来源
+# (dsh 钩模板带 MEM_HARNESS=dsh; CC 侧无前缀 → 缺省 cc) — worker 逐文件
+# --harness 转发, 根除 spool cc/dsh 混排单 env 不可归属的恒错标。快照
+# 成功才写 (zstd 失败无 SPOOL_FILE → 无 sidecar); 原子 tmp+mv 同款。
+if [ -n "${SPOOL_FILE:-}" ] && [ -f "${SPOOL_FILE}" ]; then
+    printf '%s' "${MEM_HARNESS:-cc}" > "${SPOOL_FILE}.harness.tmp" 2>/dev/null \
+        && mv -- "${SPOOL_FILE}.harness.tmp" "${SPOOL_FILE}.harness" 2>/dev/null || true
+fi
+
 # ② 排干积压 + 处理新快照: 单例后台 worker (锁文件防并发双跑; 排干
 # spool 全部待处理文件后自行退出)。每次钩子触发都尝试拉起 — 已在跑
 # 则锁失败 no-op, 幂等。MEM_SPOOL_WORKER=0 → 只快照不蒸馏 (测试/演练)。

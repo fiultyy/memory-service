@@ -49,6 +49,19 @@ for f in "${SPOOL}"/*.jsonl; do
     session="${base%-*}"
     [ -z "${session}" ] && session="unknown"
 
+    # MF2-B (TM1 W2-R1): harness 溯源 sidecar (<file>.harness, 由
+    # pre-compact-mem.sh 快照时写) → 逐文件 --harness 转发。spool 可能
+    # cc/dsh 混排, 单 env 不可归属 (TM1 已证) — 只认逐文件 sidecar。
+    # 缺 sidecar (历史遗留) 不传 → 保持 argparse 缺省, 不臆测; 非法值
+    # 视同缺失 (防脏 sidecar 卡死重试)。
+    HARNESS_ARG=""
+    if [ -r "${f}.harness" ]; then
+        H="$(cat "${f}.harness" 2>/dev/null)"
+        case "${H}" in
+            cc|codex|dsh|pi|omp) HARNESS_ARG="--harness ${H}" ;;
+        esac
+    fi
+
     # 占位: 处理中改名 .lock (中断可回收)。
     mv -- "$f" "$f.lock" 2>/dev/null || continue
 
@@ -63,7 +76,7 @@ for f in "${SPOOL}"/*.jsonl; do
 
     # ② 空蒸馏 (纯工具会话/全短应答) → 成功, 零 LLM。
     if [ ! -s "$f.endsteps" ]; then
-        rm -f -- "$f.lock" "$f.endsteps"
+        rm -f -- "$f.lock" "$f.endsteps" "$f.harness"
         echo "$(date -Is) no-end-steps: ${base}" >>"${SPOOL}/worker.log"
         continue
     fi
@@ -72,13 +85,15 @@ for f in "${SPOOL}"/*.jsonl; do
     ( cd "${SVC_DIR}" && \
       python3 cli.py autodream --session "${session}" \
                                 --transcript "$f.endsteps" \
+                                ${HARNESS_ARG} \
                                 ${CWD_ARG:+--cwd "${CWD_ARG#--cwd }"} \
           >>"${SPOOL}/worker.log" 2>&1 )
     rc=$?
 
-    # ④ 成功删 raw+蒸馏; 失败留 raw 重试 (蒸馏可再生, 不留)。
+    # ④ 成功删 raw+蒸馏+sidecar; 失败留 raw 重试 (蒸馏可再生+sidecar
+    # 随 raw 保留 — 重试仍按原源转发, 不丢记忆只延迟)。
     if [ $rc -eq 0 ]; then
-        rm -f -- "$f.lock" "$f.endsteps"
+        rm -f -- "$f.lock" "$f.endsteps" "$f.harness"
     else
         rm -f -- "$f.endsteps"
         mv -- "$f.lock" "$f" 2>/dev/null || true

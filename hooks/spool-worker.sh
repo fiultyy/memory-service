@@ -22,7 +22,9 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SVC_DIR="$(cd "${HOOK_DIR}/.." && pwd)"
 CLI="${SVC_DIR}/cli.py"
 ENDSTEPS="${SVC_DIR}/endsteps.py"
-SPOOL="${SVC_DIR}/data/transcript-spool"
+# MEM_SPOOL_DIR: 测试注入口 (与 pre-compact-mem.sh B1-P2 同款, MF3) —
+# 快照与排干必须指向同一 spool; 缺省回落生产行为不变。
+SPOOL="${MEM_SPOOL_DIR:-${SVC_DIR}/data/transcript-spool}"
 CWD_ARG=""
 [ "${1:-}" = "--cwd" ] && [ -n "${2:-}" ] && CWD_ARG="--cwd ${2}"
 

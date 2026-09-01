@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/home/yy/projects/memory-service/hooks/user-prompt-recall.sh' ] && [ -x '/home/yy/projects/memory-service/hooks/user-prompt-recall.sh' ]; then /home/yy/projects/memory-service/hooks/user-prompt-recall.sh; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/home/yy/projects/memory-service/hooks/session-start-mem.sh' ] && [ -x '/home/yy/projects/memory-service/hooks/session-start-mem.sh' ]; then MEM_HARNESS=dsh /home/yy/projects/memory-service/hooks/session-start-mem.sh; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

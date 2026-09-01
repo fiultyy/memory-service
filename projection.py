@@ -48,6 +48,15 @@ def cc_memory_dir(cwd: str) -> Path:
     return Path.home() / ".claude" / "projects" / encoded / "memory"
 
 
+def dsh_memory_dir(cwd: str) -> Path:
+    """cwd → dsh project-scoped memory dir(~/.dsh/projects/<encoded>/memory/)。
+    encoded 与 dsh sessions 目录同名法(实证对表 ~/.dsh/sessions 5/5):
+    strip 首尾斜杠 → 内部 '/'→'-' 全量('.' 保留) → '--' 双横线包裹
+    (/home/yy/.dsh → --home-yy-.dsh--)。与 CC 编码两点差异: 包裹 + 不改点号。"""
+    encoded = "--" + cwd.strip("/").replace("/", "-") + "--"
+    return Path.home() / ".dsh" / "projects" / encoded / "memory"
+
+
 _SLUG_MAX = 60  # 字符上限: 全中文 60 字 = 180 字节 + "mem-xxxx-.md" ≈ 193 < ext4 NAME_MAX 255
 
 

@@ -313,6 +313,7 @@ def recall(query: str, verbose: bool = False,
            as_json: bool = False,
            min_score: float | None = None,
            project: bool = False,
+           harness: str = "cc",
            use_gate: bool = False,
            gate_account: bool = False,
            gate_scope: str | None = None,
@@ -342,6 +343,8 @@ def recall(query: str, verbose: bool = False,
     gate_account=True→"recall" / False→"manual"); 新面可用它显式钉标签。
     ``gate_provider``: gate LLM 依赖注入 seam (照 recall.recall 同名参数;
     测试零网络注入 mock; argv 面不暴露 flag, key 走 env)。
+    ``harness`` (2026-09-01 dsh 正文落点): 存放位置方案 — dsh → mem-*.md 与
+    --project 报告落 ``~/.dsh/projects/<enc>/memory``; 默认 cc 行为逐字节不变。
     """
     result = recall_mod.recall(query, verbose=verbose, session_id=session_id,
                                boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd, top_k=top_k,
@@ -349,7 +352,8 @@ def recall(query: str, verbose: bool = False,
                                as_of=_normalize_as_of(as_of), use_bfs_scoped=use_bfs_scoped,
                                min_score=min_score, use_gate=use_gate,
                                gate_account=gate_account, gate_scope=gate_scope,
-                               gate_provider=gate_provider)
+                               gate_provider=gate_provider,
+                               mem_dir=(_proj_memory_dir(None, cwd, harness) if cwd else None))
     if project:
         # M18: 召回正文 → recall-<DATE>.md + MEMORY.md 索引行 (用户裁决 2026-08-27)。
         # dir = cc_memory_dir(--cwd 或 $PWD); 空命中不投影(不写空日志)。报告走
@@ -360,7 +364,7 @@ def recall(query: str, verbose: bool = False,
         if facts:
             import projection
             proj = projection.project_recall(
-                projection.cc_memory_dir(cwd or os.getcwd()), query, facts)
+                _proj_memory_dir(None, cwd or os.getcwd(), harness), query, facts)
             sys.stderr.write(
                 f"📋 recall projected → memory/{proj['recall_file']} "
                 f"(+{proj['appended']} hits; MEMORY.md index "
@@ -564,42 +568,54 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
 
 # ── init-memory (bootstrap) ─────────────────────────────────────────
 
+def _proj_memory_dir(memory_dir: str | None, cwd: str, harness: str = "cc") -> Path:
+    """投影目录解析优先级: 显式 --memory-dir > harness 缺省(cc→cc_memory_dir,
+    dsh→dsh_memory_dir)。此 harness 维=存放位置方案(与 corpus 清洗的 harness 键分属两面)。"""
+    import projection
+    if memory_dir:
+        return Path(memory_dir)
+    if harness == "dsh":
+        return projection.dsh_memory_dir(cwd)
+    return projection.cc_memory_dir(cwd)
+
+
 def init_memory(memory_dir: str | None = None,
-                source_cwd: str | None = None) -> dict[str, int]:
+                source_cwd: str | None = None,
+                harness: str = "cc") -> dict[str, int]:
     """Seed KG from CC memory .md files (ADR-12)。``memory_dir`` 默认
     ``cc_memory_dir(cwd)``(与 synthesis-index 一致; 旧默认硬编码 ``~/.claude`` 全局目录 → 读错),
-    ``source_cwd`` 默认 ``cwd``(ADR-14 记来源, 不再 NULL)。"""
-    import projection
+    ``source_cwd`` 默认 ``cwd``(ADR-14 记来源, 不再 NULL)。
+    ``harness`` (2026-09-01 dsh 接钩子): 存放位置方案, dsh → ``~/.dsh/projects/<enc>/memory``。"""
     cwd = source_cwd or os.getcwd()
-    mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
+    mem_dir = _proj_memory_dir(memory_dir, cwd, harness)
     return bootstrap.init_memory(mem_dir, source_cwd=source_cwd or cwd)
 
 
 # ── synthesis-index (ADR-15 P2: 散 index 对账 → MEMORY [mem] 唯一写入口) ──
 
 def synthesis_index(scope: str | None = None, memory_dir: str | None = None,
-                    session: str | None = None) -> dict:
+                    session: str | None = None, harness: str = "cc") -> dict:
     """对账散 mem-<id>.md → 回 KG → 重写 MEMORY.md [mem] 索引(ADR-15 P2, 唯一写入口)。
 
     Thin wrapper over ``projection.synthesis_index``。recall/autodream 建 mem-<id>.md,
     synthesis 集中收口写 MEMORY。冷启动空跳过不兜底; orphan [mem] 行永远删(orphan 文件删默认关)。
+    ``harness``: 存放位置方案(dsh hooks 经 MEM_HARNESS=dsh 传入)。
     """
     import projection
     cwd = scope or os.getcwd()
-    mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
+    mem_dir = _proj_memory_dir(memory_dir, cwd, harness)
     return projection.synthesis_index(cwd, mem_dir, session_id=session)
 
 
 # ── prune (DELETE 同步, ADR-17d) ─────────────────────────────────────
 
 def prune(scope: str | None = None, memory_dir: str | None = None,
-          dry_run: bool = False) -> dict:
+          dry_run: bool = False, harness: str = "cc") -> dict:
     """CC memory md 删除 → KG fact soft-delete (ADR-17d)。手动触发
     (PostToolUse 不捕 ``rm``, 无 tool 触发删除 → 不自动)。re-ingest 的 DELETE 对称。
-    Thin wrapper over ``bootstrap.prune_deleted``。"""
-    import projection
+    Thin wrapper over ``bootstrap.prune_deleted``。``harness`` 同 synthesis-index。"""
     cwd = scope or os.getcwd()
-    mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
+    mem_dir = _proj_memory_dir(memory_dir, cwd, harness)
     return bootstrap.prune_deleted(mem_dir, source_cwd=cwd, dry_run=dry_run)
 
 
@@ -692,7 +708,9 @@ def _main(argv: list[str] | None = None) -> int:
                      help="M15a 稳定 JSON 契约输出 {query, facts:[…]} (字段名即 ABI; 缺省行为不变)")
     rec.add_argument("--project", action="store_true",
                      help="M18: 召回正文投影 recall-<DATE>.md + MEMORY.md 索引行 "
-                          "(dir = cc_memory_dir(--cwd 或 $PWD); 空命中不投影)")
+                          "(dir = 按 --harness 解析(--cwd 或 $PWD); 空命中不投影)")
+    rec.add_argument("--harness", dest="harness", default="cc", choices=["cc", "dsh"],
+                     help="存放位置方案(dsh → ~/.dsh/projects/<enc>/memory; 默认 cc)")
     rec.add_argument("--gate", dest="gate", action="store_true", default=True,
                      help="v1.7③: 对 BFS 扩展(B 翼) fact 跑单 LLM 一致性 gate "
                           "(query 自动升格 {keywords, intent, scope:manual}; "
@@ -739,6 +757,10 @@ def _main(argv: list[str] | None = None) -> int:
         "--cwd", dest="cwd", default=None,
         help="ADR-14 记 source_cwd(来源 cwd, 默认 NULL)",
     )
+    initmem.add_argument(
+        "--harness", dest="harness", default="cc", choices=["cc", "dsh"],
+        help="存放位置方案(dsh → ~/.dsh/projects/<enc>/memory; 默认 cc)",
+    )
 
     reing = sub.add_parser("re-ingest", help="单 md → KG 增量 (ADR-17 b/c)")
     reing.add_argument("file", help="markdown 文件路径")
@@ -754,11 +776,15 @@ def _main(argv: list[str] | None = None) -> int:
                     help="CC memory dir(默认 cc_memory_dir(scope))")
     si.add_argument("--session", dest="session", default=None,
                     help="CC session id(P2 占位, 暂仅日志用)")
+    si.add_argument("--harness", dest="harness", default="cc", choices=["cc", "dsh"],
+                    help="存放位置方案(dsh → ~/.dsh/projects/<enc>/memory; 默认 cc)")
     pr = sub.add_parser("prune",
                         help="CC memory md 删除 → KG fact soft-delete (ADR-17d, re-ingest 的 DELETE 对称)")
     pr.add_argument("--scope", default=None, help="来源 cwd(默认 os.getcwd)")
     pr.add_argument("--memory-dir", dest="memory_dir", default=None,
                     help="CC memory dir(默认 cc_memory_dir(scope))")
+    pr.add_argument("--harness", dest="harness", default="cc", choices=["cc", "dsh"],
+                    help="存放位置方案(dsh → ~/.dsh/projects/<enc>/memory; 默认 cc)")
     pr.add_argument("--dry-run", dest="dry_run", action="store_true",
                     help="只报不删(预览将 prune 的孤儿 fact)")
     sub.add_parser("embed-backfill",
@@ -819,7 +845,7 @@ def _main(argv: list[str] | None = None) -> int:
         ))
     elif args.cmd == "recall":
         session_id = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
-        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped, as_json=args.json, project=args.project, use_gate=args.gate)
+        result = recall(args.query, verbose=args.verbose, session_id=session_id, use_vec=args.vector, cwd=args.cwd, top_k=args.top_k, with_tag=args.with_tag, use_bfs=args.bfs, bfs_hops=args.bfs_hops, as_of=args.as_of, use_bfs_scoped=args.bfs_scoped, as_json=args.json, project=args.project, harness=args.harness, use_gate=args.gate)
         # ADR-4 bfs hint: direct-match 薄且未开 --bfs → stderr 提示(不污染 stdout 机器输出)。
         # 结果数 < 阈值代理 direct-match 薄(候选少 → 命中少); suggest_bfs 字段在 envelope
         # (with_tag) 里有, 但 cli 走结果数自判覆盖 list/verbose 全 path。
@@ -839,13 +865,16 @@ def _main(argv: list[str] | None = None) -> int:
                                        harness=args.harness),
                          ensure_ascii=False))
     elif args.cmd == "init-memory":
-        print(json.dumps(init_memory(args.memory_dir, source_cwd=args.cwd), ensure_ascii=False))
+        print(json.dumps(init_memory(args.memory_dir, source_cwd=args.cwd,
+                                     harness=args.harness), ensure_ascii=False))
     elif args.cmd == "re-ingest":
         print(json.dumps(bootstrap.re_ingest_file(args.file, source_cwd=args.cwd or os.getcwd()), ensure_ascii=False))
     elif args.cmd == "synthesis-index":
-        print(json.dumps(synthesis_index(scope=args.scope, memory_dir=args.memory_dir, session=args.session), ensure_ascii=False))
+        print(json.dumps(synthesis_index(scope=args.scope, memory_dir=args.memory_dir,
+                                         session=args.session, harness=args.harness), ensure_ascii=False))
     elif args.cmd == "prune":
-        print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir, dry_run=args.dry_run), ensure_ascii=False))
+        print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir,
+                               dry_run=args.dry_run, harness=args.harness), ensure_ascii=False))
     elif args.cmd == "embed-backfill":
         print(json.dumps(embed_backfill(), ensure_ascii=False))
     elif args.cmd == "vec-backfill":

@@ -43,6 +43,14 @@ fi
 # ponytail: default session id when CC omits it.
 [ -z "${SESSION_ID}" ] && SESSION_ID="unknown"
 
+# 投影存放位置方案 (2026-09-01 dsh 接钩子): MEM_HARNESS=dsh → --harness dsh
+# (memory dir 落 ~/.dsh/projects/<enc>/memory, 而非 CC 的 ~/.claude/projects/<enc>/memory)。
+# 白名单放行, 其他值一律缺省 cc — 防任意旗标注入。CC 侧未设此 env → 行为不变。
+PROJ_ARGS=""
+case "${MEM_HARNESS:-}" in
+    dsh) PROJ_ARGS="--harness dsh" ;;
+esac
+
 # Run synthesis-index only if cli.py exists. Project KG → CC memory.
 # Output discarded; hook's contract is side-effect on CC memory, not stdout.
 # timeout 守护 (env MEM_SESSION_START_TIMEOUT, 缺省 15s): 投影超时即放弃,
@@ -52,11 +60,11 @@ if [ -f "${CLI}" ]; then
         if command -v timeout >/dev/null 2>&1; then
             ( cd "${SVC_DIR}" && \
               timeout "${MEM_SESSION_START_TIMEOUT:-15}" \
-                  python3 cli.py synthesis-index ${CWD:+--scope "$CWD"} --session "${SESSION_ID}" \
+                  python3 cli.py synthesis-index ${CWD:+--scope "$CWD"} --session "${SESSION_ID}" ${PROJ_ARGS} \
                   >/dev/null 2>&1 || true )
         else
             ( cd "${SVC_DIR}" && \
-              python3 cli.py synthesis-index ${CWD:+--scope "$CWD"} --session "${SESSION_ID}" \
+              python3 cli.py synthesis-index ${CWD:+--scope "$CWD"} --session "${SESSION_ID}" ${PROJ_ARGS} \
                   >/dev/null 2>&1 || true )
         fi
     fi

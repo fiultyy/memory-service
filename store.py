@@ -575,12 +575,25 @@ def fact_count_by_harness() -> dict[str, int]:
 def unlock_match_score_cap() -> float:
     """v1.7③ N2: gate_score 累计解锁阈值/封顶 (env ``MEM_UNLOCK_MATCH_SCORE``,
     默认 2.0)。累计语义 = 求和且达阈值即封顶; 暂缓期只写不读, 默认值不敏感。
-    非法 env 值回落默认 (不可考不臆测)。
+
+    C4 (B3C-HYG) range 校验: 不可解析 (非数字) → 回落默认 (不可考不臆测,
+    既有语义); 可解析但越界 (≤0 / 非有限含 NaN/inf) → 响亮 ``ValueError``
+    (越界阈值会伪装成"永不解锁/永远已解锁"的静默行为漂移, 必须显式报错,
+    报错信息含 env 名、原值、合法域与回落方式)。
     """
+    raw = os.environ.get("MEM_UNLOCK_MATCH_SCORE")
+    if raw is None:
+        return 2.0
     try:
-        return float(os.environ.get("MEM_UNLOCK_MATCH_SCORE", "2.0"))
+        val = float(raw)
     except (TypeError, ValueError):
         return 2.0
+    import math
+    if not math.isfinite(val) or val <= 0:
+        raise ValueError(
+            f"MEM_UNLOCK_MATCH_SCORE 越界: {raw!r} (解析为 {val!r}) — "
+            f"须为正有限数 (0 < v < +inf); 请修正该 env, 或 unset 回落默认 2.0")
+    return val
 
 
 def bump_gate_score(fact_id: str, delta: float, conn=None) -> float | None:

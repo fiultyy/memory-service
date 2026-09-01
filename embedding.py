@@ -217,7 +217,14 @@ def embed_batch(texts: list[str],
     (空项试下一 provider)。返回与输入等长对齐 (不可得 → [])。**注意**: 批量
     结果**返前批写** L1/L2 缓存 (executemany 单 commit) — 后续单条 embed()
     走缓存, 语义与单条路径一致。
+
+    C2 (B3C-HYG) 守卫: ``texts`` 为 None/空列表 → 早退 ``[]`` (零 provider
+    调用零缓存 IO; 上游调用面如 resolver.resolve_entities_batch /
+    autodream 预热在空批时无需兜底)。非列表序列按 list() 归一后同判。
     """
+    if not texts:
+        return []
+    texts = list(texts)
     out: list[list[float]] = [[] for _ in texts]
     pending: list[int] = []
     for i, t in enumerate(texts):

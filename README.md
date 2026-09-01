@@ -52,7 +52,7 @@ mem-service (KG 叠加层)
   data/embeddings.db   (向量 cache)
 ```
 
-- **写入**：`ingest` / `autodream` → `adapter`（蝴蝶翼 N-wing 抽取 + 投票）→ `store.put_fact`（on-ingest 预计算向量入 L2 cache）→ SQLite KG
+- **写入**：`ingest` / `autodream`（蝴蝶翼 N-wing LLM 抽取 + 投票）/ `init-memory` · `re-ingest` · `ingest-recent`（gazetteer 词典+regex 占位链, 零 LLM inline, wings 异步升级）/ 四动词 `write`（通道档 provenance）→ `store.put_fact`（on-ingest 预计算向量入 L2 cache；fact.harness 记来源 harness）→ SQLite KG
 - **读取**：`recall` → 字面 match + pagerank centrality + LIF + 向量 sim 加权排序 → Fact 列表
 - **巩固**：`consolidate` → LIF decay（half_life）+ 精确重复 supersede
 - **投影**：`synthesis-index` → 扫散 `mem-*.md` → 回 KG 取 mem_score → 主题聚合(同 topic 唯一) → 对账重写 MEMORY.md 投影索引(ADR-A 原生格式, 无 `[mem]` 字面标记; SessionStart 单点自动 + cli 手动, MEMORY.md 投影行唯一写入口, ADR-15 P2 / 09-01 终裁A方案)

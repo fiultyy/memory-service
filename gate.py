@@ -33,7 +33,7 @@ from llm_extract import (
 from llm_provider import ProviderCallError, ZhipuAnthropicProvider
 
 # C4: gate 内层 timeout (秒)。构造内部 provider 时传入, 外层首轮档预算见
-# hooks 侧 MEM_RECALL_FIRST_TIMEOUT (15s) —— 内层各自传递, 本模块不读那把尺。
+# hooks 侧 MEM_RECALL_TIMEOUT (缺省 15s) —— 内层各自传递, 本模块不读那把尺。
 GATE_TIMEOUT_SECONDS = 8.0
 
 _GATE_TOOL_NAME = "report_gate_verdict"

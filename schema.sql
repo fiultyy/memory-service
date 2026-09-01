@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS fact (
     extract_sessions TEXT NOT NULL DEFAULT '[]',    -- v1.7③: JSON array — 主径 llm 通道 UPDATE stamp 的 session 串 (语义由后续车道实现)
     recall_sessions  TEXT NOT NULL DEFAULT '[]',    -- v1.7④: JSON array — 注入吸收观测 session 串 (语义由后续车道实现)
     gate_score       REAL NOT NULL DEFAULT 0.0,     -- v1.7⑤: 累计 gate 分 (求和封顶), 缺省 0.0
+    harness       TEXT,                             -- B3 (B3C-HYG): 来源 harness (cc|dsh|pi|omp|codex; NULL=legacy/未知 — 老库迁移不回填)
     created_at    TEXT NOT NULL,
     FOREIGN KEY (subject_id) REFERENCES entity(id),
     FOREIGN KEY (object_id)  REFERENCES entity(id),

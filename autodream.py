@@ -416,6 +416,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
         use_regex_channel=use_regex_channel,
         use_fallback_auto=use_fallback_auto,
         allow_enqueue=True,
+        harness=harness,  # B3 (B3C-HYG): fact.harness 来源审计 stamp
     )
 
 
@@ -430,7 +431,9 @@ def rerun_segment(text: str, *, provenance: str | None = None,
     补抽经此转正 (产物 extractor=llm); regex/fallback 通道经此走词典链 +
     通道门槛。素材已在队列 → 不重入队 (allow_enqueue=False, 重入队自身
     material_ref 无意义)。单进程假设成立, 失败由消费端 revert → pending
-    (attempts 不烧)。"""
+    (attempts 不烧)。harness 不传 (缺省 None → fact.harness NULL=未知):
+    升级队列素材是入队时正文切片, 来源 harness 不可考不臆测 (fact: 素材
+    升级路径由 dream._apply_upgrade 继承旧 fact 的 harness)。"""
     from llm_extract import CHANNEL_REGEX as _CH_REGEX
     from llm_extract import CHANNEL_FALLBACK as _CH_FALLBACK
     from llm_extract import extract_channel as _extract_channel
@@ -459,6 +462,7 @@ def _decide_segments(
     use_regex_channel: bool,
     use_fallback_auto: bool,
     allow_enqueue: bool,
+    harness: str | None = None,
 ) -> dict[str, int]:
     """逐段提取 (通道分派) + Phase c 增量决策 (ADD/UPDATE/supersede/NOOP)。
 
@@ -609,12 +613,15 @@ def _decide_segments(
             contradiction-supersede and brand-new ADD paths). M8: stamps the
             segment's provenance (M2 column); veracity auto-maps via M3.
             v1.7④: lif_source 可被调用方显式覆盖 (低初值裁决, ADD 路径);
-            缺省仍为 extractor 档位重算值。"""
+            缺省仍为 extractor 档位重算值。B3 (B3C-HYG): stamps 来源
+            harness (全批同源 — autodream/ingest-recent 传调用 harness;
+            rerun_segment 缺省 None → NULL=未知)。"""
             edge_kw.setdefault("lif_source", lif_dims["lif_source"])
             return store.put_fact(
                 **edge_kw,
                 confidence=result.confidence,
                 provenance=seg_provenance,
+                harness=harness,
                 LIF=lif_dims["LIF"],
                 lif_freq=lif_dims["lif_freq"], lif_recency=lif_dims["lif_recency"],
                 lif_spread=lif_dims["lif_spread"], lif_coherence=lif_dims["lif_coherence"],

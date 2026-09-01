@@ -431,6 +431,7 @@ def put_fact(
     extract_sessions: list[str] | None = None,
     recall_sessions: list[str] | None = None,
     gate_score: float = 0.0,
+    harness: str | None = None,
 ) -> str:
     """Insert a Fact (reified), return its id.
 
@@ -461,6 +462,11 @@ def put_fact(
 
     ``gate_score`` (v1.7 ⑤ 共享接缝): 累计 gate 分 (求和封顶语义由后续车道
     实现), 缺省 0.0。
+
+    ``harness`` (B3, B3C-HYG 来源审计轴): 写入来源 harness
+    (cc|dsh|pi|omp|codex)。None → NULL (=legacy/未知, 允许 — 老库迁移
+    不回填同款惯例); 各写入面 (autodream/ingest-recent/re-ingest/
+    init-memory/write) 负责传入调用 harness。
     """
     conn = db.get_conn()
     fid = fact_id or _uid()
@@ -480,8 +486,8 @@ def put_fact(
             lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
             access_count, last_accessed_at, seen_sessions, source_cwd, topic,
             provenance, veracity, raw_predicate, task_outcome,
-            extract_sessions, recall_sessions, gate_score)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            extract_sessions, recall_sessions, gate_score, harness)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fid, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, frozen_lif, confidence,
@@ -497,6 +503,7 @@ def put_fact(
             json.dumps(extract_sessions or [], ensure_ascii=False),
             json.dumps(recall_sessions or [], ensure_ascii=False),
             gate_score,
+            harness,
         ),
     )
     if value:
@@ -547,6 +554,22 @@ def update_fact_status(fact_id: str, status: str, supersedes_id: str | None = No
         # perf/vec-index: 非活跃 (superseded/deprecated/deleted) → 删 vec_fact
         # 行保持一致 (查询面另有 active 过滤兜底, 双保险)。
         vec_index.delete_fact(fact_id)
+
+
+def fact_count_by_harness() -> dict[str, int]:
+    """B3 (B3C-HYG): fact 按 harness 分组计数 — stats/stats-json 的
+    ``by_harness`` 分组面 (来源审计)。
+
+    口径与 churn_stats 总数一致 (全行含 non-active); harness NULL (legacy
+    迁移行 / 未知来源) 归 ``unknown`` 键。返回形如
+    ``{"cc": 12, "unknown": 3}`` (计数降序, 同数按键名稳序)。
+    """
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT COALESCE(harness, 'unknown') AS h, COUNT(*) AS n "
+        "FROM fact GROUP BY h ORDER BY n DESC, h ASC"
+    ).fetchall()
+    return {r["h"]: int(r["n"]) for r in rows}
 
 
 def unlock_match_score_cap() -> float:
@@ -637,5 +660,8 @@ def _decode_fact(row: Any) -> dict[str, Any]:
         # gate 累计分 REAL (row-key 守卫兼容未迁移 db)。
         "extract_sessions": _decode_session_list(row, "extract_sessions"),
         "recall_sessions": _decode_session_list(row, "recall_sessions"),
+        # B3 (B3C-HYG): 来源 harness 审计轴 (row-key 守卫兼容未迁移 db;
+        # NULL=legacy/未知)。
+        "harness": row["harness"] if "harness" in row.keys() else None,
         "gate_score": row["gate_score"] if "gate_score" in row.keys() else None,
     }

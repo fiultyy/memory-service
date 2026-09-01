@@ -467,7 +467,8 @@ def _apply_upgrade(item: dict[str, Any], result: Any) -> int:
         value=edge.object, object_id=None,
         provenance=old.get("provenance") or item.get("material_prov"),
         extractor=ext_label, src_refs=list(old.get("source_refs") or []),
-        sessions=list(old.get("seen_sessions") or []), now=now_iso)
+        sessions=list(old.get("seen_sessions") or []), now=now_iso,
+        harness=old.get("harness"))  # B3: 来源 harness 随升级继承
     store.update_fact_status(old["id"], "superseded", supersedes_id=new_id,
                              valid_to=store._now(), reason="upgrade")
     return 1
@@ -476,9 +477,11 @@ def _apply_upgrade(item: dict[str, Any], result: Any) -> int:
 def _put_wings_fact(*, subject_id: str, predicate: str, value: str,
                     object_id: str | None, provenance: str | None,
                     extractor: str, src_refs: list[str], sessions: list[str],
-                    now: datetime) -> str:
+                    now: datetime, harness: str | None = None) -> str:
     """wings 升级 fact 入库: extractor 档位 (llm 0.7 / vote 0.85 经
-    SOURCE_WEIGHT 自动) + 初始五维 LIF (ADR-8v2, 同 autodream 惯例)。"""
+    SOURCE_WEIGHT 自动) + 初始五维 LIF (ADR-8v2, 同 autodream 惯例)。
+    B3 (B3C-HYG): ``harness`` 继承被升级旧 fact 的来源 harness (升级不改
+    来源, 审计轴随行; None=旧行亦 legacy → NULL)。"""
     dims = scoring.compute_lif(
         {"extractor": extractor, "fact_type": "stable",
          "created_at": now.isoformat()},
@@ -488,6 +491,7 @@ def _put_wings_fact(*, subject_id: str, predicate: str, value: str,
         subject_id, predicate, value, object_id=object_id,
         extractor=extractor, provenance=provenance,
         source_refs=src_refs, seen_sessions=sessions,
+        harness=harness,
         LIF=dims["LIF"], lif_freq=dims["lif_freq"],
         lif_recency=dims["lif_recency"], lif_spread=dims["lif_spread"],
         lif_coherence=dims["lif_coherence"], lif_source=dims["lif_source"])

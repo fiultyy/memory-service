@@ -119,6 +119,13 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     fact_cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
     if "gate_score" not in fact_cols:
         conn.execute("ALTER TABLE fact ADD COLUMN gate_score REAL NOT NULL DEFAULT 0.0")
+    # B3 (B3C-HYG) migration: 老 db fact 表无 harness 列 → ALTER ADD (来源
+    # harness 审计轴 cc|dsh|pi|omp|codex)。幂等: PRAGMA table_info 检测, 二次
+    # 启动不炸不重复 ALTER; 存量行不回填 (writer 不可考不臆测, NULL=legacy
+    # 未知, 与 source_cwd NULL 惯例同)。
+    fact_cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
+    if "harness" not in fact_cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN harness TEXT")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS predicate_registry (
                canonical TEXT PRIMARY KEY,

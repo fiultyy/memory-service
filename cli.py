@@ -74,17 +74,23 @@ def _human_confirm(verb: str, target: str) -> bool:
 
 def mem_write(subject: str, predicate: str, value: str, *,
               fact_type: str = "stable", source_cwd: str | None = None,
-              channel: str | None = None) -> dict[str, Any]:
+              channel: str | None = None,
+              harness: str | None = None) -> dict[str, Any]:
     """四动词 write: 新事实入库。provenance=通道档 (agent→agent_assert 0.5 /
     human→human 0.9, veracity 走 M3 映射); 不可声明 provenance (无 flag,
-    杜绝伪造面)。信号 agent_crud{verb:write, via:通道}。"""
+    杜绝伪造面)。信号 agent_crud{verb:write, via:通道}。
+
+    ``harness`` (B3, B3C-HYG): 来源 harness — 取调用方显式传参, 缺省回读
+    ``MEM_HARNESS`` env (dsh hooks 注入同款), 仍无 → NULL (未知允许)。
+    """
     import signals
     ch = channel if channel is not None else _channel()
     prov = "human" if ch == "human" else "agent_assert"
+    h = harness or os.environ.get("MEM_HARNESS") or None
     sid = resolver.resolve_entity(subject, "concept", providers=[])
     fid = store.put_fact(sid, predicate, value, extractor="human" if ch == "human" else "agent",
                          fact_type=fact_type, provenance=prov,
-                         source_cwd=source_cwd)
+                         source_cwd=source_cwd, harness=h)
     signals.append("agent_crud", {
         "verb": "write", "fact_id": fid, "subject": subject,
         "predicate": predicate, "value": value, "via": ch,
@@ -183,7 +189,8 @@ _load_env()
 def ingest(text: str, source_ref: str | None = None,
            fact_type: str = "stable",
            providers: list[LLMProvider] | None = None,
-           source_cwd: str | None = None) -> dict[str, Any]:
+           source_cwd: str | None = None,
+           harness: str | None = None) -> dict[str, Any]:
     """Extract facts from ``text`` via the adapter and persist them to the KG.
 
     The adapter runs butterfly-wing LLM extraction (ADR-5b, N=3 fan-out +
@@ -192,6 +199,9 @@ def ingest(text: str, source_ref: str | None = None,
     RuntimeError). ``fact_type`` is ADR-8 (default stable; ``--fact-type``
     overrides). Entities resolved via ``resolver.resolve_entity`` (ADR-D3
     two-step merge). Re-extraction of a known name reuses its id.
+
+    ``harness`` (B3, B3C-HYG): 来源 harness stamp 进 fact.harness (缺省
+    None → NULL=未知; 手动 ingest 无 harness 上下文, 不臆测)。
 
     Initial LIF is computed at ingest from five dims (ADR-8v2) and passed to
     ``put_fact`` — not deferred to first consolidate. ``confidence`` carries
@@ -272,6 +282,7 @@ def ingest(text: str, source_ref: str | None = None,
             source_refs=source_refs,
             topic=(edge.topic or "").strip() or None,  # ADR-C: LLM 可读一句话
             confidence=extracted.confidence,
+            harness=harness,  # B3 (B3C-HYG): 来源审计 stamp (缺省 NULL)
             LIF=lif_dims["LIF"],
             lif_freq=lif_dims["lif_freq"], lif_recency=lif_dims["lif_recency"],
             lif_spread=lif_dims["lif_spread"], lif_coherence=lif_dims["lif_coherence"],
@@ -585,10 +596,12 @@ def init_memory(memory_dir: str | None = None,
     """Seed KG from CC memory .md files (ADR-12)。``memory_dir`` 默认
     ``cc_memory_dir(cwd)``(与 synthesis-index 一致; 旧默认硬编码 ``~/.claude`` 全局目录 → 读错),
     ``source_cwd`` 默认 ``cwd``(ADR-14 记来源, 不再 NULL)。
-    ``harness`` (2026-09-01 dsh 接钩子): 存放位置方案, dsh → ``~/.dsh/projects/<enc>/memory``。"""
+    ``harness`` (2026-09-01 dsh 接钩子): 存放位置方案, dsh → ``~/.dsh/projects/<enc>/memory``;
+    B3 (B3C-HYG) 起同名同传 bootstrap.init_memory → fact.harness 来源 stamp。"""
     cwd = source_cwd or os.getcwd()
     mem_dir = _proj_memory_dir(memory_dir, cwd, harness)
-    return bootstrap.init_memory(mem_dir, source_cwd=source_cwd or cwd)
+    return bootstrap.init_memory(mem_dir, source_cwd=source_cwd or cwd,
+                                 harness=harness)
 
 
 # ── synthesis-index (ADR-15 P2: 散 index 对账 → MEMORY [mem] 唯一写入口) ──
@@ -643,6 +656,9 @@ def stats() -> dict[str, Any]:
     聚合 ``store.churn_stats`` (status 分布 + supersede_rate/active_ratio) 与
     ``store.count_entities``; fact 总数复用 churn_stats 内部已聚合的 status 求和。
     非时间序列(降阈值自动刷新本轮 defer, 见 ADR-5 Consequences)。
+
+    B3 (B3C-HYG): 增 ``by_harness`` — fact 按来源 harness 分组计数
+    (``store.fact_count_by_harness``; NULL=legacy/未知 归 ``unknown`` 键)。
     """
     import db
     cs = store.churn_stats()
@@ -651,6 +667,7 @@ def stats() -> dict[str, Any]:
         "entities": store.count_entities(),
         "facts": total_facts,
         "churn": cs,
+        "by_harness": store.fact_count_by_harness(),
     }
 
 
@@ -681,6 +698,11 @@ def _main(argv: list[str] | None = None) -> int:
         default="stable",
         choices=("ephemeral", "stable", "permanent"),
         help="Fact lifetime class for decay (ADR-8); default stable",
+    )
+    ing.add_argument(
+        "--harness", dest="harness", default=None,
+        choices=("cc", "codex", "dsh", "pi", "omp"),
+        help="B3: 来源 harness stamp 进 fact.harness (默认缺省 → NULL=未知)",
     )
 
     rec = sub.add_parser("recall", help="recall facts for query")
@@ -768,6 +790,11 @@ def _main(argv: list[str] | None = None) -> int:
         "--cwd", dest="cwd", default=None,
         help="ADR-14 记 source_cwd(默认 os.getcwd)",
     )
+    reing.add_argument(
+        "--harness", dest="harness", default="cc",
+        choices=("cc", "codex", "dsh", "pi", "omp"),
+        help="B3: 来源 harness stamp 进 fact.harness (默认 cc)",
+    )
 
     si = sub.add_parser("synthesis-index",
                         help="散 index 对账 → 重写 MEMORY.md [mem] (ADR-15 P2, MEMORY [mem] 唯一写入口)")
@@ -804,6 +831,9 @@ def _main(argv: list[str] | None = None) -> int:
     wr.add_argument("--fact-type", dest="fact_type", default="stable",
                     choices=("ephemeral", "stable", "permanent"))
     wr.add_argument("--cwd", default=None, help="ADR-14 source_cwd")
+    wr.add_argument("--harness", dest="harness", default=None,
+                    choices=("cc", "codex", "dsh", "pi", "omp"),
+                    help="B3: 来源 harness (缺省回读 MEM_HARNESS env, 仍无 → NULL=未知)")
     cf = sub.add_parser("confirm", help="四动词 confirm: 证实既有 fact (记信号)")
     cf.add_argument("fact_id")
     inv = sub.add_parser("invalidate", help="四动词 invalidate: 失效建议 (superseded+contradiction)")
@@ -840,7 +870,7 @@ def _main(argv: list[str] | None = None) -> int:
     if args.cmd == "ingest":
         print(json.dumps(
             ingest(args.text, source_ref=args.source, fact_type=args.fact_type,
-                   source_cwd=os.getcwd()),
+                   source_cwd=os.getcwd(), harness=args.harness),
             ensure_ascii=False,
         ))
     elif args.cmd == "recall":
@@ -868,7 +898,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(init_memory(args.memory_dir, source_cwd=args.cwd,
                                      harness=args.harness), ensure_ascii=False))
     elif args.cmd == "re-ingest":
-        print(json.dumps(bootstrap.re_ingest_file(args.file, source_cwd=args.cwd or os.getcwd()), ensure_ascii=False))
+        print(json.dumps(bootstrap.re_ingest_file(args.file, source_cwd=args.cwd or os.getcwd(),
+                                                  harness=args.harness), ensure_ascii=False))
     elif args.cmd == "synthesis-index":
         print(json.dumps(synthesis_index(scope=args.scope, memory_dir=args.memory_dir,
                                          session=args.session, harness=args.harness), ensure_ascii=False))
@@ -885,7 +916,8 @@ def _main(argv: list[str] | None = None) -> int:
     elif args.cmd == "write":
         print(json.dumps(mem_write(args.subject, args.predicate, args.value,
                                    fact_type=args.fact_type,
-                                   source_cwd=args.cwd), ensure_ascii=False))
+                                   source_cwd=args.cwd,
+                                   harness=args.harness), ensure_ascii=False))
     elif args.cmd == "confirm":
         print(json.dumps(mem_confirm(args.fact_id), ensure_ascii=False))
     elif args.cmd == "invalidate":

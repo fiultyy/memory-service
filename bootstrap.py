@@ -44,12 +44,14 @@ def re_ingest_file(
     file_path: str | Path,
     source_cwd: str | None = None,
     providers: list | None = None,
+    harness: str = "cc",
 ) -> dict[str, int]:
     """单 md → KG 增量 (ADR-17 b/c). 反向 re-ingest 手动触发点 + PostToolUse hook 调用点。
 
     read md text → 过滤 ADR-16f(source:mem-service) → synthetic transcript →
     autodream(fact_type='permanent') → 返回 {added,updated,deleted,noop,skipped}。
-    幂等: 重跑同 md → UPDATE/NOOP。
+    幂等: 重跑同 md → UPDATE/NOOP。``harness`` (B3, B3C-HYG): 来源 harness
+    stamp 进 fact.harness (缺省 cc — re-ingest 面 md 本在 CC 投影目录)。
     """
     file_path = Path(file_path)
     if not file_path.is_file():
@@ -80,6 +82,7 @@ def re_ingest_file(
                     providers=providers,
                     fact_type="permanent",  # ADR-17b: 永久知识
                     source_cwd=source_cwd,
+                    harness=harness,
                 )
             except RuntimeError as e:
                 totals["errors"] += 1
@@ -99,6 +102,7 @@ def init_memory(
     providers: list | None = None,
     fact_type: str = "permanent",
     source_cwd: str | None = None,
+    harness: str = "cc",
 ) -> dict[str, int]:
     """Seed the KG from CC memory ``.md`` files (ADR-12).
 
@@ -107,6 +111,9 @@ def init_memory(
     → ``autodream.autodream(session_id="memory:<file>", ..., fact_type=fact_type)``
     →累加 counts. 提取走 M6/M7 占位通道 (gazetteer 词典+regex 三路, 零 LLM
     inline — provider 断供不中断写入; wings LLM 为 M4 队列异步升级侧)。
+
+    ``harness`` (B3, B3C-HYG): 来源 harness stamp 进 fact.harness (与
+    cli ``--harness`` 存放位置方案同名同传, dsh 接钩子时传 dsh)。
 
     Idempotent: a re-run on an unchanged dir yields NOOP/UPDATE (autodream 增量
     decision), not duplicate ADDs — safe to re-run after editing memory files.
@@ -144,6 +151,7 @@ def init_memory(
                         providers=providers,
                         fact_type=fact_type,
                         source_cwd=source_cwd,
+                        harness=harness,
                     )
                 except RuntimeError as e:
                     # LLM 不可用 (block, 不降级 regex) — skip 该段, 不崩整个 init。

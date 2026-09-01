@@ -28,6 +28,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "hooks"))
 
@@ -291,3 +293,96 @@ def test_count_user_turns_early_stop(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "open", counting_open)
     assert ri._count_user_turns(str(t), 1) == 1
     assert seen["lines"] == 1, f"早停: 应只读 1 行, 实读 {seen['lines']} 行"
+
+
+# ── 7. A3-T1: dsh session.jsonl.zstd 窗口计数 (桥 UPS payload transcript_path) ─
+#
+# 桥探针结论 (hooks-claude-code lib/index.js:350-357 base): dsh 桥 UPS payload
+# 恒携带 transcript_path = sessionPersistence locate 路径
+# (~/.dsh/sessions/<enc>/session-<uuid>/session.jsonl.zstd), 另有 session_id/cwd。
+# 旧码按 CC 纯文本读 zstd → 恒 count=0 → D2 窗口门 dsh 侧永不早退。
+
+
+def _dsh_event(t, seq, text=None, kind="user/message", extra=None):
+    d = {"type": kind, "seq": seq}
+    if kind == "user/message":
+        content = [{"type": "text", "text": text}] if text is not None \
+            else [{"type": "toolCall", "toolCall": {"name": "Bash"}}]
+        d["data"] = {"content": content, "role": "user"}
+    elif kind == "assistant/message":
+        d["data"] = {"message": {"role": "assistant",
+                                 "content": [{"type": "text", "text": "回答"}]}}
+    elif kind == "turn/end":
+        d["data"] = {"reason": {"kind": "completed"}}
+    elif kind == "session":
+        d.update({"version": 0, "id": "session-x", "cwd": "/p"})
+        d["delegationDepth"] = extra if extra is not None else 0
+    if extra is not None and kind != "session":
+        d.update(extra)
+    return json.dumps(d, ensure_ascii=False)
+
+
+def _write_dsh_zstd(tmp_path, lines) -> str:
+    import shutil
+    import subprocess
+    if not shutil.which("zstd"):
+        pytest.skip("zstd 未安装")
+    raw = ("\n".join(lines) + "\n").encode("utf-8")
+    comp = subprocess.run(["zstd", "-q", "-c"], input=raw,
+                          capture_output=True, check=True)
+    p = tmp_path / "session.jsonl.zstd"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(comp.stdout)
+    return str(p)
+
+
+def _dsh_base_lines(depth=0):
+    return [_dsh_event(None, 0, kind="session", extra=depth)]
+
+
+def test_dsh_zstd_counts_user_message_texts(tmp_path):
+    lines = _dsh_base_lines() + [
+        _dsh_event(None, 1, text="<memsvc-recall>\n注入块\n</memsvc-recall>"),
+        _dsh_event(None, 2),  # 纯 toolCall 块 → 不计
+        _dsh_event(None, 3, text="第一轮真人原话, 足够长"),
+        _dsh_event(None, 4, kind="assistant/message"),
+        _dsh_event(None, 5, kind="turn/end"),
+        _dsh_event(None, 6, text="第二轮真人原话, 足够长"),
+        _dsh_event(None, 7, text="第三轮真人原话, 足够长"),
+    ]
+    t = _write_dsh_zstd(tmp_path, lines)
+    assert ri._count_user_turns(t, 100) == 3, "只计 user/message 真人 text 块"
+    assert ri._count_user_turns(t, 1) == 1, "早停: 达 limit 即返"
+    assert ri._count_user_turns(t, 2) == 2
+
+
+def test_dsh_zstd_sidechain_depth_excluded(tmp_path):
+    lines = _dsh_base_lines(depth=1) + [
+        _dsh_event(None, 1, text="侧链回合原话"),
+        _dsh_event(None, 2, text="侧链第二句"),
+    ]
+    t = _write_dsh_zstd(tmp_path, lines)
+    assert ri._count_user_turns(t, 10) == 0, "delegationDepth>0 = 侧链不计"
+
+
+def test_dsh_window_gate_exits_after_first_turn(tmp_path, monkeypatch):
+    """D2 门 dsh 侧生效证据: zstd transcript 已有 1 轮真人 turn → count>=n=1
+    → 静默早退 (零召回零输出); count=0 空会话 → 窗内照常召回。"""
+    calls = _patch_embed_deterministic(monkeypatch)
+    _mk_vec_only_kg(tmp_path)
+    calls["n"] = 0
+    rec = _spy_recall(monkeypatch)
+    monkeypatch.setenv("MEM_RECALL_MIN_SCORE", "0.05")
+    past = _write_dsh_zstd(tmp_path / "past", [
+        _dsh_event(None, 0, kind="session"),
+        _dsh_event(None, 1, text="早前一轮真人原话, 足够长"),
+    ])
+    raw = _run_main(monkeypatch, _payload(transcript_path=past))
+    assert raw == "", "窗口外: 零输出"
+    assert rec["kwargs"] == [], "窗口外: cli.recall 不得被调用 (D2 门 dsh 侧生效)"
+    assert calls["n"] == 0, "窗口外: 嵌入调用为 0"
+    # 对照: 空 zstd transcript (count=0 < n) → 窗内, recall 照常进
+    empty = _write_dsh_zstd(tmp_path / "empty", [_dsh_event(None, 0, kind="session")])
+    raw2 = _run_main(monkeypatch, _payload(transcript_path=empty))
+    assert rec["kwargs"] and rec["kwargs"][0]["use_vec"] is True, \
+        "count=0<n: 首 turn 窗内照常召回 (fail-open 不受损)"

@@ -123,10 +123,46 @@ def _probe_rw() -> bool:
         return False
 
 
+def _count_user_turns_dsh(path: Path, limit: int) -> int:
+    """dsh session.jsonl(.zstd) 语义计数 (A3-T1): type=="user/message" 的
+    ``data.content`` text 块 (注意与 assistant/message 的 data.message.content
+    不同形), ``transcripts._dsh_open`` 行迭代 (zstdcat 子进程, 复用 memsvc
+    既有 zstd 读取, 无静默降级红线) → ``corpus_prep.clean(txt, "dsh")`` 非空
+    才计 (注入块剥除防自计数)。``delegationDepth>0`` = 侧链会话 → 不计
+    (照 transcripts._dsh_end_steps 先例)。**早停**同 CC: count 达 limit 即返。"""
+    import corpus_prep
+    import transcripts
+    n = 0
+    depth = 0
+    for line in transcripts._dsh_open(path):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue  # 坏行跳过 (半写行容错)
+        if not isinstance(d, dict):
+            continue
+        t = d.get("type")
+        if t == "session":
+            depth = d.get("delegationDepth", 0) or 0
+        elif t == "user/message":
+            if depth > 0:
+                continue  # 侧链回合不进窗口计数
+            data = d.get("data")
+            data = data if isinstance(data, dict) else {}
+            txt = transcripts._texts_of(data.get("content"))
+            if corpus_prep.clean(txt, "dsh"):
+                n += 1
+                if n >= limit:
+                    return n
+    return n
+
+
 def _count_user_turns(path: str | None, limit: int) -> int | None:
     """transcript 里已落盘的既往 user_text 块数 (v1.7 ② turn 判据)。
 
-    逐行 json.loads(坏行跳) → type=="user" 且非 isSidechain →
+    双格式分流 (A3-T1): dsh 桥 UPS payload 的 transcript_path 指向
+    ``session.jsonl.zstd`` (zstd 压缩) → ``_count_user_turns_dsh``; CC 纯文本
+    路径: 逐行 json.loads(坏行跳) → type=="user" 且非 isSidechain →
     ``transcripts._texts_of`` (只收 text 块, tool_result/thinking 天然排除)
     → ``corpus_prep.clean(txt, "cc")`` 非空才计 (system-reminder /
     ``<memsvc-recall>`` 注入块剥除后计, 防注入自计数)。**早停**: count 达
@@ -136,6 +172,8 @@ def _count_user_turns(path: str | None, limit: int) -> int | None:
     if not path or limit <= 0:
         return None
     try:
+        if Path(path).suffix == ".zstd":
+            return _count_user_turns_dsh(Path(path), limit)
         import corpus_prep
         import transcripts
         n = 0

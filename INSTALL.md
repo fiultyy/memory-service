@@ -46,15 +46,17 @@ ln -s /home/yy/projects/memory-service ~/.claude/skills/mem
 验证:`ls -l ~/.claude/skills/mem` → 指向本仓
 
 ### 4. PreCompact hook 注册(`/compact` 前抢救 session → KG)
-`~/.claude/settings.json`:
+`~/.claude/settings.json`(guarded pattern + `MEM_HARNESS=cc` 前缀 — 与
+`hooks/dsh-hooks.json` 的 `MEM_HARNESS=dsh` 对称;SessionStart /
+UserPromptSubmit / PreCompact 三钩同款):
 ```json
 {
   "hooks": {
     "PreCompact": [{
-      "matcher": "*",
+      "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "/home/yy/projects/memory-service/hooks/pre-compact-mem.sh",
+        "command": "if [ -f '/home/yy/projects/memory-service/hooks/pre-compact-mem.sh' ] && [ -x '/home/yy/projects/memory-service/hooks/pre-compact-mem.sh' ]; then MEM_HARNESS=cc /home/yy/projects/memory-service/hooks/pre-compact-mem.sh; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
         "timeout": 60
       }]
     }]

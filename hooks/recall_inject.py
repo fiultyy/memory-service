@@ -149,7 +149,16 @@ def _count_user_turns_dsh(path: Path, limit: int) -> int:
                 continue  # 侧链回合不进窗口计数
             data = d.get("data")
             data = data if isinstance(data, dict) else {}
+            # MF2-A 守卫① (逐字对齐金标准 transcripts.py:308): 非真人 source
+            # kind (编排注入等) 不计 — None 兼容老版本流/测试桩。
+            if ((data.get("source") or {}).get("kind")) not in (None, "user"):
+                continue
             txt = transcripts._texts_of(data.get("content"))
+            # MF2-A 守卫② (逐字对齐金标准 transcripts.py:317): DSHMSG] 编排
+            # 流量 (agent-to-agent 信箱载荷, 实测 kind=user 里混载) 不计 —
+            # 否则注入密集会话首 turn 前计数≥n, 窗口门静默早退 (fail-closed)。
+            if txt and "DSHMSG]" in txt[:12]:
+                continue
             if corpus_prep.clean(txt, "dsh"):
                 n += 1
                 if n >= limit:

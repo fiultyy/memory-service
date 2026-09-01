@@ -303,12 +303,18 @@ def test_count_user_turns_early_stop(tmp_path, monkeypatch):
 # 旧码按 CC 纯文本读 zstd → 恒 count=0 → D2 窗口门 dsh 侧永不早退。
 
 
-def _dsh_event(t, seq, text=None, kind="user/message", extra=None):
+def _dsh_event(t, seq, text=None, kind="user/message", extra=None,
+               source="user"):
     d = {"type": kind, "seq": seq}
     if kind == "user/message":
         content = [{"type": "text", "text": text}] if text is not None \
             else [{"type": "toolCall", "toolCall": {"name": "Bash"}}]
         d["data"] = {"content": content, "role": "user"}
+        # MF2-A: 真实 dsh 流 user/message 携带 data.source.kind (实测
+        # 真人="user"; 编排注入=其他 kind) — 桩默认构造, 消守卫盲区;
+        # source=None 保留老版本流/无 source 形态的兼容覆盖口。
+        if source is not None:
+            d["data"]["source"] = {"kind": source}
     elif kind == "assistant/message":
         d["data"] = {"message": {"role": "assistant",
                                  "content": [{"type": "text", "text": "回答"}]}}
@@ -386,3 +392,72 @@ def test_dsh_window_gate_exits_after_first_turn(tmp_path, monkeypatch):
     raw2 = _run_main(monkeypatch, _payload(transcript_path=empty))
     assert rec["kwargs"] and rec["kwargs"][0]["use_vec"] is True, \
         "count=0<n: 首 turn 窗内照常召回 (fail-open 不受损)"
+
+
+# ── 8. MF2-A (TM1 W1-R1): dsh 计数守卫 — 编排流量不得计入真人 turn ─────────
+#
+# TM1 审查 (a2c75dc): _count_user_turns_dsh 缺金标准两守卫 (transcripts.py:308
+# source.kind 判别 / :317 DSHMSG][:12]) → 注入密集会话首 turn 前计数≥n →
+# D2 窗口门静默早退 → 首轮召回从未打开 (fail-closed)。桩 _dsh_event 已补
+# source 字段构造 (消盲区)。
+
+
+def test_dsh_ignores_non_user_source_kinds(tmp_path):
+    """MF2-A 守卫①: 编排注入等非真人 source kind 不计 (金标准
+    transcripts.py:308 逐字对齐); source 缺失 (老版本流) 兼容照计。"""
+    lines = _dsh_base_lines() + [
+        _dsh_event(None, 1, text="编排派发正文", source="orchestration"),
+        _dsh_event(None, 2, text="系统注入正文", source="system"),
+        _dsh_event(None, 3, text="工具回显正文", source="tool"),
+        _dsh_event(None, 4, text="无 source 老流原话, 足够长", source=None),
+        _dsh_event(None, 5, text="真人原话, 足够长"),
+    ]
+    t = _write_dsh_zstd(tmp_path, lines)
+    assert ri._count_user_turns(t, 100) == 2, \
+        "只计 source.kind ∈ (None, 'user') 的 user/message"
+
+
+def test_dsh_ignores_dshmsg_dispatch_payloads(tmp_path):
+    """MF2-A 守卫②: kind=user 的 DSHMSG] 编排流量 (agent-to-agent 信箱
+    载荷, 实测混载) 不计 (金标准 transcripts.py:317 逐字对齐)。"""
+    lines = _dsh_base_lines() + [
+        _dsh_event(None, 1, text='DSHMSG]{"from":"orch","body":"派发"}'),
+        _dsh_event(None, 2, text="DSHMSG]第二封派发正文"),
+        _dsh_event(None, 3, text="真人原话, 足够长"),
+    ]
+    t = _write_dsh_zstd(tmp_path, lines)
+    assert ri._count_user_turns(t, 100) == 1, "DSHMSG] 载荷不计真人 turn"
+
+
+def test_dsh_dense_session_first_turn_recall_opens(tmp_path, monkeypatch):
+    """MF2-A 验收: 注入密集会话首 turn 召回打开 — transcript 只有编排流量
+    (DSHMSG 派发 + 非 user source), hook 先于首真人 prompt 落盘: 修复前
+    计数≥n=1 → 窗口门静默早退 (fail-closed); 修复后 count=0<n → 窗内召回
+    (首轮档 use_vec=True)。对照: 混入 1 轮真人 → 门照常关闭。"""
+    calls = _patch_embed_deterministic(monkeypatch)
+    _mk_vec_only_kg(tmp_path)
+    calls["n"] = 0
+    rec = _spy_recall(monkeypatch)
+    monkeypatch.setenv("MEM_RECALL_MIN_SCORE", "0.05")
+    dense = _write_dsh_zstd(tmp_path / "dense", [
+        _dsh_event(None, 0, kind="session"),
+        _dsh_event(None, 1,
+                   text='DSHMSG]{"from":"orch-38c3","body":"[ref:T1] 派发"}'),
+        _dsh_event(None, 2, text="编排回报正文", source="orchestration"),
+        _dsh_event(None, 3, text='DSHMSG]{"from":"orch-p0","body":"probe"}'),
+        _dsh_event(None, 4, kind="assistant/message"),
+        _dsh_event(None, 5, kind="turn/end"),
+    ])
+    _run_main(monkeypatch, _payload(transcript_path=dense))
+    assert rec["kwargs"], "注入密集会话首 turn: 召回必须打开 (修复前静默早退)"
+    assert rec["kwargs"][0]["use_vec"] is True, "count=0<n=1: 首轮档 use_vec=True"
+    # 对照: 密集流量 + 1 轮真人 → count=1>=n → 门照常关闭 (守卫不破 D2 语义)。
+    mixed = _write_dsh_zstd(tmp_path / "mixed", [
+        _dsh_event(None, 0, kind="session"),
+        _dsh_event(None, 1, text='DSHMSG]{"from":"orch","body":"派发"}'),
+        _dsh_event(None, 2, text="编排回报正文", source="orchestration"),
+        _dsh_event(None, 3, text="真人首轮原话, 足够长"),
+    ])
+    rec["kwargs"].clear()
+    _run_main(monkeypatch, _payload(transcript_path=mixed))
+    assert rec["kwargs"] == [], "有 1 轮真人 turn: 窗口门照常静默早退"

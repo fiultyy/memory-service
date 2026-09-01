@@ -25,6 +25,12 @@ CLI: ``python3 endsteps.py <transcript.jsonl> [> out.jsonl]`` (无参读 stdin);
 统计走 stderr。手动入库某会话结论: ``endsteps.py t.jsonl > e.jsonl && cli.py
 autodream --session X --transcript e.jsonl``; 批量最近 N 个会话一键:
 ``cli.py ingest-recent`` (本模块同口径蒸馏 + sha 注册表防重跑)。
+
+dsh 双格式 (B1-P2, 2026-09-02): dsh 桥 PreCompact 快照为 dsh 事件流
+(``user/message``/``assistant/message``/``compaction/*``), 自动识别 — 首个可
+解析行 type 以 ``/message`` 结尾即按 dsh 口径蒸馏
+(``transcripts._dsh_end_steps``: turn/end reason=completed 前最后 assistant
+text, delegationDepth>0 侧链排除, 自带去重; 长度门同 CC)。CC 路径零改动。
 """
 from __future__ import annotations
 
@@ -33,6 +39,44 @@ import os
 import sys
 
 DEFAULT_MIN_CHARS = 120
+
+
+def _looks_like_dsh(lines) -> bool:
+    """前 100 个可解析行内出现 ``*/message`` 类型 → dsh 事件流 (B1-P2)。
+
+    dsh 流首行是 ``session`` 头事件 (非消息), 故扫描一个有界窗口;
+    CC 流首行即裸类型 (user/assistant/summary, 带 parentUuid) → 立即判伪。
+    """
+    scanned = 0
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        scanned += 1
+        t = d.get("type")
+        if isinstance(t, str) and t.endswith("/message"):
+            return True
+        if "parentUuid" in d or t in ("user", "assistant", "summary",
+                                      "system", "progress"):
+            return False  # CC 裸类型流
+        if scanned >= 100:
+            break
+    return False
+
+
+def distill(lines, min_chars: int | None = None) -> list[str]:
+    """双格式蒸馏入口 (B1-P2): 自动识别 CC/dsh → end step 文本列表。"""
+    if _looks_like_dsh(lines):
+        import transcripts as transcripts_mod  # 延迟导入 (顶层互不加载)
+        texts = transcripts_mod._dsh_end_steps(list(lines))
+        if min_chars is None:
+            min_chars = int(os.environ.get("MEM_ENDSTEP_MIN_CHARS",
+                                           str(DEFAULT_MIN_CHARS)))
+        return [t for t in texts if len(t) >= min_chars]
+    return extract_end_steps(lines)
 
 
 def extract_end_steps(lines, min_chars: int | None = None,
@@ -80,6 +124,17 @@ def extract_end_steps(lines, min_chars: int | None = None,
     return out
 
 
+def _dsh_steps(lines, min_chars: int | None = None) -> list[str]:
+    """dsh 事件流 → end step 文本 (长度门与 CC 同门槛; 去重/侧链已在
+    ``transcripts._dsh_end_steps`` 内做)。"""
+    import transcripts as transcripts_mod  # 延迟导入 (transcripts 顶层 import 本模块)
+    texts = transcripts_mod._dsh_end_steps(lines)
+    if min_chars is None:
+        min_chars = int(os.environ.get("MEM_ENDSTEP_MIN_CHARS",
+                                       str(DEFAULT_MIN_CHARS)))
+    return [t for t in texts if len(t) >= min_chars]
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # --scenes (M21, 2026-08-28, Codex 阅读优先级采纳): 输出用户声音场景 —
@@ -88,9 +143,24 @@ def main(argv: list[str] | None = None) -> int:
     scenes_mode = "--scenes" in argv
     argv = [a for a in argv if a != "--scenes"]
     src = open(argv[0], encoding="utf-8") if argv else sys.stdin
+    # B1-P2: 双格式自动识别需先判型 — 快照体量内一次性缓冲 (worker 快照
+    # 有界; 手动 stdin 同样可缓冲)。
+    lines = src.readlines()
+    try:
+        src.close()
+    except Exception:
+        pass
+    if _looks_like_dsh(lines):
+        steps = _dsh_steps(lines)
+        for txt in steps:
+            print(json.dumps(
+                {"type": "user", "message": {"content": txt}},
+                ensure_ascii=False))
+        print(f"endsteps: kept={len(steps)} (dsh)", file=sys.stderr)
+        return 0
     if scenes_mode:
         import transcripts as transcripts_mod  # 延迟导入 (transcripts 顶层 import 本模块)
-        sc = transcripts_mod._cc_scenes(src)
+        sc = transcripts_mod._cc_scenes(lines)
         n_blocks = 0
         for s in sc:
             for ub in s["user_blocks"]:
@@ -106,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"endsteps: scenes={len(sc)} user_blocks={n_blocks}",
               file=sys.stderr)
         return 0
-    steps = extract_end_steps(src)
+    steps = extract_end_steps(lines)
     for txt in steps:
         print(json.dumps(
             {"type": "user", "message": {"content": txt}},

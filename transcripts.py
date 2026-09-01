@@ -178,7 +178,11 @@ def _dsh_end_steps(lines) -> list[str]:
             if txt:
                 last_assistant_text = txt
         elif t == "turn/end":
-            reason = ((d.get("data") or {}).get("reason") or {}).get("kind")
+            # reason 正形为 {kind: "completed"}; 容错裸字符串/异形 (B1-P2:
+            # 单行畸形不允许炸掉整个蒸馏管道)。
+            reason = (d.get("data") or {}).get("reason") or {}
+            if isinstance(reason, dict):
+                reason = reason.get("kind")
             if reason == "completed" and last_assistant_text:
                 texts.append(last_assistant_text)
             last_assistant_text = None

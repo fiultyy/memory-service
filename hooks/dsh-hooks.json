@@ -23,6 +23,18 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/home/yy/projects/memory-service/hooks/pre-compact-mem.sh' ] && [ -x '/home/yy/projects/memory-service/hooks/pre-compact-mem.sh' ]; then MEM_HARNESS=dsh /home/yy/projects/memory-service/hooks/pre-compact-mem.sh; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }

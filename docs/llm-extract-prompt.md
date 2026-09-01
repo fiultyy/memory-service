@@ -1,6 +1,6 @@
 # llm-extract prompt 资产 (batch 12)
 
-> 版本: **v5** (2026-08-28) · 代码: `llm_extract.py::_SYSTEM_PROMPT` (与本文逐字一致, 改动必须双同步 + bump 版本)
+> 版本: **v6** (2026-09-01) · 代码: `llm_extract.py::_SYSTEM_PROMPT` (与本文逐字一致, 改动必须双同步 + bump 版本)
 > 模型: glm-5-turbo (智谱 Anthropic 协议直连) · 调用 seam: `llm_provider.ZhipuAnthropicProvider.chat()`
 
 ## 迭代记录
@@ -16,8 +16,9 @@
 | v4·校验 | 2026-08-28 | evidence 逐字校验代码侧硬断言 (`validate(doc, segment=...)`, extract() 恒传; 严格子串+空白归一容差; 伪造→重试反馈→两轮败响亮)。prompt 文本不变, 版本仍 v4 | 迭代建议 #1 落地 (用户「遗留做完」) |
 
 | v5 | 2026-08-28 | **信号门槛** (最小信号原则: 「未来的代理因为我写的这条会做得更好吗」+ no-op 优先) / **阅读优先级** ([用户] > [助手结论] 角色标记 + 归属保留) / **task_outcome 任务收尾分诊** (success/partial/fail/uncertain; 判定优先级 用户反馈>环境验证>启发式, 末态无验证信号保守 uncertain) 新增 facts 可选字段。配套: corpus_prep.py 语料标记块清洗 (cc/codex/dsh/pi 映射表) + extract() 密钥脱敏 + M21 ingest-recent 用户声音通道 | Codex memories pipeline 对照采纳 #1/#2/#3/#4 (用户裁决「1234都做」; 三路真实语料扫描证据) |
+| v6 | 2026-09-01 | **evidence markdown 原样符号纪律**: evidence 行与工具 schema description 明示「** ` 等符号照原样照抄, 不要去格式」; 配套校验器 `_evidence_verbatim` 加第三级容差 (空白归一后剥 `*`/`` ` `` 再比对 — 只去格式不去字, 防伪造性质不变)。prompt 文本仅 evidence 行一处增补 | B4-DISTILL 因3 实证: dsh 真实段 `**恒带 transcript_path**` 被模型去格式抽 evidence → 逐字断言拒收 → 整段两轮报废 |
 
-## System prompt 全文 (v5)
+## System prompt 全文 (v6)
 
 ```
 你是双语记忆抽取员, 从输入文本段抽取知识图谱实体与事实。必须通过调用 emit_extraction 工具报告结果, 不要输出解释、markdown 或自由文本 JSON。
@@ -50,7 +51,8 @@
 - value: 可选字面值 (str), 仅当原文是字面量陈述 (如 "版本 0.1.9");
   二元关系事实 value 留 null, 不要把 object 名复制进 value
 - confidence: 0.0-1.0 浮点, 你对这条事实确实在原文中有依据的置信度
-- evidence: 原文中支持这条事实的逐字 span (必须从输入段原文复制, 不改写)
+- evidence: 原文中支持这条事实的逐字 span (必须从输入段原文复制, 不改写;
+  原文里的 ** ` 等 markdown 符号按原样照抄, 不要增删或去格式)
 - task_outcome: 可选任务收尾分诊, 仅当这条事实关于一个已收尾的任务/工作时填,
   从 [success, partial, fail, uncertain] 选一个。判定优先级: 显式用户反馈
   (用户确认/否定) > 环境验证 (测试通过/命令成功退出) > 启发式推断;
@@ -88,7 +90,7 @@
 }
 ```
 
-校验规则 (`llm_extract.validate`): predicate 表外 → 整体拒; subject/object 未声明 → 整体拒; confidence clamp 0-1; evidence 缺失/**非原文逐字** → 整体拒 (v4 起 `extract()` 恒传 segment, 逐字硬断言 + 空白归一容差 — 迭代建议 #1 落地); type 表外 → concept 收拢 (不拒); task_outcome 表外 → None 收拢 (不拒 — 元数据面非正确性面, v5); 自环 → 静默弃。整体拒 → 1 次重试 (附违规原因) → 仍败 `ExtractFailed` 响亮抛出。v5 起 `extract()` 对 segment 先跑 `corpus_prep.redact_secrets` — 密钥不进 prompt 不进 evidence, 逐字断言以脱敏后文本为准。
+校验规则 (`llm_extract.validate`): predicate 表外 → 整体拒; subject/object 未声明 → 整体拒; confidence clamp 0-1; evidence 缺失/**非原文逐字** → 整体拒 (v4 起 `extract()` 恒传 segment, 逐字硬断言 + 空白归一容差 — 迭代建议 #1 落地; v6 起 + markdown 格式符号 (`*`/`` ` ``) 剥除容差, 内容字符仍须逐字一致 — B4-DISTILL 因3); type 表外 → concept 收拢 (不拒); task_outcome 表外 → None 收拢 (不拒 — 元数据面非正确性面, v5); 自环 → 静默弃。整体拒 → 1 次重试 (附违规原因) → 仍败 `ExtractFailed` 响亮抛出。v5 起 `extract()` 对 segment 先跑 `corpus_prep.redact_secrets` — 密钥不进 prompt 不进 evidence, 逐字断言以脱敏后文本为准。
 
 ## Few-shot (用户消息模板内嵌, 语料取 claw 真实段)
 

@@ -34,7 +34,7 @@ import scoring
 import signals
 import store
 import upgrade
-from llm_extract import ExtractFailed
+from llm_extract import ExtractFailed, ProviderUnreachable
 from llm_provider import EdgeOut, EntityOut, Extraction
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -73,7 +73,7 @@ def _offline_embed(monkeypatch):
 
 def _llm_down(monkeypatch):
     def _boom(text, provider=None):
-        raise ExtractFailed("simulated provider outage")
+        raise ProviderUnreachable("simulated provider outage")
     monkeypatch.setattr(llm_extract, "extract", _boom)
 
 
@@ -156,7 +156,7 @@ def autodream_run(tpath: str) -> dict:
 
 
 def test_default_llm_channel_stays_loud(monkeypatch):
-    """断供红线: 默认 llm 档 ExtractFailed → 响亮上抛, 不静默降级。"""
+    """断供红线: 默认 llm 档断供 (ProviderUnreachable) → 响亮上抛, 不静默降级。"""
     tmp = _fresh("fb2")
     tpath = _write_transcript(tmp / "t.jsonl")
     _offline_embed(monkeypatch)
@@ -169,6 +169,36 @@ def test_default_llm_channel_stays_loud(monkeypatch):
         pass  # 响亮 = 预期
     else:
         raise AssertionError("默认 llm 档断供必须响亮上抛 (无降级红线)")
+
+
+def test_schema_fail_skips_segment_continues(monkeypatch):
+    """B4-DISTILL (2026-09-01): 默认 llm 档**单段内容性** schema 两轮败 →
+    响亮跳段, 其余段产出照常落库 (爆炸半径=1 段)。实跑实证: 42 段中 1 段
+    「object 未声明」曾把同文件其余段全部拖死。断供仍走 stays_loud 红线。"""
+    tmp = _fresh("fb2b")
+    # 两块异 provenance (user_text + assistant_text) → 两段
+    tpath = str(tmp / "t2.jsonl")
+    with open(tpath, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "user", "message": {"content": [
+            {"type": "text", "text": _SENT}]}}, ensure_ascii=False) + "\n")
+        fh.write(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "React 是一个组件化前端框架"}]}},
+            ensure_ascii=False) + "\n")
+    _offline_embed(monkeypatch)
+
+    def _seg_extract(text, provider=None):
+        if "组件化" in text:  # 该段内容性失败 (模拟 object 未声明两轮败)
+            raise ExtractFailed(
+                "schema 校验两轮失败 (prompt v6): object 未声明: 'X'")
+        return _llm_extraction("Logseq", "is_a", "笔记工具")
+
+    monkeypatch.setattr(llm_extract, "extract", _seg_extract)
+    monkeypatch.setenv("MEM_EXTRACT_CHANNEL", "llm")
+    import autodream
+    r = autodream.autodream("s1", tpath)  # 不上抛 = 跳段继续
+    assert r["added"] >= 1, f"好段产出必须落库: {r}"
+    assert db.get_conn().execute(
+        "SELECT COUNT(*) FROM fact WHERE extractor='llm'").fetchone()[0] >= 1
 
 
 # ── 3. E9/C2 三口分账 ────────────────────────────────────────────────

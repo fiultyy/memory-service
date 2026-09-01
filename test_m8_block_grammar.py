@@ -119,7 +119,7 @@ def test_build_segments_merges_consecutive_same_provenance():
 
 
 def test_build_segments_budget_truncation():
-    """超长段截尾到 _SEGMENT_BUDGET (N4, 替换旧 4000 平截断); budget 参可调。"""
+    """单块自身超预算截尾到 _SEGMENT_BUDGET (N4 语义保留); budget 参可调。"""
     long_result = "x" * 3000
     segs = autodream._build_segments([("tool_result", long_result)])
     assert len(segs) == 1 and segs[0][0] == "tool_obs"
@@ -127,6 +127,48 @@ def test_build_segments_budget_truncation():
     assert segs[0][1] == long_result[:1200], "截尾应保头去尾"
     # 显式 budget 覆盖缺省。
     assert len(autodream._build_segments([("user_text", "a" * 50)], budget=10)[0][1]) == 10
+
+
+def test_build_segments_overflow_splits_at_block_boundary():
+    """B4-DISTILL (2026-09-01): 多块合并触预算 → 块边界切新段, 内容零丢弃。
+
+    旧实现整段截尾 (merged[:budget] 吞尾) — 实测 ingest-recent dsh 合成
+    transcript 39577 字符被截到 1200 (96% 从未到 LLM)。现语义: 追加下一块
+    放不下 → 封段另起 (同 provenance 续段)。"""
+    blocks = [("user_text", t) for t in ("a" * 500, "b" * 500, "c" * 500, "d" * 500)]
+    segs = autodream._build_segments(blocks, budget=1200)
+    # 贪心合并: a+b (1001) 放得下; +c (1502) 超顶 → c 另起; c+d (1001) 并入
+    assert [s[0] for s in segs] == ["user_prose"] * 2
+    assert segs[0][1] == "a" * 500 + "\n" + "b" * 500
+    assert segs[1][1] == "c" * 500 + "\n" + "d" * 500
+    # 内容零丢弃: 每个块边界恰一个换行 — 全量拼接与原块序列逐字相等
+    assert "\n".join(s[1] for s in segs) == "\n".join(t for _, t in blocks)
+
+
+def test_build_segments_overflow_split_content_preserved_bulk():
+    """39k 字符合成语料形态 (95 小块): 旧实现剩 1200, 新实现全量保留且每段 ≤ 预算。"""
+    blocks = [("user_text", f"block-{i}-" + "x" * 300) for i in range(95)]
+    segs = autodream._build_segments(blocks)
+    assert all(len(t) <= autodream._SEGMENT_BUDGET for _, t in segs)
+    assert len(segs) > 30, f"切分后应多段 (got {len(segs)})"
+    assert "block-94-" in segs[-1][1], "末块内容必须在段里 (旧实现会被截掉)"
+    # 内容零丢弃的精确不变量: 每个块边界恰一个换行 (段内 join 与跨段 join 同形)
+    assert "\n".join(t for _, t in segs) == "\n".join(t for _, t in blocks)
+
+
+def test_build_segments_single_oversized_block_records_truncated():
+    """单块超预算: 截尾语义保留 + M4 wire 记 (seg_index, 全文); 块边界切分不记。"""
+    big = "y" * 3000
+    trunc: list[tuple[int, str]] = []
+    segs = autodream._build_segments(
+        [("user_text", "small"), ("tool_result", big)], truncated=trunc)
+    assert len(segs) == 2 and len(segs[1][1]) == 1200
+    assert trunc == [(1, big)], "仅单块截尾记 wire"
+    # 块边界切分 (无内容丢失) 不产生 truncated 事件
+    trunc2: list[tuple[int, str]] = []
+    autodream._build_segments([("user_text", "a" * 700), ("user_text", "b" * 700)],
+                              truncated=trunc2)
+    assert trunc2 == []
 
 
 # ── 集成 harness: monkeypatch extract_facts + embedding (禁网络/LLM) ──

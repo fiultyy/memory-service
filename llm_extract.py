@@ -75,7 +75,7 @@ def extract_channel() -> str:
 
 # ── prompt (资产版本化: docs/llm-extract-prompt.md 是唯一权威文本) ────
 
-PROMPT_VERSION = "v5"
+PROMPT_VERSION = "v6"
 
 # 单段输入 token 预算 (chars): bootstrap CHUNK=4000 同量级; LLM 通道在
 # autodream 段级调用 (段已 ≤ 预算), 此处再设硬顶防 transcript 超长段。
@@ -120,7 +120,8 @@ _SYSTEM_PROMPT = """你是双语记忆抽取员, 从输入文本段抽取知识�
 - value: 可选字面值 (str), 仅当原文是字面量陈述 (如 "版本 0.1.9");
   二元关系事实 value 留 null, 不要把 object 名复制进 value
 - confidence: 0.0-1.0 浮点, 你对这条事实确实在原文中有依据的置信度
-- evidence: 原文中支持这条事实的逐字 span (必须从输入段原文复制, 不改写)
+- evidence: 原文中支持这条事实的逐字 span (必须从输入段原文复制, 不改写;
+  原文里的 ** ` 等 markdown 符号按原样照抄, 不要增删或去格式)
 - task_outcome: 可选任务收尾分诊, 仅当这条事实关于一个已收尾的任务/工作时填,
   从 [success, partial, fail, uncertain] 选一个。判定优先级: 显式用户反馈
   (用户确认/否定) > 环境验证 (测试通过/命令成功退出) > 启发式推断;
@@ -198,13 +199,23 @@ def _norm_predicate(raw: Any) -> str:
 
 
 def _evidence_verbatim(evidence: str, segment: str) -> bool:
-    """evidence 逐字断言: 严格子串; 失败再试空白归一 (同字符异空白仍算逐字 —
-    模型偶发换行/多空格不算伪造; 改字才算)。"""
+    """evidence 逐字断言: 严格子串; 失败再试空白归一; 仍败再试 **markdown
+    原样符号容差** (B4-DISTILL 因3, 2026-09-01)。
+
+    容差只剥 ``*`` 与反引号两种格式符号 (强调/行内代码) — 真实语料实证:
+    模型抽 evidence 时高频剥掉原文的 ``**bold**`` / ``code`` 标记
+    (dsh 会话 seg#37: 原文 ``**恒带 transcript_path**`` → evidence 无星号,
+    逐字断言拒收 → 整段两轮报废)。内容字符仍须逐字一致 (只去格式不去字),
+    防伪造性质不变 (改字/缩略/脑补仍拒)。"""
     if evidence in segment:
         return True
     import re
     norm = lambda s: re.sub(r"\s+", " ", s).strip()  # noqa: E731
-    return norm(evidence) in norm(segment)
+    if norm(evidence) in norm(segment):
+        return True
+    deformat = lambda s: re.sub(r"[*`]", "", norm(s))  # noqa: E731
+    d_ev = deformat(evidence)
+    return bool(d_ev) and d_ev in deformat(segment)
 
 
 def validate(doc: Any, segment: str | None = None) -> tuple[list[EntityOut], list[EdgeOut], float]:
@@ -311,6 +322,15 @@ class ExtractFailed(RuntimeError):
     errors + skip 段 — **绝不静默降级 regex** (用户红线)。"""
 
 
+class ProviderUnreachable(ExtractFailed):
+    """LLM 断供/网络层不可达 (ProviderCallError 直接映射, 无重试)。
+
+    B4-DISTILL (2026-09-01) 分型: 与「单段内容性 schema 两轮败」(基类
+    ExtractFailed) 区分 — autodream 默认 llm 档对断供整跑响亮中止 (红线
+    「LLM 断供即响亮跳过, 不绕」), 对后者响亮跳段继续 (一段坏输出不再
+    报废同文件其余全部段)。fallback:auto 档两者都走既有降级链不变。"""
+
+
 # ── 原生结构化 (anthropic tool-use; 用户指令「结构化!」2026-08-27) ──────
 
 _TOOL_NAME = "emit_extraction"
@@ -353,7 +373,7 @@ _TOOL_DEF: dict = {
                         "confidence": {"type": "number",
                                        "description": "0-1"},
                         "evidence": {"type": "string",
-                                     "description": "原文逐字引用片段"},
+                                     "description": "原文逐字引用片段 (** ` 等 markdown 符号照原样保留, 不要去格式)"},
                         "task_outcome": {"type": "string",
                                          "enum": ["success", "partial",
                                                   "fail", "uncertain"],
@@ -444,8 +464,8 @@ def extract(segment: str, provider=None) -> Extraction:
                                     tool_choice={"type": "auto"})
         except ProviderCallError as e:
             # 网络层失败重试无意义 (同一 provider 会再败; 且「LLM 不可达 =
-            # skip」是既定语义) — 直接响亮抛出。
-            raise ExtractFailed(f"provider 不可达: {e}") from e
+            # skip」是既定语义) — 直接响亮抛出 (分型子类, 断供≠内容失败)。
+            raise ProviderUnreachable(f"provider 不可达: {e}") from e
         try:
             doc = _parse_json_block(content)
             entities, edges, aggregate = validate(doc, segment=segment)
@@ -463,6 +483,7 @@ def extract(segment: str, provider=None) -> Extraction:
 
 
 __all__ = ["extract", "validate", "extract_channel", "ExtractFailed",
+           "ProviderUnreachable",
            "SchemaViolation", "PREDICATES", "ENTITY_TYPES", "PROMPT_VERSION",
            "TASK_OUTCOMES",
            "CHANNEL_LLM", "CHANNEL_REGEX", "CHANNEL_FALLBACK",

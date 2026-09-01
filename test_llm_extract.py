@@ -24,7 +24,8 @@ import db
 import embedding
 import llm_extract
 from llm_extract import (CHANNEL_LLM, CHANNEL_REGEX, ExtractFailed,
-                         ProviderCallError, SchemaViolation, extract,
+                         ProviderCallError, ProviderUnreachable,
+                         SchemaViolation, extract,
                          extract_channel, validate)
 from llm_provider import Extraction as _Extraction
 
@@ -121,6 +122,21 @@ def test_extract_provider_timeout_raises():
     with pytest.raises(ExtractFailed, match="不可达"):
         extract("段", provider=p)
     assert len(p.calls) == 1
+
+
+def test_provider_unreachable_typing():
+    """B4-DISTILL 断供分型: ProviderUnreachable ⊂ ExtractFailed;
+    网络 ProviderCallError → ProviderUnreachable (不重试);
+    schema 两轮败 → 基类 ExtractFailed (非断供型)。"""
+    assert issubclass(ProviderUnreachable, ExtractFailed)
+    p = MockProvider(ProviderCallError("network: timeout"))
+    with pytest.raises(ProviderUnreachable, match="不可达"):
+        extract("段", provider=p)
+    assert len(p.calls) == 1
+    p2 = MockProvider("垃圾输出", "还是垃圾")
+    with pytest.raises(ExtractFailed) as ei:
+        extract("段", provider=p2)
+    assert not isinstance(ei.value, ProviderUnreachable)
 
 
 def test_schema_predicate_enum_enforced():
@@ -274,7 +290,7 @@ def test_llm_failure_skips_not_fallback(fresh_db, tmp_path, monkeypatch):
     monkeypatch.setenv("MEM_EXTRACT_CHANNEL", CHANNEL_LLM)
 
     def _fail(seg, provider=None):
-        raise ExtractFailed("provider 不可达: mock")
+        raise ProviderUnreachable("provider 不可达: mock")
 
     monkeypatch.setattr(llm_extract, "extract", _fail)
     import autodream
@@ -292,7 +308,7 @@ def test_bootstrap_counts_errors_on_llm_failure(tmp_path, monkeypatch):
     db.init(str(tmp_path / "m.db"))
     monkeypatch.setattr(llm_extract, "extract",
                         lambda seg, provider=None: (_ for _ in ()).throw(
-                            ExtractFailed("provider 不可达")))
+                            ProviderUnreachable("provider 不可达")))
     import bootstrap
     src = tmp_path / "src"
     src.mkdir()
@@ -403,10 +419,11 @@ def test_prompt_version_synced_with_doc():
     assert llm_extract._SYSTEM_PROMPT.splitlines()[-1] in text
 
 
-def test_prompt_v5_disciplines():
-    """v5 资产守卫: v4 纪律全保留 + 信号门槛/阅读优先级/task_outcome + docs 逐字同步。"""
+def test_prompt_v6_disciplines():
+    """v5/v6 资产守卫: v4 纪律全保留 + 信号门槛/阅读优先级/task_outcome
+    + v6 evidence markdown 原样符号纪律 + docs 逐字同步。"""
     import re
-    assert llm_extract.PROMPT_VERSION == "v5"
+    assert llm_extract.PROMPT_VERSION == "v6"
     sp = llm_extract._SYSTEM_PROMPT
     # ── v4 纪律 (回归锚) ──
     assert "entities 数组里逐字找到" in sp
@@ -427,13 +444,16 @@ def test_prompt_v5_disciplines():
     assert "显式用户反馈" in sp and "环境验证" in sp and "启发式" in sp
     assert llm_extract.TASK_OUTCOMES == frozenset(
         {"success", "partial", "fail", "uncertain"})
+    # ── v6 新纪律 (B4-DISTILL 因3): evidence markdown 原样符号 ──
+    assert "** ` 等 markdown 符号按原样照抄" in sp
+    assert "不要增删或去格式" in sp
     # few-shot 4 例 (不变)
     assert len(re.findall(r"## 示例 \d", llm_extract._USER_TEMPLATE)) == 4
     # docs 逐字同步 (纪律强制, 升级自锚点比对)
     doc = (Path(__file__).parent / "docs" / "llm-extract-prompt.md").read_text(
         encoding="utf-8")
-    m = re.search(r"## System prompt 全文 \(v5\)\n\n```\n(.*?)\n```", doc, re.S)
-    assert m, "docs 缺 v5 prompt 全文块"
+    m = re.search(r"## System prompt 全文 \(v6\)\n\n```\n(.*?)\n```", doc, re.S)
+    assert m, "docs 缺 v6 prompt 全文块"
     assert m.group(1) == llm_extract._SYSTEM_PROMPT
 
 
@@ -481,6 +501,33 @@ def test_evidence_whitespace_normalization_passes():
     }
     entities, edges, _ = llm_extract.validate(doc, segment="dais 依赖 logseq-cli")
     assert len(edges) == 1
+
+
+def test_evidence_markdown_deformat_tolerance_passes():
+    """B4-DISTILL 因3: 模型剥掉原文 ``**bold**`` / ```code``` 标记的 evidence
+    不算伪造 — 格式符号容差, 内容字符仍须逐字一致 (真实语料实证:
+    dsh seg#37 原文 ``**恒带 transcript_path**`` → evidence 无星号被拒)。"""
+    seg = "dsh 桥 UPS payload **恒带 transcript_path**（桥源 :350-357 实证）"
+    doc = {
+        "entities": [{"name": "dsh 桥", "type": "technical_term", "aliases": []},
+                     {"name": "transcript_path", "type": "identifier", "aliases": []}],
+        "facts": [{"subject": "dsh 桥", "predicate": "guarantees",
+                   "object": "transcript_path", "value": None, "confidence": 0.9,
+                   "evidence": "dsh 桥 UPS payload 恒带 transcript_path"}],
+    }
+    entities, edges, _ = llm_extract.validate(doc, segment=seg)
+    assert len(edges) == 1
+
+
+def test_evidence_markdown_tolerance_still_rejects_paraphrase():
+    """容差只去格式不去字: 改写/缩略/脑补仍整体拒 (防伪造性质不变)。"""
+    import pytest
+    seg = "dsh 桥 UPS payload **恒带 transcript_path**（桥源 :350-357 实证）"
+    bad = dict(_FABRICATED)
+    bad["facts"] = [dict(_FABRICATED["facts"][0],
+                         evidence="dsh 桥 UPS payload 实际字段 transcript_path")]
+    with pytest.raises(llm_extract.SchemaViolation, match="evidence 非原文逐字"):
+        llm_extract.validate(bad, segment=seg)
 
 
 def test_validate_without_segment_keeps_legacy_semantics():

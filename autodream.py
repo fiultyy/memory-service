@@ -207,16 +207,19 @@ def _block_provenance(block_type: str) -> str:
 def _build_segments(blocks: list[tuple[str, str]],
                     budget: int | None = None,
                     truncated: list[tuple[int, str]] | None = None) -> list[tuple[str, str]]:
-    """连续同 provenance 块合并为段 (M8-v2 G2), 段超预算截尾 (N4)。
+    """连续同 provenance 块合并为段 (M8-v2 G2); 合并触预算 → **块边界切新段**。
 
     Returns ``[(provenance, segment_text), ...]`` in encounter order. 段内块以
-    ``\\n`` 连接; 每段文本截尾到 ``budget`` 字符 (缺省
-    :data:`_SEGMENT_BUDGET`) — 段预算替换旧 4000 平截断, tool 块入管道后
-    长观测不再被整体丢弃, 但单段 LLM 调用有界。
+    ``\\n`` 连接。B4-DISTILL (2026-09-01) 语义修正: 旧实现把超预算段整段截尾
+    (``merged[:budget]`` 尾部丢弃) — 实测 ingest-recent dsh 合成 transcript
+    (全块同 provenance) 39577 字符被截到 1200 (96% 从未到 LLM, 耐久结论锚
+    全部落在截断线外)。现改为: 追加下一块会超预算时在**块边界**封段另起
+    (同 provenance 续段), 内容零丢弃; **单块自身超预算**仍截到 budget (单段
+    LLM 调用有界, 旧语义保留) 并记 ``truncated``。
 
-    ``truncated`` (M4 wire, 可选出参): 传入 list 时, 每个发生截尾的段 append
-    ``(seg_index, full_text)`` — 调用方 (autodream) 据此把全文 ref 送入
-    upgrade 队列 (M8→M4 wire 点)。
+    ``truncated`` (M4 wire, 可选出参): 传入 list 时, 每个发生**单块截尾**的
+    段 append ``(seg_index, full_text)`` — 调用方 (autodream) 据此把全文 ref
+    送入 upgrade 队列 (M8→M4 wire 点)。块边界切分不记 (内容无丢失)。
     """
     if budget is None:
         budget = _SEGMENT_BUDGET
@@ -225,20 +228,18 @@ def _build_segments(blocks: list[tuple[str, str]],
         if not text:
             continue
         prov = _block_provenance(block_type)
-        if segments and segments[-1][0] == prov:
-            merged = segments[-1][1] + "\n" + text
-            seg_index = len(segments) - 1
-            extend = True
+        # 同 provenance 续段: 仅当放得下才并入 (B4: 超预算不再吞尾部, 切新段)
+        if (segments and segments[-1][0] == prov
+                and len(segments[-1][1]) + 1 + len(text) <= budget):
+            segments[-1] = (prov, segments[-1][1] + "\n" + text)
+            continue
+        if len(text) > budget:
+            # 单块超预算: 截尾语义不变 (N4), 全文 ref 入 M4 wire
+            segments.append((prov, text[:budget]))
+            if truncated is not None:
+                truncated.append((len(segments) - 1, text))
         else:
-            merged = text
-            seg_index = len(segments)
-            extend = False
-        if len(merged) > budget and truncated is not None:
-            truncated.append((seg_index, merged))  # N4 截尾 → M4 全文 ref
-        if extend:
-            segments[-1] = (prov, merged[:budget])
-        else:
-            segments.append((prov, merged[:budget]))
+            segments.append((prov, text))
     return segments
 
 
@@ -492,14 +493,28 @@ def _decide_segments(
         else:
             try:
                 result = llm_extract_mod.extract(seg_text)  # 失败 ExtractFailed 上抛 (无降级红线)
-            except llm_extract_mod.ExtractFailed:
+            except llm_extract_mod.ProviderUnreachable as e:
                 if not use_fallback_auto:
-                    raise  # 默认 llm 档: 响亮上抛不静默降级 (断供红线不变)
-                # v1.7⑤ E10: 显式 opt-in 降级档 — 自动切 ① 词典+regex 三路
-                # 兜底链, 产物 extractor=regex (lif_source 0.4, 编排者裁决:
-                # 不加 SOURCE_WEIGHT 新键) = fallback 来源降级标记。
+                    raise  # 默认 llm 档断供: 响亮上抛不静默降级 (断供红线不变)
+                # v1.7⑤ E10: 显式 opt-in 降级档 — 断供同走兜底链 (语义不变)。
                 seg_degraded.add(seg_idx)
                 result = gazetteer.extract(seg_text)
+            except llm_extract_mod.ExtractFailed as e:
+                if use_fallback_auto:
+                    # v1.7⑤ E10: 显式 opt-in 降级档 — 内容性失败自动切 ① 词
+                    # 典+regex 三路兜底链, 产物 extractor=regex (lif_source
+                    # 0.4, 编排者裁决: 不加 SOURCE_WEIGHT 新键) = fallback
+                    # 来源降级标记。
+                    seg_degraded.add(seg_idx)
+                    result = gazetteer.extract(seg_text)
+                else:
+                    # B4-DISTILL (2026-09-01): 默认档单段内容性 schema 两轮败
+                    # → 响亮跳段继续 (爆炸半径=1 段)。实跑实证: 42 段中 1 段
+                    # 「object 未声明」把同文件其余 41 段好产出全部拖死。非
+                    # regex 回绕 (提取层不变; 断供走上方红线分支)。
+                    print(f"AUTODREAM-WARN: seg#{seg_idx} LLM 抽取两轮败, 跳段: "
+                          f"{e}", flush=True)
+                    continue
         regex_lane = use_regex_channel or (seg_idx in seg_degraded)
         if regex_lane and not result.entities and not result.edges:
             # C 层: 语义兜底实体声明 (与 B 共用 _link_spans 管道)。防御性

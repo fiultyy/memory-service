@@ -171,6 +171,121 @@ def test_memsvc_recall_rule_in_every_table_first():
         assert names[0] == "memsvc-recall-block", f"{h} 缺通用规则"
 
 
+# ── 通用规则: 编排帧防噪 (DSHMSG 派票信封 / ORCA-CB 回调行, 2026-09-05) ─
+#
+# 实测 (memory-spool spool 快照, 只读): DSHMSG]{...} 编排信封恒在用户消息
+# 文本首行 (信封+同块派票正文); ORCA-CB] 回调桥投递恒为单行 JSON, 且有
+# source.kind=user 镜像拷贝 (结构层滤不掉)。设计裁决: 过滤在 worker 蒸馏
+# 侧 (corpus_prep → autodream._read_transcript 分段前), hook 快照保持 RAW。
+
+def test_dshmsg_first_line_block_dropped_with_body():
+    """DSHMSG] 首行块整块弃 — 信封+同块派票正文一并 (编排过程噪声)。"""
+    txt = ('DSHMSG]{"from":"orch-1","to":"w1","type":"task","ref":"T1",'
+           '"body":"实现过滤层"}\n实现过滤层的补充说明 (同块正文)')
+    stats: dict[str, int] = {}
+    out = clean(txt, "dsh", stats=stats)
+    assert out == ""
+    assert stats.get("dshmsg-envelope") == 1
+
+
+def test_dshmsg_synthesized_role_marker_seen_through():
+    """合成 transcript 角色标记不击穿锚: ``[用户] DSHMSG]{...}`` 同样整块
+    (endsteps --scenes / cli ingest-recent 落盘形态, autodream 重读时
+    clean 在标记之后跑)。"""
+    txt = '[用户] DSHMSG]{"from":"orch","body":"派票"}\n同块正文'
+    assert clean(txt, "cc") == ""
+
+
+def test_orca_cb_line_block_dropped():
+    """ORCA-CB] 单行 JSON 块整行弃。"""
+    txt = 'ORCA-CB] {"type":"done","from":"w1","ref":"T1","body":"完成"}'
+    assert clean(txt, "dsh") == ""
+
+
+def test_orca_cb_line_mid_text_removed_rest_intact():
+    """嵌在多行文本中的 ORCA-CB] 行: 整行消失, 其余文本零改动。"""
+    txt = ("结论: 采用 A 方案。\n"
+           'ORCA-CB] {"type":"ack","from":"w1","body":"turn started"}\n'
+           "保留段不受影响。")
+    out = clean(txt, "cc")
+    assert "ORCA-CB" not in out and '"type"' not in out and "w1" not in out
+    assert "结论: 采用 A 方案。" in out and "保留段不受影响。" in out
+
+
+def test_normal_text_with_dshmsg_mention_untouched():
+    """恰好含 DSHMSG 字样的非首行文本零改动 (协议文档引用/行中提及不误杀)。"""
+    txt = ("信封协议摘录如下\n"
+           "收方回合首行 = DSHMSG]{\"from\",\"to\",\"type\",\"ref\",\"body\"}\n"
+           "行中提到 DSHMSG] 与 ORCA-CB] 也不是帧\n结尾。")
+    assert clean(txt, "dsh") == txt
+
+
+@pytest.mark.parametrize("h", ["cc", "codex", "dsh", "pi", "omp"])
+def test_orchestration_frames_dropped_all_harnesses(h):
+    """通用规则到表: 五 harness 同滤 (编排流量可入任何 harness 会话文本)。
+    帧与真实文本按块分离 (真实文本与信封同块时随整块弃, 见上)。"""
+    envelope = 'DSHMSG]{"from":"o","body":"x"}\n同块派票正文'
+    cb = 'ORCA-CB] {"type":"done","body":"y"}'
+    real = "真实结论保留。"
+    stats: dict[str, int] = {}
+    assert clean(envelope, h, stats=stats) == ""
+    assert clean(cb, h, stats=stats) == ""
+    assert clean(real, h, stats=stats) == real  # 零改动
+    assert stats.get("dshmsg-envelope") == 1
+    assert stats.get("orca-cb-line") == 1
+
+
+def test_frames_failopen_empty_and_malformed():
+    """空/畸形输入 fail-open: 不炸; 畸形/截断信封仍按前缀弃 (滤除不依赖
+    JSON 可解析 — 解析不了恰是常态)。"""
+    assert clean("", "dsh") == ""
+    assert clean("   \n\t", "cc") == ""
+    assert clean("DSHMSG]", "pi") == ""           # 裸标记无 body
+    assert clean('DSHMSG]{"from": 截断', "dsh") == ""  # 畸形 JSON 信封
+    assert clean("ORCA-CB]", "omp") == ""          # 无换行尾
+    assert clean('ORCA-CB] {"trunc', "codex") == ""
+
+
+def test_autodream_read_transcript_drops_orchestration_frames():
+    """spool 全量路径接缝: 信封块/回调行在进分段 (_build_segments) 前剥除
+    — 全弃块清洗后为空串, 分段层跳过空块, LLM 看不到帧; 同 transcript
+    真实块零改动, 块文法 (block_type) 不变。"""
+    import json as _json
+    import tempfile
+    import autodream
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.jsonl"
+        p.write_text("\n".join([
+            _json.dumps({"type": "user",
+                         "message": {"content":
+                                     '[用户] DSHMSG]{"from":"orch","body":"派票 X"}'
+                                     "\n同块正文"}},
+                        ensure_ascii=False),
+            _json.dumps({"type": "user",
+                         "message": {"content": "[用户] 真话: 采用 A 方案"}},
+                        ensure_ascii=False),
+            _json.dumps({"type": "user",
+                         "message": {"content":
+                                     'ORCA-CB] {"type":"done","from":"w1",'
+                                     '"body":"ok"}'}},
+                        ensure_ascii=False),
+            _json.dumps({"type": "assistant",
+                         "message": {"content": "[助手结论] 结论: 走 B 路径"}},
+                        ensure_ascii=False),
+        ]) + "\n", encoding="utf-8")
+        blocks = autodream._read_transcript(p, "dsh")
+        # 全弃块 → 空串块仍在块列表 (raw 非空即入列, 既有接缝语义)…
+        assert blocks == [("user_text", ""),
+                          ("user_text", "[用户] 真话: 采用 A 方案"),
+                          ("user_text", ""),
+                          ("assistant_text", "[助手结论] 结论: 走 B 路径")]
+        # …但分段层跳过空块 — 帧 0 字符进 LLM (蒸馏侧过滤的落点);
+        # 幸存块的角色标记原样保留 (只滤帧, 其余零改动)。
+        assert autodream._build_segments(blocks) == [
+            ("user_prose", "[用户] 真话: 采用 A 方案"),
+            ("agent_assert", "[助手结论] 结论: 走 B 路径")]
+
+
 # ── 密钥脱敏 ──────────────────────────────────────────────────────────
 
 def test_redact_known_prefixes():

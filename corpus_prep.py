@@ -145,9 +145,24 @@ PI_RULES = [
 # 通用 (五 harness 合并于各表之首) — memsvc 自有召回标记块。出端两个打标
 # 面: hooks/recall_inject.py 的 additionalContext + projection.project_recall
 # 的 recall-<DATE>.md 正文节。MEMORY.md 索引行不打标 (单行索引非内容)。
+# 编排帧防噪 (2026-09-05): DSH 编排两标记帧入会话文本 → 蒸馏侧整块/整行弃
+# (设计裁决: 过滤在 worker 蒸馏侧, hook 快照保持 RAW)。可选 ``[用户] ``/
+# ``[助手结论] `` 前缀 = 合成 transcript 角色标记 (M21: cli ingest-recent /
+# endsteps --scenes 落盘后经 autodream._read_transcript 重读, clean 在标记
+# 之后跑 — 规则须透视自家标记, 否则前缀击穿行锚)。
 COMMON_RULES = [
     _r("memsvc-recall-block", "memsvc-recall", ACTION_DROP,
        "出端打标 (recall_inject 注入 / recall --project 正文), 进端整块剥"),
+    _raw("dshmsg-envelope",
+         r"(?s)\A(?:\[(?:用户|助手结论)\] )?DSHMSG\].*",
+         ACTION_DROP,
+         "编排派票信封 (块首行 DSHMSG]{...}+同块正文整块弃; dsh 结构层 "
+         "transcripts._dsh_scenes 已滤 kind=user 信箱载荷, 此兜其余接缝)"),
+    _raw("orca-cb-line",
+         r"(?m)^(?:\[(?:用户|助手结论)\] )?ORCA-CB\][^\n]*\n?",
+         ACTION_DROP,
+         "回调桥事件投递行 (ORCA-CB] 单行 JSON 整行弃; 实测 spool 有 "
+         "source.kind=user 镜像拷贝, 结构层滤不掉)"),
 ]
 
 HARNESS_RULES: dict[str, list[BlockRule]] = {

@@ -42,6 +42,15 @@ print(d.get("transcript_path","") or "", d.get("session_id","") or "",
 EOF
 fi
 
+# dsh 桥回填 (2026-09-05, 拍10): dsh hooks lib 的 PreCompact payload 恒带
+# transcript_path="" (hooks-claude-code README: persistence seam 不暴露
+# artifact 路径, 记录在案的 consumer gap) → 按 session_id 从 dsh session
+# 存储回查 transcript (session.jsonl.zstd)。多命中取 mtime 最新; 找不到
+# 维持空 → 走下方原样放行 (tolerate-everything 不变)。
+if [ -z "${TRANSCRIPT_PATH}" ] && [ -n "${SESSION_ID}" ] && [ -n "${HOME:-}" ]; then
+    TRANSCRIPT_PATH="$(ls -1t "${HOME}"/.dsh/sessions/*/"${SESSION_ID}"/session.jsonl.zstd 2>/dev/null | head -1 || true)"
+fi
+
 # No transcript / no cli → nothing to do, let the compact through.
 [ -z "${TRANSCRIPT_PATH}" ] && exit 0
 [ -f "${CLI}" ] || exit 0

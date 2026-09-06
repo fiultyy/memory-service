@@ -340,15 +340,19 @@ def _entity_hygiene_gate(name: str) -> bool:
 def autodream(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable", source_cwd: str | None = None, harness: str = "cc") -> dict[str, int]:
     """Incrementally整理 a session transcript into the KG (ADR-10) — 公共入口。
 
-    perf/vec-index: 批量写包单事务 (``db.transaction()`` — 消逐语句 commit
-    fsync; autodream 是 PreCompact hook 单写者, 失败整段回滚, 幂等重跑可
-    重入)。实际管道在 :func:`_autodream_inner`。``harness`` (2026-08-28):
+    perf/vec-index 批量事务已按债#10 (2026-09-06, 用户裁决「不要回退策略,
+    机制是怎样就怎样修」) 重新划分: 原整管道单事务把写锁从 consolidate 第一
+    笔一路持有到全部 LLM 抽取结束 (分钟级) — 09-06 hook-recall.log 8 例
+    ``database is locked`` 的霸锁真身。现事务只罩写动作: consolidate 短事务
+    + 入队批事务 + Phase c 按段事务 (deferred BEGIN — 段内网络 I/O 如
+    resolve 嵌入/裁判发生在首写前, 不持写锁); 抽取/embedding 预热全程锁外。
+    失败爆炸半径从整批缩到单段, 幂等 (fact 级 NOOP) 吸收部分完成。
+    实际管道在 :func:`_autodream_inner`。``harness`` (2026-08-28):
     语料标记块清洗表键 (corpus_prep), 缺省 cc (PreCompact spool 即 CC)。
     """
     db.get_conn()  # ensure schema initialised on first call
-    with db.transaction():
-        return _autodream_inner(session_id, transcript_path, providers,
-                                fact_type, source_cwd, harness)
+    return _autodream_inner(session_id, transcript_path, providers,
+                            fact_type, source_cwd, harness)
 
 
 def _autodream_inner(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable", source_cwd: str | None = None, harness: str = "cc") -> dict[str, int]:
@@ -377,8 +381,10 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     """
     db.get_conn()  # ensure schema initialised on first call
     # Phase a — decay + dedup (v2/v3 复用). consolidate is idempotent on a
-    # stable wall clock, so re-runs add no churn.
-    consolidate_mod.consolidate()
+    # stable wall clock, so re-runs add no churn. 债#10: 纯写无网络 — 短事务
+    # 批提交 (消逐语句 fsync), 不与后续抽取共享锁窗口。
+    with db.transaction():
+        consolidate_mod.consolidate()
 
     # Phase b — M8 块文法 + M6 占位通道: (block_type, text) 序列 → 连续同
     # provenance 块合并成段 (G2) + 段预算截尾 (N4); 逐段调 M7 gazetteer 占位
@@ -548,7 +554,7 @@ def _decide_segments(
                 [surprise_mod.novelty_sample(t) for _, t, _ in seg_to_enqueue])
         except Exception as exc:
             # v1.7⑤ E12 N6: "embedding 也挂"档 embed raise → try/except 降级
-            # (novelty 退化为空向量入队), 不得炸 :319 单事务/消费循环。
+            # (novelty 退化为空向量入队), 不得炸消费循环/后续段事务 (债#10 后网络预热在锁外)。
             print(f"AUTODREAM-WARN: embed_batch 预热失败 (novelty 降级): "
                   f"{type(exc).__name__}: {exc}", flush=True)
         for seg_idx, seg_text, seg_prov in seg_to_enqueue:
@@ -605,203 +611,237 @@ def _decide_segments(
             _embedding_mod.embed_batch(_edge_values)
         except Exception as exc:
             # v1.7⑤ E12 N6: fact value 预热 embed raise → 降级 (写侧 vec 条件
-            # 跳过), 不得炸 :319 单事务。
+            # 跳过), 不得炸后续 Phase c 段事务 (债#10 后预热在全部事务之外)。
             print(f"AUTODREAM-WARN: embed_batch 预热失败 (fact value 降级): "
                   f"{type(exc).__name__}: {exc}", flush=True)
     for seg_idx, (seg_provenance, result, seg_text) in enumerate(seg_results):
-        ext_label = result.source_meta.get("extractor_label", "llm")
-        # v1.7④ 主径判定: 产物 extractor=='llm' ⇔ 本边由主径 llm 通道触发
-        # (regex 通道/fallback:auto 降级链产物均 extractor='regex' — C1a
-        # 不计数与低初值判定共用此键)。
-        main_path = ext_label == "llm"
-        lif_dims = scoring_mod.compute_lif(
-            {"extractor": ext_label, "fact_type": fact_type, "created_at": now.isoformat()},
-            access_count=0,
-            last_accessed_at=now.isoformat(),
-            distinct_sessions=1 if session_id else 0,
-            neighbors=[],
-            now=now,
-        )
-
-        def _put_new_fact(**edge_kw):
-            """Persist a new fact with confidence + initial LIF dims (used by both
-            contradiction-supersede and brand-new ADD paths). M8: stamps the
-            segment's provenance (M2 column); veracity auto-maps via M3.
-            v1.7④: lif_source 可被调用方显式覆盖 (低初值裁决, ADD 路径);
-            缺省仍为 extractor 档位重算值。B3 (B3C-HYG): stamps 来源
-            harness (全批同源 — autodream/ingest-recent 传调用 harness;
-            rerun_segment 缺省 None → NULL=未知)。"""
-            edge_kw.setdefault("lif_source", lif_dims["lif_source"])
-            return store.put_fact(
-                **edge_kw,
-                confidence=result.confidence,
-                provenance=seg_provenance,
-                harness=harness,
-                LIF=lif_dims["LIF"],
-                lif_freq=lif_dims["lif_freq"], lif_recency=lif_dims["lif_recency"],
-                lif_spread=lif_dims["lif_spread"], lif_coherence=lif_dims["lif_coherence"],
+        with db.transaction():  # 债#10: 按段事务 — deferred BEGIN: 段内 resolve 嵌入/裁判网络 I/O 在首写前不持写锁, 锁窗口=纯写爆发, 失败爆炸半径=单段。
+            ext_label = result.source_meta.get("extractor_label", "llm")
+            # v1.7④ 主径判定: 产物 extractor=='llm' ⇔ 本边由主径 llm 通道触发
+            # (regex 通道/fallback:auto 降级链产物均 extractor='regex' — C1a
+            # 不计数与低初值判定共用此键)。
+            main_path = ext_label == "llm"
+            lif_dims = scoring_mod.compute_lif(
+                {"extractor": ext_label, "fact_type": fact_type, "created_at": now.isoformat()},
+                access_count=0,
+                last_accessed_at=now.isoformat(),
+                distinct_sessions=1 if session_id else 0,
+                neighbors=[],
+                now=now,
             )
 
-        # perf/vec-index: 段级实体批式消解 — 一次 embed 批 (embed_batch 单次
-        # POST 预热 L1) + 逐名三步协议 (aliases 语义经 aliases_map 全保留);
-        # names 跨段共享 name_to_id 缓存。
-        seg_entities = [ent for ent in result.entities if ent.name]
-        seg_resolved = resolver.resolve_entities_batch(
-            [e.name for e in seg_entities],
-            entity_types=[e.type for e in seg_entities],
-            aliases_map={e.name: list(e.aliases) for e in seg_entities
-                         if getattr(e, "aliases", None)},
-            providers=active_providers,
-            context=seg_text) if seg_entities else {}  # D-B b: 段原文喂裁判
-        for ent in result.entities:
-            if not ent.name:
-                continue
-            if not _entity_hygiene_gate(ent.name):
-                continue  # 卫生门拒 (停用词/短名) — 不 resolve 不落库
-            sid = seg_resolved.get(ent.name)
-            if sid is None and ent.name not in seg_resolved:
-                # 批式未覆盖 (异常防御) → 单条兜底, 协议不变。
-                sid = resolver.resolve_entity(
-                    ent.name, ent.type,
-                    aliases=getattr(ent, 'aliases', None) or None,
-                    providers=active_providers)
-            if sid is not None:
-                name_to_id[ent.name] = sid
-                name_to_type[ent.name] = ent.type
-        for edge in result.edges:
-            subject = (edge.subject or "").strip()
-            predicate = (edge.predicate or "").strip()
-            raw_predicate = predicate
-            predicate = _canon_map.get(predicate, predicate)
-            value = (edge.object or "").strip()
-            if not subject or not predicate or not value:
-                continue
-            # 卫生门 + 自环禁止 (§2.4): 两档通道统一防线 (regex 通道 T2 实测
-            # 自环 6 条; schema 层 LLM 档已弃, 此处兜两档)。
-            if subject == value:
-                continue
-            topic = (edge.topic or "").strip() or None  # ADR-C: 投影 slug/title/desc 源
+            def _put_new_fact(**edge_kw):
+                """Persist a new fact with confidence + initial LIF dims (used by both
+                contradiction-supersede and brand-new ADD paths). M8: stamps the
+                segment's provenance (M2 column); veracity auto-maps via M3.
+                v1.7④: lif_source 可被调用方显式覆盖 (低初值裁决, ADD 路径);
+                缺省仍为 extractor 档位重算值。B3 (B3C-HYG): stamps 来源
+                harness (全批同源 — autodream/ingest-recent 传调用 harness;
+                rerun_segment 缺省 None → NULL=未知)。"""
+                edge_kw.setdefault("lif_source", lif_dims["lif_source"])
+                return store.put_fact(
+                    **edge_kw,
+                    confidence=result.confidence,
+                    provenance=seg_provenance,
+                    harness=harness,
+                    LIF=lif_dims["LIF"],
+                    lif_freq=lif_dims["lif_freq"], lif_recency=lif_dims["lif_recency"],
+                    lif_spread=lif_dims["lif_spread"], lif_coherence=lif_dims["lif_coherence"],
+                )
 
-            if subject not in name_to_id:
-                if not _entity_hygiene_gate(subject):
+            # perf/vec-index: 段级实体批式消解 — 一次 embed 批 (embed_batch 单次
+            # POST 预热 L1) + 逐名三步协议 (aliases 语义经 aliases_map 全保留);
+            # names 跨段共享 name_to_id 缓存。
+            seg_entities = [ent for ent in result.entities if ent.name]
+            seg_resolved = resolver.resolve_entities_batch(
+                [e.name for e in seg_entities],
+                entity_types=[e.type for e in seg_entities],
+                aliases_map={e.name: list(e.aliases) for e in seg_entities
+                             if getattr(e, "aliases", None)},
+                providers=active_providers,
+                context=seg_text) if seg_entities else {}  # D-B b: 段原文喂裁判
+            for ent in result.entities:
+                if not ent.name:
                     continue
-                sid = resolver.resolve_entity(subject, name_to_type.get(subject, "concept"),
-                                              providers=active_providers, context=seg_text)
-                if sid is None:
+                if not _entity_hygiene_gate(ent.name):
+                    continue  # 卫生门拒 (停用词/短名) — 不 resolve 不落库
+                sid = seg_resolved.get(ent.name)
+                if sid is None and ent.name not in seg_resolved:
+                    # 批式未覆盖 (异常防御) → 单条兜底, 协议不变。
+                    sid = resolver.resolve_entity(
+                        ent.name, ent.type,
+                        aliases=getattr(ent, 'aliases', None) or None,
+                        providers=active_providers)
+                if sid is not None:
+                    name_to_id[ent.name] = sid
+                    name_to_type[ent.name] = ent.type
+            for edge in result.edges:
+                subject = (edge.subject or "").strip()
+                predicate = (edge.predicate or "").strip()
+                raw_predicate = predicate
+                predicate = _canon_map.get(predicate, predicate)
+                value = (edge.object or "").strip()
+                if not subject or not predicate or not value:
                     continue
-                name_to_id[subject] = sid
-            subject_id = name_to_id[subject]
+                # 卫生门 + 自环禁止 (§2.4): 两档通道统一防线 (regex 通道 T2 实测
+                # 自环 6 条; schema 层 LLM 档已弃, 此处兜两档)。
+                if subject == value:
+                    continue
+                topic = (edge.topic or "").strip() or None  # ADR-C: 投影 slug/title/desc 源
 
-            # object is a declared entity reference (R1 §A2) — resolve + link.
-            if value not in name_to_id:
-                if not _entity_hygiene_gate(value):
-                    continue
-                oid = resolver.resolve_entity(value, name_to_type.get(value, "concept"),
-                                              providers=active_providers, context=seg_text)
-                if oid is None:
-                    continue
-                name_to_id[value] = oid
-            object_id = name_to_id[value]
+                if subject not in name_to_id:
+                    if not _entity_hygiene_gate(subject):
+                        continue
+                    sid = resolver.resolve_entity(subject, name_to_type.get(subject, "concept"),
+                                                  providers=active_providers, context=seg_text)
+                    if sid is None:
+                        continue
+                    name_to_id[subject] = sid
+                subject_id = name_to_id[subject]
 
-            # D-B c 图不变量防线 (P4 D-A 升级): 表面串检查 (subject == value)
-            # 挡不住 resolver 合并 — 两个不同表面名解析到同一实体 id 时, 不再
-            # 丢边 (D-A 旧语义连事实一起扔), 而是**否决合并**: object 名带
-            # exclude_ids={subject_id} 重解析 (resolver step1 命中被拒 → step2
-            # 候选滤掉 → 都排光则新建), 宁分离勿自环。真同串 (value == subject
-            # 表面) 才丢弃 — A --pred--> A 语义无效。
-            if object_id == subject_id:
-                if value == subject:
-                    continue
-                split_id = resolver.resolve_entity(
-                    value, name_to_type.get(value, "concept"),
-                    providers=active_providers, context=seg_text,
-                    exclude_ids={subject_id})
-                if not split_id or split_id == subject_id:
-                    continue  # 分离失败兜底 (理论不可达, exclude 语义保证)
-                object_id = name_to_id[value] = split_id
+                # object is a declared entity reference (R1 §A2) — resolve + link.
+                if value not in name_to_id:
+                    if not _entity_hygiene_gate(value):
+                        continue
+                    oid = resolver.resolve_entity(value, name_to_type.get(value, "concept"),
+                                                  providers=active_providers, context=seg_text)
+                    if oid is None:
+                        continue
+                    name_to_id[value] = oid
+                object_id = name_to_id[value]
 
-            # Exact (subject, predicate, value) match ⇒ UPDATE / NOOP.
-            exact = _find_active_fact(subject_id, predicate, value)
-            if exact is not None:
-                # Refresh LIF + absorb session (the reinforcement signal). If the
-                # fact already saw this session and nothing else moved, the refresh
-                # is a no-op on stored state ⇒ count as NOOP (idempotency).
-                seen_sessions = list(exact.get("seen_sessions") or [])
-                ext_sessions = list(exact.get("extract_sessions") or [])
-                source_refs = list(exact.get("source_refs") or [])
-                already_seen = (stamp_session in seen_sessions) \
-                    if stamp_session else True
-                already_ref = (src_ref in source_refs) if src_ref else True
-                # v1.7④ E3/E6 (C1a): 仅主径 llm 触发的 UPDATE 把 session stamp
-                # 进 extract_sessions 分账列 (JSON append; bootstrap 记 "self")
-                # — regex 通道/fallback 降级链复现同 (s,p,v) 不计数, 单通道
-                # 凑不满解锁; seen_sessions 照旧三口不动。
-                new_ext = bool(main_path and stamp_session
-                               and stamp_session not in ext_sessions)
-                if already_seen and already_ref and not new_ext:
-                    noop += 1
-                    continue
-                if stamp_session and stamp_session not in seen_sessions:
-                    seen_sessions.append(stamp_session)
-                if src_ref and src_ref not in source_refs:
-                    source_refs.append(src_ref)
-                if new_ext:
-                    ext_sessions.append(stamp_session)
-                # v1.7④ E5 毕业门: 解锁期 (env 开) 才消费判据 — 达
-                # len(extract_sessions)>=2 放行 lif_source 毕业到 extractor
-                # 真值档; 未达 → 锁现值 (regex 触发面/低初值不被非解锁性
-                # 刷新提权); 暂缓期 (门关, None) 走旧规则照 dims 重算。
-                graduated = None
-                if scoring_mod.coldstart_unlock_enabled():
-                    graduated = (len(ext_sessions)
-                                 >= scoring_mod.UNLOCK_EXTRACT_SESSIONS)
-                _refresh_fact_meta(exact["id"], seen_sessions, source_refs,
-                                   extract_sessions=ext_sessions,
-                                   graduated=graduated)
-                updated += 1
-                continue
+                # D-B c 图不变量防线 (P4 D-A 升级): 表面串检查 (subject == value)
+                # 挡不住 resolver 合并 — 两个不同表面名解析到同一实体 id 时, 不再
+                # 丢边 (D-A 旧语义连事实一起扔), 而是**否决合并**: object 名带
+                # exclude_ids={subject_id} 重解析 (resolver step1 命中被拒 → step2
+                # 候选滤掉 → 都排光则新建), 宁分离勿自环。真同串 (value == subject
+                # 表面) 才丢弃 — A --pred--> A 语义无效。
+                if object_id == subject_id:
+                    if value == subject:
+                        continue
+                    split_id = resolver.resolve_entity(
+                        value, name_to_type.get(value, "concept"),
+                        providers=active_providers, context=seg_text,
+                        exclude_ids={subject_id})
+                    if not split_id or split_id == subject_id:
+                        continue  # 分离失败兜底 (理论不可达, exclude 语义保证)
+                    object_id = name_to_id[value] = split_id
 
-            # Same (subject, predicate), different value: supersede ONLY on a real
-            # contradiction (ADR-1 R1). Multivalue predicates (uses/depends_on/...)
-            # short-circuit to no-contradiction (coexist); single-valued/open
-            # predicates ask the judge — M6 占位径 providers 默认 [] → 规则
-            # fallback (值比较共存, 不 supersede 不阻断); 显式传 providers 时才
-            # 问 LLM judge。一致性: contradiction ⇒ supersede 设 valid_to。
-            subject_type = name_to_type.get(subject, "concept")
-            siblings = _has_active_for_predicate(subject_id, predicate)
-            contradicting = [s for s in siblings
-                             if _judge_contradiction(
-                                 active_providers, subject_type, subject, predicate,
-                                 value, s.get("value") or "")]
-            if contradicting:
-                # v1.7⑤ E7 C1b 通道质量门槛 (勘误 C1 出口修复): 顶替者信任
-                # **严格低于**被处决者 (regex 档证据 vs llm 档 fact) → NOOP:
-                # 不 supersede 不改状态 + contradiction_pending 信号轻记录
-                # (七字段, 勘误 N5) + 矛盾段 segcontra: 前缀复活入队 (待主径
-                # 重抽仲裁; 不受 _queue_on 门控 — llm 通道开洞)。反向
-                # (高 vs 低) 与同档 → 下方 supersede 照旧; multivalue 短路
-                # 在 judge 前已返回, 通道门槛不覆盖 multivalue。
-                chal_tier = scoring_mod.SOURCE_WEIGHT.get(ext_label, 0.4)
-                if any(chal_tier < scoring_mod.SOURCE_WEIGHT.get(
-                        o.get("extractor") or "regex", 0.4)
-                       for o in contradicting):
-                    contra_ref = (f"segcontra:{transcript_path}#seg{seg_idx}"
-                                  if transcript_path
-                                  else f"segcontra:rerun#{seg_idx}")
-                    signals_mod.append("contradiction_pending", {
-                        "ref": contra_ref,
-                        "subject_id": subject_id,
-                        "predicate": predicate,
-                        "old_value": contradicting[0].get("value") or "",
-                        "new_value": value,
-                        "channel": ext_label,
-                    })
-                    if transcript_path:
-                        upgrade.enqueue_contra_segment(
-                            transcript_path, seg_idx, seg_text,
-                            provenance=seg_provenance)
-                    noop += 1
+                # Exact (subject, predicate, value) match ⇒ UPDATE / NOOP.
+                exact = _find_active_fact(subject_id, predicate, value)
+                if exact is not None:
+                    # Refresh LIF + absorb session (the reinforcement signal). If the
+                    # fact already saw this session and nothing else moved, the refresh
+                    # is a no-op on stored state ⇒ count as NOOP (idempotency).
+                    seen_sessions = list(exact.get("seen_sessions") or [])
+                    ext_sessions = list(exact.get("extract_sessions") or [])
+                    source_refs = list(exact.get("source_refs") or [])
+                    already_seen = (stamp_session in seen_sessions) \
+                        if stamp_session else True
+                    already_ref = (src_ref in source_refs) if src_ref else True
+                    # v1.7④ E3/E6 (C1a): 仅主径 llm 触发的 UPDATE 把 session stamp
+                    # 进 extract_sessions 分账列 (JSON append; bootstrap 记 "self")
+                    # — regex 通道/fallback 降级链复现同 (s,p,v) 不计数, 单通道
+                    # 凑不满解锁; seen_sessions 照旧三口不动。
+                    new_ext = bool(main_path and stamp_session
+                                   and stamp_session not in ext_sessions)
+                    if already_seen and already_ref and not new_ext:
+                        noop += 1
+                        continue
+                    if stamp_session and stamp_session not in seen_sessions:
+                        seen_sessions.append(stamp_session)
+                    if src_ref and src_ref not in source_refs:
+                        source_refs.append(src_ref)
+                    if new_ext:
+                        ext_sessions.append(stamp_session)
+                    # v1.7④ E5 毕业门: 解锁期 (env 开) 才消费判据 — 达
+                    # len(extract_sessions)>=2 放行 lif_source 毕业到 extractor
+                    # 真值档; 未达 → 锁现值 (regex 触发面/低初值不被非解锁性
+                    # 刷新提权); 暂缓期 (门关, None) 走旧规则照 dims 重算。
+                    graduated = None
+                    if scoring_mod.coldstart_unlock_enabled():
+                        graduated = (len(ext_sessions)
+                                     >= scoring_mod.UNLOCK_EXTRACT_SESSIONS)
+                    _refresh_fact_meta(exact["id"], seen_sessions, source_refs,
+                                       extract_sessions=ext_sessions,
+                                       graduated=graduated)
+                    updated += 1
                     continue
+
+                # Same (subject, predicate), different value: supersede ONLY on a real
+                # contradiction (ADR-1 R1). Multivalue predicates (uses/depends_on/...)
+                # short-circuit to no-contradiction (coexist); single-valued/open
+                # predicates ask the judge — M6 占位径 providers 默认 [] → 规则
+                # fallback (值比较共存, 不 supersede 不阻断); 显式传 providers 时才
+                # 问 LLM judge。一致性: contradiction ⇒ supersede 设 valid_to。
+                subject_type = name_to_type.get(subject, "concept")
+                siblings = _has_active_for_predicate(subject_id, predicate)
+                contradicting = [s for s in siblings
+                                 if _judge_contradiction(
+                                     active_providers, subject_type, subject, predicate,
+                                     value, s.get("value") or "")]
+                if contradicting:
+                    # v1.7⑤ E7 C1b 通道质量门槛 (勘误 C1 出口修复): 顶替者信任
+                    # **严格低于**被处决者 (regex 档证据 vs llm 档 fact) → NOOP:
+                    # 不 supersede 不改状态 + contradiction_pending 信号轻记录
+                    # (七字段, 勘误 N5) + 矛盾段 segcontra: 前缀复活入队 (待主径
+                    # 重抽仲裁; 不受 _queue_on 门控 — llm 通道开洞)。反向
+                    # (高 vs 低) 与同档 → 下方 supersede 照旧; multivalue 短路
+                    # 在 judge 前已返回, 通道门槛不覆盖 multivalue。
+                    chal_tier = scoring_mod.SOURCE_WEIGHT.get(ext_label, 0.4)
+                    if any(chal_tier < scoring_mod.SOURCE_WEIGHT.get(
+                            o.get("extractor") or "regex", 0.4)
+                           for o in contradicting):
+                        contra_ref = (f"segcontra:{transcript_path}#seg{seg_idx}"
+                                      if transcript_path
+                                      else f"segcontra:rerun#{seg_idx}")
+                        signals_mod.append("contradiction_pending", {
+                            "ref": contra_ref,
+                            "subject_id": subject_id,
+                            "predicate": predicate,
+                            "old_value": contradicting[0].get("value") or "",
+                            "new_value": value,
+                            "channel": ext_label,
+                        })
+                        if transcript_path:
+                            upgrade.enqueue_contra_segment(
+                                transcript_path, seg_idx, seg_text,
+                                provenance=seg_provenance)
+                        noop += 1
+                        continue
+                    new_id = _put_new_fact(
+                        subject_id=subject_id,
+                        predicate=predicate,
+                        value=value,
+                        object_id=object_id,
+                        extractor=ext_label,
+                        fact_type=fact_type,
+                        source_cwd=source_cwd,
+                        source_refs=[src_ref] if src_ref else [],
+                        seen_sessions=[stamp_session] if stamp_session else [],
+                        topic=topic,
+                        raw_predicate=raw_predicate,
+                        task_outcome=getattr(edge, "task_outcome", None),
+                    )
+                    for old in contradicting:
+                        store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now(), reason="contradiction")  # M1: contradiction 必带 reason
+                    # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
+                    # llm 通道不入队 (队列退役清理 2026-08-27, 同 ADD 路径)。
+                    if use_regex_channel:
+                        fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
+                    deleted += len(contradicting)
+                    added += 1
+                    continue
+                # 多值共存 / 无矛盾 ⇒ 落到下方 brand-new ADD (不 continue)。
+
+                # Brand new — ADD.
+                # v1.7④ 低初值 (编排者裁决, 写侧立即生效): 主径 llm 触发的
+                # brand-new ADD 显式低初值 lif_source=0.4 (待验证, 与 regex 同档;
+                # regex 产物本就 0.4 不动); "待验证"不新增 schema 值, 由
+                # (extractor, lif_source, len(extract_sessions)) 推导。主径 ADD
+                # 即首个独立提取证据 → extract_sessions 初始 stamp (bootstrap 记
+                # "self", len 天然封顶 1)。
+                init_stamp: list[str] = [stamp_session] if stamp_session else []
                 new_id = _put_new_fact(
                     subject_id=subject_id,
                     predicate=predicate,
@@ -811,53 +851,20 @@ def _decide_segments(
                     fact_type=fact_type,
                     source_cwd=source_cwd,
                     source_refs=[src_ref] if src_ref else [],
-                    seen_sessions=[stamp_session] if stamp_session else [],
+                    seen_sessions=init_stamp,
+                    lif_source=(scoring_mod.LOW_INIT_LIF_SOURCE
+                                if main_path else lif_dims["lif_source"]),
+                    extract_sessions=(init_stamp if main_path else []),
                     topic=topic,
                     raw_predicate=raw_predicate,
                     task_outcome=getattr(edge, "task_outcome", None),
                 )
-                for old in contradicting:
-                    store.update_fact_status(old["id"], "superseded", supersedes_id=new_id, valid_to=store._now(), reason="contradiction")  # M1: contradiction 必带 reason
                 # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
-                # llm 通道不入队 (队列退役清理 2026-08-27, 同 ADD 路径)。
+                # llm 通道 (use_regex_channel=False) 不收集: extractor='llm' 的
+                # fact 已是终态, wings 升级=重复消费 (队列退役清理 2026-08-27)。
                 if use_regex_channel:
                     fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
-                deleted += len(contradicting)
                 added += 1
-                continue
-            # 多值共存 / 无矛盾 ⇒ 落到下方 brand-new ADD (不 continue)。
-
-            # Brand new — ADD.
-            # v1.7④ 低初值 (编排者裁决, 写侧立即生效): 主径 llm 触发的
-            # brand-new ADD 显式低初值 lif_source=0.4 (待验证, 与 regex 同档;
-            # regex 产物本就 0.4 不动); "待验证"不新增 schema 值, 由
-            # (extractor, lif_source, len(extract_sessions)) 推导。主径 ADD
-            # 即首个独立提取证据 → extract_sessions 初始 stamp (bootstrap 记
-            # "self", len 天然封顶 1)。
-            init_stamp: list[str] = [stamp_session] if stamp_session else []
-            new_id = _put_new_fact(
-                subject_id=subject_id,
-                predicate=predicate,
-                value=value,
-                object_id=object_id,
-                extractor=ext_label,
-                fact_type=fact_type,
-                source_cwd=source_cwd,
-                source_refs=[src_ref] if src_ref else [],
-                seen_sessions=init_stamp,
-                lif_source=(scoring_mod.LOW_INIT_LIF_SOURCE
-                            if main_path else lif_dims["lif_source"]),
-                extract_sessions=(init_stamp if main_path else []),
-                topic=topic,
-                raw_predicate=raw_predicate,
-                task_outcome=getattr(edge, "task_outcome", None),
-            )
-            # M6→M4 wire: 占位 fact 落库后待升级项入队 (延后批化, 见循环尾)。
-            # llm 通道 (use_regex_channel=False) 不收集: extractor='llm' 的
-            # fact 已是终态, wings 升级=重复消费 (队列退役清理 2026-08-27)。
-            if use_regex_channel:
-                fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
-            added += 1
 
     # perf 收尾批: fact 入队批化 — 三元组文本 novelty 采样一次 embed_batch
     # 预热后逐条 enqueue (同 seg 批化; material_ref=fact:<id> 幂等不变)。
@@ -870,7 +877,7 @@ def _decide_segments(
                  for _, s, p, o, _ in fact_enqueues])
         except Exception as exc:
             # v1.7⑤ E12 N6: "embedding 也挂"档 embed raise → 降级不炸消费
-            # 循环/:319 单事务 (novelty 退化空向量入队)。
+            # 循环 (novelty 退化空向量入队; 债#10 后预热在事务之外)。
             print(f"AUTODREAM-WARN: embed_batch 预热失败 (fact 入队降级): "
                   f"{type(exc).__name__}: {exc}", flush=True)
         for fid, s_, p_, o_, prov in fact_enqueues:

@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import math
 import os
+import sqlite3
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -533,24 +536,47 @@ def recall(
                 "source_cwd": cwd,
             })
     elif boost and scored:
+        # 债#10 (2026-09-06) 即时路加固: 本循环是 recall 读路径唯一的 SQLite
+        # 写点, autodream 蒸馏长写事务持锁、busy timeout 到期即 OperationalError
+        # 向上炸穿 recall (09-06 23:1x hook-recall.log 8 例实录)。三段防御:
+        # ① busy timeout 显式可调 (db.py MEM_DB_BUSY_TIMEOUT, 缺省 5s 等值);
+        # ② OperationalError 短退避整循环重试 — MEM_BOOST_RETRIES(默认 2)次 ×
+        #    MEM_BOOST_BACKOFF(默认 2s); refresh 无复合漂移 (scoring 契约),
+        #    重放已 refresh 的命中仅 freq/recency 各 +1, 换取锁释放窗口可接受;
+        # ③ 重试穷尽 → fail-open 降级纯读: 返回 score-time LIF 命中集 (等效
+        #    boost=False 语义), WARN 走 stderr 不污染 --json stdout 契约
+        #    (SKILL 陷阱#4)。任何锁态下 recall 不崩。
+        _boost_retries = max(0, int(os.environ.get("MEM_BOOST_RETRIES", "2")))
+        _boost_backoff = max(0.0, float(os.environ.get("MEM_BOOST_BACKOFF", "2")))
         conn = db.get_conn()
-        for s in scored:
-            refreshed = scoring.refresh_lif_on_recall(
-                s["fact"]["id"], session_id=session_id, conn=conn,
-            )
-            if refreshed is not None:
-                # Reflect the post-reinforcement stored state on the returned
-                # FACT. refresh_lif_on_recall is the authority (it writes
-                # access_count/last_accessed_at/seen_sessions + recomputes LIF);
-                # re-reading the row avoids hand-replaying those fields off the
-                # stale pre-refresh dict (off-by-N if a caller ever hands us a
-                # dict already aligned with the store). The verbose dict's own
-                # ``lif``/``score`` fields stay at score-time values — they pin
-                # the ADR-4v2 identity score; the reinforced scalar is read off
-                # fact["LIF"].
-                authoritative = store.get_fact(s["fact"]["id"])
-                if authoritative is not None:
-                    s["fact"].update(authoritative)
+        for _attempt in range(_boost_retries + 1):
+            try:
+                for s in scored:
+                    refreshed = scoring.refresh_lif_on_recall(
+                        s["fact"]["id"], session_id=session_id, conn=conn,
+                    )
+                    if refreshed is not None:
+                        # Reflect the post-reinforcement stored state on the
+                        # returned FACT. refresh_lif_on_recall is the authority
+                        # (it writes access_count/last_accessed_at/seen_sessions
+                        # + recomputes LIF); re-reading the row avoids
+                        # hand-replaying those fields off the stale pre-refresh
+                        # dict (off-by-N if a caller ever hands us a dict
+                        # already aligned with the store). The verbose dict's
+                        # own ``lif``/``score`` fields stay at score-time
+                        # values — they pin the ADR-4v2 identity score; the
+                        # reinforced scalar is read off fact["LIF"].
+                        authoritative = store.get_fact(s["fact"]["id"])
+                        if authoritative is not None:
+                            s["fact"].update(authoritative)
+                break
+            except sqlite3.OperationalError as exc:
+                if _attempt >= _boost_retries:
+                    print(f"[memsvc] recall: LIF 记账降级(纯读) — boost 写回 "
+                          f"{_attempt + 1} 次尝试仍锁败, fail-open: {exc}",
+                          file=sys.stderr)
+                    break
+                time.sleep(_boost_backoff)
 
     # ADR-15 Ch2: 命中 fact → 建/刷 mem-<id>.md (snaptag 物化) + 算 tag 嵌 _snaptag。
     # 只建散 index 载体, 不碰 MEMORY.md — 投影索引统一归 synthesis_index 唯一写入口 (09-01 终裁A方案: SessionStart 单点自动投影), 防双写竞争。mem_dir 优先显式, 否则 cwd 推导;

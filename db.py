@@ -6,6 +6,7 @@ The connection is shared with the store module via :data:`_conn`.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,18 +18,27 @@ _conn: sqlite3.Connection | None = None
 _conn_path: str | None = None
 
 
-def init(db_path: str | Path | None = None) -> sqlite3.Connection:
+def init(db_path: str | Path | None = None,
+         timeout: float | None = None) -> sqlite3.Connection:
     """Open (or reuse) the SQLite connection and ensure schema exists.
 
     Idempotent: repeated calls with the same path return the cached connection.
     Setting ``db_path`` switches the active connection (used by tests).
+
+    债#10 (2026-09-06): busy timeout 显式化 — ``sqlite3.connect`` 缺省 5s,
+    autodream 蒸馏长写事务持锁超时即 ``database is locked`` (09-06 23:1x
+    hook-recall.log 8 例实录, 持有者为合法蒸馏写)。优先级: 显式 ``timeout``
+    参 (测试锁态模拟传小值提速) > env ``MEM_DB_BUSY_TIMEOUT`` (部署面全局调)
+    > 缺省 5 (与旧行为等值)。timeout 只在建连时生效 — 已缓存连接不受影响。
     """
     global _conn, _conn_path
     path = Path(db_path) if db_path else _DEFAULT_DB
     if _conn is not None and _conn_path == str(path):
         return _conn
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), check_same_thread=False,
+    if timeout is None:
+        timeout = float(os.environ.get("MEM_DB_BUSY_TIMEOUT", "5"))
+    conn = sqlite3.connect(str(path), timeout=timeout, check_same_thread=False,
                            isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

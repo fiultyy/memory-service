@@ -344,9 +344,11 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     机制是怎样就怎样修」) 重新划分: 原整管道单事务把写锁从 consolidate 第一
     笔一路持有到全部 LLM 抽取结束 (分钟级) — 09-06 hook-recall.log 8 例
     ``database is locked`` 的霸锁真身。现事务只罩写动作: consolidate 短事务
-    + 入队批事务 + Phase c 按段事务 (deferred BEGIN — 段内网络 I/O 如
-    resolve 嵌入/裁判发生在首写前, 不持写锁); 抽取/embedding 预热全程锁外。
-    失败爆炸半径从整批缩到单段, 幂等 (fact 级 NOOP) 吸收部分完成。
+    + Phase c 按段事务, 且均为 **BEGIN IMMEDIATE** (债#10 e2e 修订
+    2026-09-07: deferred 先读后写在并发提交下 BUSY_SNAPSHOT 即死, 编排席
+    三组对照实录; IMMEDIATE 取锁先于读, 升级竞态机制性不存在, busy timeout
+    生效); 抽取/embedding 预热全程锁外。失败爆炸半径从整批缩到单段,
+    幂等 (fact 级 NOOP) 吸收部分完成。
     实际管道在 :func:`_autodream_inner`。``harness`` (2026-08-28):
     语料标记块清洗表键 (corpus_prep), 缺省 cc (PreCompact spool 即 CC)。
     """
@@ -615,7 +617,7 @@ def _decide_segments(
             print(f"AUTODREAM-WARN: embed_batch 预热失败 (fact value 降级): "
                   f"{type(exc).__name__}: {exc}", flush=True)
     for seg_idx, (seg_provenance, result, seg_text) in enumerate(seg_results):
-        with db.transaction():  # 债#10: 按段事务 — deferred BEGIN: 段内 resolve 嵌入/裁判网络 I/O 在首写前不持写锁, 锁窗口=纯写爆发, 失败爆炸半径=单段。
+        with db.transaction():  # 债#10 e2e 修订: BEGIN IMMEDIATE 取锁先于读 — deferred 升级竞态 (BUSY_SNAPSHOT) 机制性消除; 段锁窗口=段处理时长 (亚秒~秒级, busy timeout 生效), 失败爆炸半径=单段。
             ext_label = result.source_meta.get("extractor_label", "llm")
             # v1.7④ 主径判定: 产物 extractor=='llm' ⇔ 本边由主径 llm 通道触发
             # (regex 通道/fallback:auto 降级链产物均 extractor='regex' — C1a

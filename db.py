@@ -169,22 +169,31 @@ _txn_depth = 0  # 重入防护: 嵌套 transaction() 只最外层 BEGIN/COMMIT
 
 
 @contextmanager
-def transaction():
+def transaction(*, immediate: bool = True):
     """批量写事务 (perf/vec-index: 消逐语句 fsync commit — sub10 profile
     561 次 commit 2.1s)。
 
     连接是 autocommit (isolation_level=None): 无事务时每语句即时落盘
-    (与旧逐写 commit 语义等价); 批量入口 (autodream/init_memory) 包本
-    上下文 — 全批共享一个事务, 收尾一次 commit。嵌套只计深度, 最外层
-    收尾; ``conn.commit()`` 收尾而非 ``execute("COMMIT")`` — 若嵌套代码
-    已提前 commit (活动事务已无), commit() 是 no-op 不炸。异常路径也
-    commit (匹配旧逐语句持久语义 — 已执行语句不回滚)。
+    (与旧逐写 commit 语义等价); 批量入口 (autodream) 包本上下文 — 全批
+    共享一个事务, 收尾一次 commit。嵌套只计深度, 最外层收尾;
+    ``conn.commit()`` 收尾而非 ``execute("COMMIT")`` — 若嵌套代码已提前
+    commit (活动事务已无), commit() 是 no-op 不炸。异常路径也 commit
+    (匹配旧逐语句持久语义 — 已执行语句不回滚)。
+
+    债#10 e2e (2026-09-07): ``immediate=True`` (缺省) 用 **BEGIN IMMEDIATE**
+    — 取写锁先于读。deferred BEGIN 的先读后写升级在并发提交下即
+    SQLITE_BUSY_SNAPSHOT: 快照已落后于 WAL, 同事务内重试不可救, busy
+    timeout 对它不适用 (编排席 e2e 实录: consolidate.decay SELECT 全量
+    ~6.7k 建快照、循环末首写, 窗口内 recall boost 一笔提交即崩)。IMMEDIATE
+    下取锁本身是普通锁等待 — busy_timeout 生效, 等待方退避而非死亡;
+    持锁后读到的必为最新已提交态, 升级竞态在机制上不存在。纯读场景
+    (无写意图) 不应使用本上下文。
     """
     global _txn_depth
     conn = get_conn()
     started = False
     if _txn_depth == 0 and not conn.in_transaction:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         started = True
     _txn_depth += 1
     try:

@@ -103,8 +103,23 @@ sqlite3 data/embeddings.db  "SELECT COUNT(*) FROM embed_cache"
 | `re-ingest <file>` | 单 md → KG 增量(ADR-17) |
 | `synthesis-index [--scope <cwd>] [--memory-dir <dir>] [--session <id>]` | 散 mem-*.md 对账 → MEMORY 投影(ADR-15 P2, 唯一写入口) |
 | `prune [--scope <cwd>] [--memory-dir <dir>]` | 删除 KG 中无对应 memory .md 的孤儿 fact |
-| `embed-backfill` | active fact value → L2 向量 cache |
-| `stats` | 只读 churn 快照(entity/fact 计数 + status 分布) |
 | `dream-daemon [--cwd] [--interval <s>] [--once]` | 常驻 autoDream loop(operational #1) |
+| `dream [--source-cwd <cwd>]` | 跑一轮 dreaming 六职责(M11 消费面; 无 sweep — 进端归 spool-drain/autodream) |
 
 详见 `SKILL.md`(CC `/mem` 用法)+ `docs/mem-service-iteration-log.md`(12 ADR + 完整迭代)。
+
+## 调度(systemd user)
+
+| 单元 | 节奏 | 干什么 |
+|------|------|--------|
+| `memory-spool-drain.timer` | hourly | dsh PreCompact spool 快照排水 → 蒸馏入库(进端唯一自动面) |
+| `memory-dream.timer` | daily | `cli.py dream` 一轮六职责(记忆新陈代谢: recall_hits 重放/晋升/decay/降档/回流/队列) |
+
+单元正本在 `deploy/systemd-user/`, 安装:
+
+```bash
+cp deploy/systemd-user/memory-dream.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now memory-dream.timer
+```
+
+dream 语义幂等(水位文件 + fact 级 NOOP), Persistent 补跑/重复跑无害; 手动单跑: `systemctl --user start memory-dream.service`。

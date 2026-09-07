@@ -851,6 +851,10 @@ def _main(argv: list[str] | None = None) -> int:
                     help="poll interval seconds(默认 30)")
     dd.add_argument("--once", action="store_true",
                     help="single sweep, no loop(smoke test / cron mode)")
+    dr = sub.add_parser("dream",
+                        help="跑一轮 dreaming 六职责 (M11 消费面: recall_hits 重放/晋升/decay/降档/回流抑制/队列; 不做 transcript sweep — 进端归 spool-drain/autodream)")
+    dr.add_argument("--source-cwd", default=None,
+                    help="① 信号消费域过滤 (缺省 None=不过滤全消费)")
 
     # ── M20 KG 实时图浏览 (graphlive: inotify+SSE, 无轮询) ──
     ge = sub.add_parser("graph-export",
@@ -931,6 +935,13 @@ def _main(argv: list[str] | None = None) -> int:
     elif args.cmd == "dream-daemon":
         # daemon runs its own loop (blocking); returns exit code, not JSON.
         return dream_daemon(cwd=args.cwd, interval=args.interval, once=args.once)
+    elif args.cmd == "dream":
+        # M11 消费面单入口 (systemd timer 用, 方案 B): 一轮六职责, JSON 计数。
+        import dream as dream_mod
+        print(json.dumps(
+            dream_mod.run_cycle(source_cwd=args.source_cwd),
+            ensure_ascii=False,
+        ))
     elif args.cmd == "graph-export":
         import graphlive
         if not args.as_json and not args.csv_dir:

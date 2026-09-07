@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily dreaming cycle for memory-service KG (M11 consumption)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=600
+Unit=memory-dream.service
+
+[Install]
+WantedBy=timers.target

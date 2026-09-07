@@ -197,7 +197,7 @@ KG 是增量演化的:写入 → 召回验证 → dreaming 日频整合(晋升/�
 | "当时我以为什么"(历史状态) | `--as-of <ISO ts>`(bi-temporal 点时召回) |
 | agent/脚本程序化消费 | `--json`(稳定契约,字段名即 ABI) |
 
-**env 语义**: `MEM_DELAYED_REINFORCE=1` 时 recall 是**纯读**(不即时写回强化),命中记入 `data/signals/recall_hits` 流,由 dreaming 日频批量补回 LIF——对调用方透明,输出 shape 不变;缺省(0/未设)为旧行为即时写回。
+**env 语义**: 缺省(env 未设,2026-09-07 翻转)recall 即**纯读改道**——不即时写回强化,命中记入 `data/signals/recall_hits` 流,由 dreaming(memory-dream.timer 日频)批量补回 LIF——对调用方透明,输出 shape 不变;显式 `MEM_DELAYED_REINFORCE=0` 退回旧即时写回(锁敏感的写侧场景用)。
 
 ## 复述禁令(输出纪律)
 
@@ -218,7 +218,7 @@ KG 是增量演化的:写入 → 召回验证 → dreaming 日频整合(晋升/�
 
 - **占位-升级时序(M6/M7/M4/M9)**: autodream 主径用 **gazetteer 占位提取器**(KG 词典+regex 三路,零 LLM inline,`extractor='regex'` 0.4 档即时入库,provider 断供不中断写入);wings LLM 退役为**异步升级**——待升级素材入 `upgrade_queue` 表按惊喜度排队,dreaming 日频消费。ingest 子命令仍走 wings 直连。
 - **块文法提取(M8)**: transcript 按 (block_type, text) 序列读取,tool_use/tool_result 不再丢弃;fact 继承源块 `provenance`(user_prose/tool_obs/agent_assert/human/system),`veracity` 随出处自动映射(user_prose 1.0 / tool_obs·human 0.9 / agent_assert·system 0.5)。
-- **延迟强化(M5/M10)**: `MEM_DELAYED_REINFORCE=1` 时 recall 纯读+信号落盘(`data/signals/*.jsonl` 五流 append-only),LIF 重算移入 dreaming 批量补回;缺省旧行为不变。
+- **延迟强化(M5/M10)**: 缺省(2026-09-07 翻转,env 未设即生效)recall 纯读+信号落盘(`data/signals/*.jsonl` 五流 append-only),LIF 重算移入 dreaming 批量补回——recall 读写分离,读路径零 DB 写;显式 `MEM_DELAYED_REINFORCE=0` 退回即时写回。
 - **dreaming 期(M11)**: `dream-daemon` 主循环日频(86400s 可调)跑 `dream.run_cycle()` 六职责——信号重放 LIF 补回 / fact_type 晋升降级 / D9 参数提案(只落 diff 供人审) / 复述回流压档 / 自述污染降档 / 队列 wings 升级(`supersede_reason='upgrade'`)。
 - **投影卫生(M12)**: 卫生轮(3600s 可调)succeeded dreaming 同轮或独立跑:superseded/deprecated 投影退场、MEMORY [mem] 段按现值重排(零 LLM)。
 - **源不变式**: 提取/升级数据源 = transcript 原文/队列素材,永不读自家 KG 作提取输入。

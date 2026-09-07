@@ -123,3 +123,5 @@ systemctl --user daemon-reload && systemctl --user enable --now memory-dream.tim
 ```
 
 dream 语义幂等(水位文件 + fact 级 NOOP), Persistent 补跑/重复跑无害; 手动单跑: `systemctl --user start memory-dream.service`。
+
+recall 强化缺省(2026-09-07 起)即为**延迟改道**: recall 纯读, 命中记 `data/signals/recall_hits`, 由上表 dream 轮批量补回 LIF。显式 `MEM_DELAYED_REINFORCE=0` 可退回即时写回(锁敏感场景)。

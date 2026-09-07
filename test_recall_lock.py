@@ -6,9 +6,13 @@
 test_autodream_txn_scope)。真锁死 = 机制异常 → OperationalError 响亮
 上抛, 绝不静默丢 LIF 强化写。
 
-本文件锁定两个机制契约:
-1. 无锁: boost 写回照常 (加固不伤默认路径)。
-2. 锁死超时: 响亮上抛 (timeout 参/env 真实生效), 不吞不降。
+本文件锁定三个机制契约 (2026-09-07 MEM_DELAYED_REINFORCE 缺省翻转后):
+1. 即时路径 (显式 env=0, _setup 统一 pin): 无锁 boost 写回照常; 锁死超
+   busy timeout → OperationalError 响亮上抛, 不吞不降。
+2. 改道缺省 (env 缺省=1): boost 零 DB 写 → 锁态下 recall 天然无争用,
+   命中记 recall_hits 信号, 由 dream 批量补回 — 锁伤害永不及调用方。
+3. 锁等待机制本体: db.transaction() BEGIN IMMEDIATE + MEM_DB_BUSY_TIMEOUT
+   显式化 (见 test_db_txn_immediate / test_autodream_txn_scope)。
 
 测试规范: def test_xxx() 供 pytest 收集; tmp_path db 全隔离 (绝不碰
 data/memory.db); 锁 = 第二条裸连接 BEGIN IMMEDIATE + 真实写 (WAL 写锁)。
@@ -17,13 +21,19 @@ import sqlite3
 
 import db
 import recall as recall_mod
+import signals as signals_mod
 import store
 import pytest
 
 
 def _setup(tmp_path, name, monkeypatch, busy="0.1"):
-    """复位连接缓存 + tmp db + env 小 timeout (测试毫秒级)。"""
+    """复位连接缓存 + tmp db + env 小 timeout (测试毫秒级)。
+
+    MEM_DELAYED_REINFORCE 统一 pin "0" (即时写回路径): 本文件契约针对
+    boost 写机制本体; 改道缺省行为由专项测试覆盖 (见文末)。
+    """
     monkeypatch.setenv("MEM_DB_BUSY_TIMEOUT", busy)
+    monkeypatch.setenv("MEM_DELAYED_REINFORCE", "0")
     db._conn = None  # 前序测试/套件可能缓存了别的连接
     db._conn_path = None
     db.init(tmp_path / name)
@@ -79,3 +89,26 @@ def test_recall_stuck_lock_raises_loudly(tmp_path, monkeypatch):
     res = recall_mod.recall("rust", session_id="s1")
     assert any(f["id"] == fid for f in res)
     assert store.get_fact(fid)["access_count"] == 1
+
+
+def test_delayed_default_under_lock_zero_db_write(tmp_path, monkeypatch):
+    """改道缺省 (env=1) 锁态: recall 零 DB 写 → 无锁可争不 raise, 命中
+    记 recall_hits 信号待 dream 补回 — 锁伤害永不及调用方 (M10 存在意义)。"""
+    sig_dir = tmp_path / "sig"
+    orig_dir = signals_mod._signals_dir
+    signals_mod._signals_dir = lambda: sig_dir
+    db_path = tmp_path / "lockd.db"
+    _setup(tmp_path, "lockd.db", monkeypatch)
+    monkeypatch.setenv("MEM_DELAYED_REINFORCE", "1")  # 改道缺省 (盖过 _setup pin)
+    fid = _seed_fact()
+    holder = _hold_write_lock(db_path)
+    try:
+        res = recall_mod.recall("rust", session_id="s1")  # 不得 raise
+    finally:
+        holder.rollback()
+        holder.close()
+        signals_mod._signals_dir = orig_dir
+    assert any(f["id"] == fid for f in res)
+    assert store.get_fact(fid)["access_count"] == 0, "改道模式锁态零 DB 写"
+    lines = (sig_dir / "recall_hits.jsonl").read_text().splitlines()
+    assert any(fid in l for l in lines if l.strip()), "命中应记入信号流待补回"

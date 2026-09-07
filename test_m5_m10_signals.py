@@ -139,32 +139,29 @@ def test_read_missing_stream_empty():
         restore()
 
 
-# ── 验收 2: M10 env=0 — 既有行为零变化 ───────────────────────────────
+# ── 验收 2: M10 缺省(2026-09-07 翻转) = 改道; 显式 env=0 = 即时写回 ──
 
-def _env_off():
-    os.environ.pop("MEM_DELAYED_REINFORCE", None)
-
-
-def test_env_absent_writeback_happens():
-    """缺省 (env 未设): ADR-8v2 即时写回发生 — access_count 1, last_accessed_at
-    落值, seen_sessions 吸收 session; 信号流零记录 (旧行为路径不变)。"""
+def test_env_absent_delayed_is_default():
+    """缺省 (env 未设, 2026-09-07 用户裁决翻转): 改道生效 — 零即时写回,
+    命中记入 recall_hits 信号流 (消费端 memory-dream.timer daily 已上岗)。"""
     tmp, sig = _fresh()
     fid = _seed_fact()
     restore = _patch_signals_dir(sig)
-    _env_off()
+    os.environ.pop("MEM_DELAYED_REINFORCE", None)  # 真缺席 = 测缺省
     try:
         recall_mod.recall("rust", session_id="s1")
     finally:
         restore()
     f = store.get_fact(fid)
-    assert f["access_count"] == 1, f"写回应发生, got access_count={f['access_count']}"
-    assert f["last_accessed_at"] is not None
-    assert "s1" in f["seen_sessions"]
-    assert _recall_hits_rows_isolated(sig) == [], "env 缺省不得写信号流"
+    assert f["access_count"] == 0, (
+        f"缺省改道零写回, got access_count={f['access_count']}")
+    rows = _recall_hits_rows_isolated(sig)
+    assert len(rows) == 1 and rows[0]["fact_id"] == fid, (
+        f"缺省改道应记信号 1 条, got {rows}")
 
 
 def test_env_zero_writeback_happens():
-    """显式 env=0: 同缺省 — 写回发生零信号。"""
+    """显式 env=0: 退回即时写回 — 写回发生零信号。"""
     tmp, sig = _fresh()
     fid = _seed_fact()
     restore = _patch_signals_dir(sig)
@@ -261,8 +258,8 @@ def test_roundtrip_and_revert():
     assert {r["fact_id"] for r in rows} == hits
     assert all(store.get_fact(fid)["access_count"] == 0 for fid in (f1, f2))
 
-    # 回退: env 切回 0 → 写回恢复 + 信号零新增。
-    os.environ.pop("MEM_DELAYED_REINFORCE", None)
+    # 回退: env 显式切 0 → 写回恢复 + 信号零新增。
+    os.environ["MEM_DELAYED_REINFORCE"] = "0"
     try:
         recall_mod.recall("rust", session_id="s1", top_k=2)
     finally:

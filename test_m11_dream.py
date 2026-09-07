@@ -77,10 +77,11 @@ def test_lif_replay_equivalent_to_immediate_writeback():
     restore_a = _patch_signals(sig_a)
     try:
         fid_a = _seed_fact("rust")
-        os.environ.pop("MEM_DELAYED_REINFORCE", None)
+        os.environ["MEM_DELAYED_REINFORCE"] = "0"  # 即时写回须显式 (缺省已翻转=改道)
         recall_mod.recall("rust", session_id="s1", top_k=5)
         fa = store.get_fact(fid_a)
     finally:
+        os.environ.pop("MEM_DELAYED_REINFORCE", None)
         restore_a()
     # B 库: 改道路径 + dreaming 批量补回。
     tmp_b, sig_b = _fresh("envB")

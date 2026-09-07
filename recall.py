@@ -515,14 +515,16 @@ def recall(
     # UPDATEs, k typically ≤ top_k. Idempotent within a wall clock — refresh
     # recomputes from stored state, no compounding drift (cf. scoring contract).
     #
-    # M10 (DR-1 D3 / DR-7 G7 已裁决): env 灰度 MEM_DELAYED_REINFORCE=1 时强化
-    # 改道 — 即时写回关闭 (等效 boost=False 纯读, recall 读路径无写争用),
-    # 每命中 fact 追加一条 recall_hits 信号 (M5 流, LIF 重算移入 dreaming 批量
-    # 消费 M11)。缺省/0 = 旧行为零变化 (即时 boost 路径原样)。显式
-    # boost=False 仍纯读零信号 (调用方已自弃强化, 无可改道事件)。
-    # refresh_lif_on_recall 函数保留不删 (spec M10 明示); CLI recall 子命令
-    # 同语义透传 (env 控制全局, 不加新 flag)。
-    delayed = os.environ.get("MEM_DELAYED_REINFORCE", "") == "1"
+    # M10 (DR-1 D3 / DR-7 G7 已裁决): 强化改道 — 即时写回关闭 (等效 boost=False
+    # 纯读, recall 读路径无写争用), 每命中 fact 追加一条 recall_hits 信号
+    # (M5 流, LIF 重算移入 dreaming 批量消费 M11)。2026-09-07 用户裁决启用为
+    # **缺省**: 消费端已上岗 (memory-dream.timer daily; E9/C2 受限刷双口已补
+    # — fallback/未解锁 fact replay 仅记账不提权), 改道成为常态;
+    # ``MEM_DELAYED_REINFORCE=0`` 显式退回即时写回。显式 boost=False 仍纯读
+    # 零信号 (调用方已自弃强化, 无可改道事件)。refresh_lif_on_recall 函数
+    # 保留不删 (spec M10 明示); CLI recall 子命令同语义透传 (env 控制全局,
+    # 不加新 flag)。
+    delayed = os.environ.get("MEM_DELAYED_REINFORCE", "1") != "0"
     if boost and scored and delayed:
         for s in scored:
             signals.append("recall_hits", {

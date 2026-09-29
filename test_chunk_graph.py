@@ -98,7 +98,7 @@ def test_aggregate_batch_none_returns_none(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(chunk_graph, "_filter_units", lambda units: units)
     laya_client.laya_batch.answers = lambda s, q: None
-    assert chunk_graph.aggregate_chunks(["甲。"]) is None
+    assert chunk_graph.aggregate_chunks(["甲。", "乙。"]) is None
 
 
 def test_aggregate_laya_down_returns_none(tmp_path, monkeypatch):

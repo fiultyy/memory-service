@@ -59,6 +59,8 @@ def _filter_units(units: list[str]) -> list[str] | None:
         a = laya_client.laya_batch(u, {f"flt_{i}": {"type": "noul", "instructions":
                           "Does this sentence carry a complete standalone "
                           "conclusion worth remembering?"}})
+        if a is None:  # 整批 None (laya 抖动) → 组级降级, 与 _cluster_units 同口径
+            return None
         ans = _answer_dict(a, f"flt_{i}")
         # 守卫不过(缺 noul/非数值) → 保留 (保守, 与 T3 畸形段不过滤一致)
         if not (isinstance(ans.get("noul"), (int, float))
@@ -71,6 +73,8 @@ def _cluster_units(units: list[str]) -> list[list[str]] | None:
     """聚合批: state = 全部候选句逐行; 每句 1 个 choice (criteria=其余每句
     "semantically belongs with unit X"); choice 命中即 union。整批 None → None。"""
     lines = "\n".join(f"[{i}] {u}" for i, u in enumerate(units))
+    if len(units) == 1:  # 单元素 criteria={} 会被 laya 拒 → 短路自聚 (G2 534 降级组根因)
+        return [units]
     questions = {}
     for i in range(len(units)):
         questions[f"agg_{i}"] = {

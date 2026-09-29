@@ -73,6 +73,13 @@ def _encode_cwd(cwd: str) -> str:
     return cwd.replace("/", "-").replace(".", "-")
 
 
+def _dream_providers() -> list:
+    """T2 laya: daemon 路径判官注入, 与 cli.autodream 同构 (_laya_judge_prefix)。
+    局部 import — cli 顶层跑 _load_env 且拉全量模块, daemon 启动不吃该副作用。"""
+    from cli import _laya_judge_prefix
+    return _laya_judge_prefix([])
+
+
 def _log(msg: str) -> None:
     """stderr log with timestamp (stdout reserved for machine-readable output)."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -146,6 +153,7 @@ def _sweep(tdir: Path, cwd: str, state: dict) -> dict:
         rec = state.get(key, {})
         offset = rec.get("offset", 0)
         # session_id = filename stem (CC convention: <session-uuid>.jsonl).
+        session_id = jf.stem
         new_text, new_offset = _extract_new_lines(jf, offset)
         growth = new_offset - offset
         if growth < GROWTH_THRESHOLD:
@@ -171,7 +179,8 @@ def _sweep(tdir: Path, cwd: str, state: dict) -> dict:
                 tmp.write(new_text)
                 tmp_path = tmp.name
             result = autodream_mod.autodream(
-                session_id, tmp_path, source_cwd=cwd)
+                session_id, tmp_path, source_cwd=cwd,
+                providers=_dream_providers())
             _log(
                 f"dream {jf.name} +{growth}B → "
                 f"add={result['added']} upd={result['updated']} "
@@ -216,7 +225,8 @@ def _check_trigger(state: dict, cwd: str) -> dict:
     tcwd = trig.get("cwd", cwd)
     if tpath and Path(tpath).is_file():
         try:
-            result = autodream_mod.autodream(sid, tpath, source_cwd=tcwd)
+            result = autodream_mod.autodream(
+                sid, tpath, source_cwd=tcwd, providers=_dream_providers())
             _log(
                 f"trigger dream {Path(tpath).name} → "
                 f"add={result['added']} upd={result['updated']} "

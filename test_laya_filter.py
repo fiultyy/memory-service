@@ -37,7 +37,7 @@ def _setup(tmp_path, monkeypatch, answers):
 
     def fake_batch(state, questions, timeout=30.0):
         calls["laya"] += 1
-        calls["state"] = state
+        calls.setdefault("states", []).append(state)
         calls["questions"] = questions
         return answers
     monkeypatch.setattr(laya_client, "laya_batch", fake_batch)
@@ -65,20 +65,20 @@ def test_low_score_segments_skip_llm(tmp_path, monkeypatch):
                    {"seg_0": {"noul": 0.0}, "seg_1": {"noul": 0.9},
                     "seg_2": {"noul": 0.4}})
     _decide()
-    assert calls["laya"] == 1, "全段应恰一次批量 laya_batch"
+    assert calls["laya"] == len(SEGS), "逐段单问: 每段恰一次 laya_batch"
     assert calls["llm"] == [SEGS[1], SEGS[2]], "低分段 seg_0 不得进 LLM 提取"
     assert calls["gaz"] == [SEGS[0]], "低分段走 gazetteer 保底"
-    # state 含全部段文本; 每段恰 1 个 noul question
-    assert all(t in calls["state"] for t in SEGS)
-    assert set(calls["questions"]) == {"seg_0", "seg_1", "seg_2"}
-    assert all(q["type"] == "noul" for q in calls["questions"].values())
+    # 每次调用 state 只含该段文本(整批共享 state 会洗掉 noul 区分度)
+    assert len(calls["states"]) == len(SEGS)
+    assert sum(SEGS[i] in calls["states"][i] for i in range(len(SEGS))) == len(SEGS)
+    assert "seg_" in str(calls["questions"])
 
 
 def test_threshold_boundary_filters_below_040(tmp_path, monkeypatch):
-    """noul 恰 <0.4 过滤、>=0.4 不过滤; 缺 noul 键的畸形段不过滤 (保守)。"""
+    """noul 恰 <0.25 过滤、>=0.25 不过滤; 缺 noul 键的畸形段不过滤 (保守)。"""
     monkeypatch.setenv("MEM_LAYA_FILTER", "1")
     calls = _setup(tmp_path, monkeypatch,
-                   {"seg_0": {"noul": 0.39}, "seg_1": {"noul": 0.4},
+                   {"seg_0": {"noul": 0.24}, "seg_1": {"noul": 0.25},
                     "seg_2": {}})  # seg_2 answer 畸形 → 不过滤
     _decide()
     assert calls["llm"] == [SEGS[1], SEGS[2]]
@@ -90,7 +90,7 @@ def test_batch_none_no_filter(tmp_path, monkeypatch):
     monkeypatch.setenv("MEM_LAYA_FILTER", "1")
     calls = _setup(tmp_path, monkeypatch, None)
     _decide()
-    assert calls["laya"] == 1
+    assert calls["laya"] == len(SEGS)
     assert calls["llm"] == SEGS
     assert calls["gaz"] == []
 

@@ -496,30 +496,35 @@ def _decide_segments(
     seg_results: list[tuple[str, Any, str]] = []  # (prov, result, seg_text D-B b)
     seg_to_enqueue: list[tuple[int, str, Any]] = []
     seg_degraded: set[int] = set()  # fallback:auto 下已降级 regex 兜底链的段
-    # T3/E1 提取前过滤 (spec §三): MEM_LAYA_FILTER=1 且 laya 在线 → 全段一次
-    # laya_batch (每段 1 noul "contains extractable facts?"), noul<0.4 的噪声段
-    # 跳过 LLM 抽取、gazetteer 保底照跑 (召回 100%)。整批 None/异常 → 全不过滤
-    # (行为与开关关逐位一致)。regex 档无 LLM 调用可省 → 不触发零意义网络。
+    # T3/E1 提取前过滤 (spec §三): MEM_LAYA_FILTER=1 且 laya 在线 → 逐段
+    # 1 noul "contains extractable facts?", noul<0.4 的噪声段跳过 LLM 抽取、
+    # gazetteer 保底照跑 (召回 100%)。任一段 None/异常 → 该段不过滤 (保守)。
+    # regex 档无 LLM 调用可省 → 不触发零意义网络。
+    # ponytail: 逐段单问而非整批共享 state——实测(2026-09-29, temp/
+    # eval_filter_rate.py)整批 state 下 noul 退化为 state 级常数(噪声段也
+    # ≈0.97, 过滤率≈0); 带任务头的单段 state 有真区分度(noise 0.0/signal
+    # 0.57)。逐段 ≈50ms×N, daily 非交互窗口可承受; 若 laya 支持逐问题
+    # 独立打分再回批。
     laya_skip: set[int] = set()
+    # 0.4(票面, 整批语义) → 0.25: 逐段口径实测校准 (noise 恒 0.00 / signal
+    # 0.29-0.80, 0.4 会把浮动到 0.35 的信号段误滤)
+    _laya_filter_thresh = 0.25
     if seg_list and not use_regex_channel and \
             os.environ.get("MEM_LAYA_FILTER", "0") == "1":
         try:
             from laya_client import laya_available, laya_batch
             if laya_available():
-                state = "\n".join(
-                    f"[seg {i}] {t}" for i, (_, t) in enumerate(seg_list))
-                questions = {
-                    f"seg_{i}": {"type": "noul", "instructions":
-                                 f"Does [seg {i}] contain extractable facts?"}
-                    for i in range(len(seg_list))}
-                answers = laya_batch(state, questions)
-                if answers is not None:
-                    laya_skip = {
-                        i for i in range(len(seg_list))
-                        if isinstance(answers.get(f"seg_{i}"), dict)
-                        and isinstance(answers[f"seg_{i}"].get("noul"),
-                                       (int, float))
-                        and answers[f"seg_{i}"]["noul"] < 0.4}
+                for i, (_, seg_t) in enumerate(seg_list):
+                    a = laya_batch(
+                        f"以下是待评估的会话片段:\n[{i}] {seg_t}",
+                        {f"seg_{i}": {"type": "noul", "instructions":
+                                      "Does the segment contain extractable "
+                                      "facts?"}})
+                    ans = (a or {}).get(f"seg_{i}")
+                    if isinstance(ans, dict) \
+                            and isinstance(ans.get("noul"), (int, float)) \
+                            and ans["noul"] < _laya_filter_thresh:
+                        laya_skip.add(i)
         except Exception:
             laya_skip = set()  # 保守: 过滤面任何异常 = 不过滤
     for seg_idx, (seg_prov, seg_text) in enumerate(seg_list):

@@ -24,6 +24,7 @@ import json
 import os
 from typing import Any
 
+import laya_client
 import scoring
 from llm_extract import (
     SchemaViolation,
@@ -254,5 +255,47 @@ def run_gate(
     raise GateFailed(f"gate schema 校验两轮失败: {last_err}")
 
 
+def run_gate_laya(
+    cand_texts: dict[str, str],
+    query: str,
+    anchors: set[str],
+) -> dict[str, dict[str, Any]] | None:
+    """Laya 批量版 gate (T1, temp/laya-batch-request-design.md §2.1)。
+
+    每候选 1 个 score question 双产出口: P(high) ≥ 0.35 → keep, 期望值/2 →
+    match_score。matched_anchor 程序化补回 (grill B3): anchors 子串匹配候选
+    文本 (大小写不敏感); keep 但锚不上 → keep=False (高分布上锚不上 = 判定
+    无效, 与 v1.7③ 硬约束同语义)。
+
+    Returns:
+        ``{fact_id: {"keep", "match_score", "matched_anchor"}}`` (answers 侧);
+        laya_batch 整批失败 → None (调用方回落原 :func:`run_gate`)。
+    """
+    if not cand_texts:
+        return {}
+    state = f"Query: {query}\n" + "\n".join(
+        f"[{fid}] {text}" for fid, text in cand_texts.items())
+    questions = {
+        fid: {"type": "score",
+              "instructions": f"Relevance of [{fid}] to the query?",
+              "criteria": ["low", "medium", "high"]}
+        for fid in cand_texts
+    }
+    answers = laya_client.laya_batch(state, questions)
+    if answers is None:
+        return None
+    verdicts: dict[str, dict[str, Any]] = {}
+    for fid, a in answers.items():
+        text = (cand_texts.get(fid) or "").lower()
+        matched = next(
+            (x for x in anchors if x and x.lower() in text), None)
+        verdicts[fid] = {
+            "keep": a["probabilities"]["2"] >= 0.35 and matched is not None,
+            "match_score": laya_client.norm_score(a, 3),
+            "matched_anchor": matched or "",
+        }
+    return verdicts
+
+
 __all__ = ["GateFailed", "GATE_TIMEOUT_SECONDS", "build_request",
-           "derive_keywords", "run_gate", "validate"]
+           "derive_keywords", "run_gate", "run_gate_laya", "validate"]

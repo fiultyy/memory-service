@@ -21,6 +21,7 @@ centrality/lif/score) as a debug surface in lieu of a dedicated ``query`` cli.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from typing import Any
 import db
 import embedding
 import gate
+import laya_client
 import networkx as nx
 import projection
 import scoring
@@ -473,14 +475,42 @@ def recall(
                 ).strip()
         try:
             # F1 c) scope 按调用面显式: gate_scope 显式传参优先 (新面预留);
-            # 缺省按 gate_account 映射调用面 — True(注入首轮档)→"recall" /
-            # False(手动面)→"manual"。scope 只是面标签, 与入账开关语义独立。
-            verdicts = gate.run_gate(
-                cand_texts, query,
-                provider=gate_provider,
-                scope=(gate_scope if gate_scope is not None
-                       else ("manual" if not gate_account else "recall")),
-            )
+            # T1 laya 批量 lane (MEM_LAYA_ENABLED=0 → laya_available() False,
+            # 零改动回落原路径): 可用 → run_gate_laya 单次批判; 整批 None →
+            # 回落原 gate.run_gate。verdicts 消费/入账零改动。
+            verdicts = None
+            if laya_client.laya_available():
+                # anchors = A 路命中 fact 的 subject name+alias 集合(现场收集)
+                a_sids = {s["fact"].get("subject_id") for s in scored
+                          if s["fact"]["id"] not in b_wing_ids
+                          and s["fact"].get("subject_id")}
+                anchors: set[str] = set()
+                if a_sids:
+                    ph = ",".join("?" * len(a_sids))
+                    for name, aliases_j in conn.execute(
+                        f"SELECT name, aliases FROM entity WHERE id IN ({ph})",
+                        tuple(a_sids),
+                    ):
+                        if name:
+                            anchors.add(name)
+                        try:  # review M2: aliases 脏值跳行, 不杀整批
+                            anchors.update(
+                                a for a in json.loads(aliases_j or "[]") if a)
+                        except (ValueError, TypeError):
+                            pass
+                # review L2: anchors 空(A 路无 subject) → 锚判据退化,
+                # 回落原 run_gate 而非 B 翼全弃
+                if anchors:
+                    verdicts = gate.run_gate_laya(cand_texts, query, anchors)
+            if verdicts is None:
+                # 缺省按 gate_account 映射调用面 — True(注入首轮档)→"recall" /
+                # False(手动面)→"manual"。scope 只是面标签, 与入账开关语义独立。
+                verdicts = gate.run_gate(
+                    cand_texts, query,
+                    provider=gate_provider,
+                    scope=(gate_scope if gate_scope is not None
+                           else ("manual" if not gate_account else "recall")),
+                )
         except Exception:  # noqa: BLE001 — gate 任何失败 ≡ 不可用, 契约只要求 A 路
             verdicts = None
         if verdicts is None:

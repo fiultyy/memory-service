@@ -54,6 +54,7 @@ Returns ``{"added", "updated", "deleted", "noop"}``.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -495,8 +496,37 @@ def _decide_segments(
     seg_results: list[tuple[str, Any, str]] = []  # (prov, result, seg_text D-B b)
     seg_to_enqueue: list[tuple[int, str, Any]] = []
     seg_degraded: set[int] = set()  # fallback:auto 下已降级 regex 兜底链的段
+    # T3/E1 提取前过滤 (spec §三): MEM_LAYA_FILTER=1 且 laya 在线 → 全段一次
+    # laya_batch (每段 1 noul "contains extractable facts?"), noul<0.4 的噪声段
+    # 跳过 LLM 抽取、gazetteer 保底照跑 (召回 100%)。整批 None/异常 → 全不过滤
+    # (行为与开关关逐位一致)。regex 档无 LLM 调用可省 → 不触发零意义网络。
+    laya_skip: set[int] = set()
+    if seg_list and not use_regex_channel and \
+            os.environ.get("MEM_LAYA_FILTER", "0") == "1":
+        try:
+            from laya_client import laya_available, laya_batch
+            if laya_available():
+                state = "\n".join(
+                    f"[seg {i}] {t}" for i, (_, t) in enumerate(seg_list))
+                questions = {
+                    f"seg_{i}": {"type": "noul", "instructions":
+                                 f"Does [seg {i}] contain extractable facts?"}
+                    for i in range(len(seg_list))}
+                answers = laya_batch(state, questions)
+                if answers is not None:
+                    laya_skip = {
+                        i for i in range(len(seg_list))
+                        if isinstance(answers.get(f"seg_{i}"), dict)
+                        and isinstance(answers[f"seg_{i}"].get("noul"),
+                                       (int, float))
+                        and answers[f"seg_{i}"]["noul"] < 0.4}
+        except Exception:
+            laya_skip = set()  # 保守: 过滤面任何异常 = 不过滤
     for seg_idx, (seg_prov, seg_text) in enumerate(seg_list):
-        if use_regex_channel:
+        if use_regex_channel or seg_idx in laya_skip:
+            # ponytail/review L3: laya_skip 段走 gaz 保底但 regex_lane=False,
+            # 不享受 C 层 semantic_fallback —— 有意为之(噪声段不再烧兜底),
+            # 若实测漏召回再对齐 seg_degraded 语义
             result = gazetteer.extract(seg_text)
         else:
             try:

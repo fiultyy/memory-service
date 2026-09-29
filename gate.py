@@ -286,6 +286,14 @@ def run_gate_laya(
         return None
     verdicts: dict[str, dict[str, Any]] = {}
     for fid, a in answers.items():
+        # 形态守卫(对抗全测确认项): score 型 answer 必含数值 score 与
+        # probabilities["2"]; 单条畸形 → 整批 None(回落 run_gate),
+        # 与 laya_batch 整批失败语义一致, 不静默降级 B 翼
+        if not isinstance(a, dict) \
+                or not isinstance(a.get("score"), (int, float)) \
+                or not isinstance(a.get("probabilities"), dict) \
+                or not isinstance(a["probabilities"].get("2"), (int, float)):
+            return None
         text = (cand_texts.get(fid) or "").lower()
         matched = next(
             (x for x in anchors if x and x.lower() in text), None)

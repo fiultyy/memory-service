@@ -197,3 +197,19 @@ def test_env_off_original_path_untouched(monkeypatch):
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_malformed_answer_whole_batch_none(monkeypatch):
+    """对抗全测确认项: 单条畸形 answer(缺 probabilities/score 非 数值) → 整批 None
+    → 调用方回落原 run_gate, 不静默 B 翼全弃。"""
+    monkeypatch.setenv("MEM_LAYA_ENABLED", "1")
+    import laya_client as lc
+    monkeypatch.setattr(
+        lc, "laya_batch",
+        lambda s, q, timeout=30.0: {"f0": {"score": 2.0,
+                                           "probabilities": {"2": 0.9}},
+                                    "f1": {"noul": 0.9}})  # f1 畸形
+    import gate
+    v = gate.run_gate_laya({"f0": "alpha uses beta", "f1": "gamma"},
+                           "query", {"alpha"})
+    assert v is None

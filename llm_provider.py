@@ -564,7 +564,13 @@ class LayaJudgeProvider:
     Laya 不可用 / laya_batch 整批 None → 委托 ``fallback.judge_contradiction``
     原样透传; fallback 缺位或也抛 → ``ProviderCallError`` (外层 autodream
     ``_judge_contradiction`` 既有 except → False, 不阻断 ingest)。
-    extract_facts/dedupe_entity 透传 fallback (T5 才补 Laya 版 dedupe)。
+    dedupe_entity (laya T5): 1 个 choice question (每候选 1 criteria),
+    ``choice`` 命中候选且 ``confidence >= 0.5`` → ``{"duplicate_id": id}``;
+    低置信 → ``{"duplicate_id": None}`` (裁判已判, 不走 fallback)。Laya 不可用
+    / 批 None / answer 形态不符 → 委托 ``fallback.dedupe_entity`` 原样透传
+    (含 context); fallback 缺位或也抛 → ``ProviderCallError`` (resolver step2
+    既有 except → dup=None → step3 新建, 不阻断)。
+    extract_facts 仍透传 fallback (Laya 只做裁判, 不做抽取)。
     """
     fallback: LLMProvider | None = None
 
@@ -580,10 +586,36 @@ class LayaJudgeProvider:
 
     def dedupe_entity(self, new_name: str, new_type: str,
                       candidates: list, context: str | None = None) -> dict:
-        if self.fallback is None:
-            raise ProviderCallError("laya: judge-only provider, no fallback")
-        return self.fallback.dedupe_entity(new_name, new_type, candidates,
-                                           context=context)
+        from laya_client import laya_available, laya_batch
+        if laya_available():
+            # state 必带 context 原文片段: 裸名实测 confidence 0.06 必不过阈
+            # (grill A2) — 名字族相关性 ≠ 同一性, 关系句是非同一性铁证。
+            cand_lines = "\n".join(
+                f"[{c['id']}] name={c['name']} type={c['type']} "
+                f"score={c.get('score')}" for c in candidates)
+            state = (f"new entity: name={new_name} type={new_type}\n"
+                     f"context: {(context or '').strip() or '(none)'}\n"
+                     f"candidates:\n{cand_lines}")
+            # criteria key = 候选 id → choice 直接即 duplicate_id。
+            questions = {"dedupe": {
+                "type": "choice",
+                "instructions": ("Which candidate is the same real-world "
+                                 "entity as the new entity?"),
+                "criteria": {c["id"]: f"canonical entity: {c['name']} "
+                                      f"({c['type']})" for c in candidates}}}
+            answers = laya_batch(state, questions)
+            ans = (answers or {}).get("dedupe")
+            if isinstance(ans, dict) and isinstance(ans.get("choice"), str) \
+                    and isinstance(ans.get("confidence"), (int, float)):
+                # 幻觉 id guard: choice 必须在候选集内 (resolver 也有一层)。
+                if ans["confidence"] >= 0.5 and \
+                        ans["choice"] in {c["id"] for c in candidates}:
+                    return {"duplicate_id": ans["choice"]}
+                return {"duplicate_id": None}  # 裁判已判: 低置信/幻觉 → 不合并
+        if self.fallback is not None:
+            return self.fallback.dedupe_entity(new_name, new_type, candidates,
+                                               context=context)
+        raise ProviderCallError("laya dedupe unavailable and no fallback")
 
     def judge_contradiction(self, subject_type: str, subject_name: str,
                             predicate: str, new_value: str,

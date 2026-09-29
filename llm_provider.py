@@ -556,6 +556,57 @@ class ClaudeAPIProvider:
 
 
 @dataclass
+class LayaJudgeProvider:
+    """Laya (System-1 批量裁判) 矛盾裁决位 (laya T2, spec §二 P2).
+
+    只占 ``judge_contradiction`` 位: 1 个 noul question,
+    ``noul >= 0.5`` → ``{"contradiction": True}``。
+    Laya 不可用 / laya_batch 整批 None → 委托 ``fallback.judge_contradiction``
+    原样透传; fallback 缺位或也抛 → ``ProviderCallError`` (外层 autodream
+    ``_judge_contradiction`` 既有 except → False, 不阻断 ingest)。
+    extract_facts/dedupe_entity 透传 fallback (T5 才补 Laya 版 dedupe)。
+    """
+    fallback: LLMProvider | None = None
+
+    @property
+    def base_url(self):  # adapter._is_reachable 探测透传 (review M1):
+        # 有 base_url → 2s TCP 探测, 不触发 extract_facts("") 真实调用
+        return getattr(self.fallback, "base_url", None)
+
+    def extract_facts(self, text: str) -> Extraction:
+        if self.fallback is None:
+            raise ProviderCallError("laya: judge-only provider, no fallback")
+        return self.fallback.extract_facts(text)
+
+    def dedupe_entity(self, new_name: str, new_type: str,
+                      candidates: list, context: str | None = None) -> dict:
+        if self.fallback is None:
+            raise ProviderCallError("laya: judge-only provider, no fallback")
+        return self.fallback.dedupe_entity(new_name, new_type, candidates,
+                                           context=context)
+
+    def judge_contradiction(self, subject_type: str, subject_name: str,
+                            predicate: str, new_value: str,
+                            old_value: str) -> dict:
+        from laya_client import laya_available, laya_batch
+        if laya_available():
+            state = (f"subject_type={subject_type} subject_name={subject_name} "
+                     f"predicate={predicate}\n"
+                     f"old: {subject_name} --{predicate}--> {old_value}\n"
+                     f"new: {subject_name} --{predicate}--> {new_value}")
+            answers = laya_batch(state, {
+                "supersede": {"type": "noul",
+                              "instructions": "Should old be superseded by new?"}})
+            ans = (answers or {}).get("supersede")
+            if isinstance(ans, dict) and isinstance(ans.get("noul"), (int, float)):
+                return {"contradiction": ans["noul"] >= 0.5}
+        if self.fallback is not None:
+            return self.fallback.judge_contradiction(
+                subject_type, subject_name, predicate, new_value, old_value)
+        raise ProviderCallError("laya judge unavailable and no fallback")
+
+
+@dataclass
 class LMStudioProvider:
     """Stub: local LMStudio OpenAI-compat route. Not wired until a local
     model deploy target exists. Returns empty extraction."""

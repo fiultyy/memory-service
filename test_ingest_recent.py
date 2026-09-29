@@ -73,7 +73,7 @@ def test_ingest_and_registry_skip(tmp_path, monkeypatch):
     import autodream as autodream_mod
 
     def fake_autodream(session_id, transcript_path, source_cwd=None,
-                       harness="cc"):
+                       harness="cc", providers=None):
         """契约桩: 记 (session, 合成 transcript 内容, source_cwd), 返回通道档计。"""
         calls.append((session_id,
                       Path(transcript_path).read_text(encoding="utf-8"),

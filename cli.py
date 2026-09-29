@@ -37,7 +37,7 @@ import consolidate as consolidate_mod
 import recall as recall_mod
 import store
 import resolver
-from llm_provider import LLMProvider
+from llm_provider import LLMProvider, LayaJudgeProvider
 
 
 # ── M17/M18 通道判定 (DR-9 G10 已裁决) ──────────────────────────────
@@ -186,6 +186,25 @@ _load_env()
 
 # ── ingest ──────────────────────────────────────────────────────────
 
+def _laya_judge_prefix(base: list[LLMProvider]) -> list[LLMProvider]:
+    """laya T2: MEM_LAYA_ENABLED=1 且 laya_available() → providers 头部换
+    LayaJudgeProvider(矛盾裁决位), 原 providers[0] 作 fallback。关/不可达
+    → 原列表不动 (全链路=现状)。
+
+    头部**换**而非 insert(0) 叠加: ingest 路径同一 providers 列表还喂
+    adapter.extract_facts 蝴蝶翼 — 叠加会让 Laya(委托同一 zhipu) + zhipu
+    出现双胞胎翼, 扰乱 quorum 投票; 换头保持翼数不变, 裁决位仍 [0],
+    抽取经 fallback 透传不变。"""
+    try:
+        from laya_client import laya_available
+        if laya_available():
+            if base:
+                return [LayaJudgeProvider(fallback=base[0])] + list(base)[1:]
+            return [LayaJudgeProvider(fallback=None)]  # autodream 判官位, 无 LLM 通道
+    except Exception:
+        pass
+    return list(base)
+
 def ingest(text: str, source_ref: str | None = None,
            fact_type: str = "stable",
            providers: list[LLMProvider] | None = None,
@@ -211,6 +230,7 @@ def ingest(text: str, source_ref: str | None = None,
     """
     if providers is None:
         providers = adapter.default_providers()
+    providers = _laya_judge_prefix(providers)
     extracted = adapter.extract_facts(text, providers=providers)
     # adapter._vote computes the label (vote when quorum wings≥2, else llm).
     ext_label = extracted.source_meta.get("extractor_label", "llm")
@@ -437,8 +457,9 @@ def autodream(session_id: str, transcript_path: str,
     LLM 不可用即 block)。``cwd`` ADR-14 b 方案: 记 source_cwd, recall --cwd 过滤。
     ``harness``: corpus_prep 语料标记块清洗表键 (缺省 cc)。
     """
-    return autodream_mod.autodream(session_id, transcript_path, source_cwd=cwd,
-                                   harness=harness)
+    return autodream_mod.autodream(session_id, transcript_path,
+                                   providers=_laya_judge_prefix([]),
+                                   source_cwd=cwd, harness=harness)
 
 
 # ── ingest-recent (M18: 手动补近期会话结论入库) ──────────────────────
@@ -535,8 +556,9 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
                          "message": {"content":
                                      f"[助手结论] {sc['end_step']}"}},
                         ensure_ascii=False) + "\n")
-            r = autodream_mod.autodream(sid, str(tmp), source_cwd=cwd,
-                                        harness=harness)
+            r = autodream_mod.autodream(sid, str(tmp),
+                                        providers=_laya_judge_prefix([]),
+                                        source_cwd=cwd, harness=harness)
             entry["status"] = "ingested"
             entry["facts"] = r
             for k, v in (r or {}).items():

@@ -173,7 +173,8 @@ def test_omp_locate_and_ingest_recent(tmp_path, monkeypatch):
     calls = []
     import autodream as autodream_mod
     monkeypatch.setattr(autodream_mod, "autodream",
-                        lambda sid, tp, source_cwd=None, harness="cc":
+                        lambda sid, tp, source_cwd=None, harness="cc",
+                        providers=None:
                         calls.append((sid, open(tp).read())) or {"added": 1})
     r = cli.ingest_recent(cwd=cwd, harness="omp",
                           registry_path=tmp_path / "reg.json")

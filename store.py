@@ -678,3 +678,70 @@ def _decode_fact(row: Any) -> dict[str, Any]:
         "harness": row["harness"] if "harness" in row.keys() else None,
         "gate_score": row["gate_score"] if "gate_score" in row.keys() else None,
     }
+
+
+# ── T4/P4 语义边 (fact_relations) ───────────────────────────────────
+
+def put_semantic_edges(edges: list[dict[str, Any]]) -> int:
+    """INSERT OR REPLACE 语义边 (source_id, target_id, edge_type 主键同键
+    重写 → weight/created_at 更新不重复行)。返回写入条数。"""
+    if not edges:
+        return 0
+    conn = db.get_conn()
+    n = 0
+    with db.transaction():
+        for e in edges:
+            conn.execute(
+                """INSERT OR REPLACE INTO fact_relations
+                   (source_id, target_id, edge_type, weight, created_by, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (e["source_id"], e["target_id"], e.get("edge_type", "semantic"),
+                 float(e["weight"]), e.get("created_by", "laya"), _now()))
+            n += 1
+    return n
+
+
+def get_semantic_edges(as_of: str | None = None,
+                       source_cwd: str | None = None) -> list[dict[str, Any]]:
+    """读语义边, 时态联查 fact 两端 (与 recall._build_entity_graph /
+    _temporal_clause 同构; clause 在此内联 — store 不得反向 import recall)。
+
+    默认 (as_of=None): 两端 ``status='active' AND valid_to IS NULL`` — 任一端
+    软删/置 valid_to → 边消失。as_of 给定: 双端 bi-temporal 时间窗 (status 过滤
+    撤除, 同 _temporal_clause 语义)。source_cwd 过滤同 _build_entity_graph
+    (匹配或 NULL)。附带两端 subject_id 供实体图挂边。
+    """
+    if as_of is None:
+        tc = ("s.status='active' AND s.valid_to IS NULL "
+              "AND t.status='active' AND t.valid_to IS NULL")
+        params: list = []
+    else:
+        tc = ("(s.valid_from IS NULL OR s.valid_from <= ?) AND "
+              "(s.valid_to IS NULL OR s.valid_to > ?) AND "
+              "(t.valid_from IS NULL OR t.valid_from <= ?) AND "
+              "(t.valid_to IS NULL OR t.valid_to > ?)")
+        params = [as_of, as_of, as_of, as_of]
+    cwd_sql = ""
+    if source_cwd is not None:
+        cwd_sql = (" AND (s.source_cwd = ? OR s.source_cwd IS NULL) "
+                   "AND (t.source_cwd = ? OR t.source_cwd IS NULL)")
+        params = [*params, source_cwd, source_cwd]
+    rows = db.get_conn().execute(
+        f"""SELECT r.source_id, r.target_id, r.edge_type, r.weight,
+                   r.created_by, r.created_at,
+                   s.subject_id AS source_subject_id,
+                   t.subject_id AS target_subject_id
+            FROM fact_relations r
+            JOIN fact s ON s.id = r.source_id
+            JOIN fact t ON t.id = r.target_id
+            WHERE {tc}{cwd_sql}""",
+        params,
+    ).fetchall()
+    return [
+        {"source_id": r["source_id"], "target_id": r["target_id"],
+         "edge_type": r["edge_type"], "weight": r["weight"],
+         "created_by": r["created_by"], "created_at": r["created_at"],
+         "source_subject_id": r["source_subject_id"],
+         "target_subject_id": r["target_subject_id"]}
+        for r in rows
+    ]

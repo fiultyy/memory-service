@@ -619,6 +619,7 @@ def _decide_segments(
     # (勘误读法一)。非 bootstrap: stamp 值 = session_id 本身。
     stamp_session = "self" if _is_bootstrap_session(session_id) else session_id
     added = updated = deleted = noop = 0
+    new_fact_ids: list[str] = []  # T4/P4 语义边发现输入 (本批新增 fact)
 
     # Phase c — incremental decision per edge, per segment (M8: fact 继承段 provenance)。
     # R1 档 1: entities first (so declared types land), then edges. subject AND
@@ -862,6 +863,7 @@ def _decide_segments(
                     if use_regex_channel:
                         fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
                     deleted += len(contradicting)
+                    new_fact_ids.append(new_id)
                     added += 1
                     continue
                 # 多值共存 / 无矛盾 ⇒ 落到下方 brand-new ADD (不 continue)。
@@ -896,7 +898,19 @@ def _decide_segments(
                 # fact 已是终态, wings 升级=重复消费 (队列退役清理 2026-08-27)。
                 if use_regex_channel:
                     fact_enqueues.append((new_id, subject, predicate, value, seg_provenance))
+                new_fact_ids.append(new_id)
                 added += 1
+
+    # T4/P4 语义边收尾 (spec §四 Step2): 本批新增 fact 对各自 1-hop 邻域跑
+    # laya 批判迈阈入 fact_relations。开关同 MEM_LAYA_ENABLED (discover 内
+    # laya_available 短路); 增强面 — 任何失败降级 warn, 不阻断 ingest 返回值。
+    if new_fact_ids:
+        try:
+            import semantic_edges
+            semantic_edges.discover_and_store(new_fact_ids)
+        except Exception as exc:
+            print(f"AUTODREAM-WARN: semantic edges 失败 (跳过本批): "
+                  f"{type(exc).__name__}: {exc}", flush=True)
 
     # perf 收尾批: fact 入队批化 — 三元组文本 novelty 采样一次 embed_batch
     # 预热后逐条 enqueue (同 seg 批化; material_ref=fact:<id> 幂等不变)。

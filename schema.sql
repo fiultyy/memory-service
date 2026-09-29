@@ -85,3 +85,17 @@ CREATE TABLE IF NOT EXISTS upgrade_queue (
     updated_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_uq_status_priority ON upgrade_queue(status, priority DESC);
+
+-- T4/P4 语义边 (laya 判 4 档 score, norm /3.0 >= 0.7 入边; spec v1.1 §四 Step2)。
+-- 单向写(source=new fact, target=neighbor), 读侧联查 fact 两端时态 — fact 无
+-- 硬删路径(软删 supersede/deprecated), 联查天然隐藏失效端, 无需级联 DELETE。
+CREATE TABLE IF NOT EXISTS fact_relations (
+    source_id  TEXT NOT NULL,
+    target_id  TEXT NOT NULL,
+    edge_type  TEXT NOT NULL DEFAULT 'semantic',
+    weight     REAL NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'laya',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (source_id, target_id, edge_type)
+);
+CREATE INDEX IF NOT EXISTS idx_fact_relations_target ON fact_relations(target_id);

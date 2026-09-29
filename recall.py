@@ -133,6 +133,24 @@ def _build_entity_graph(
             g.add_edge(s, o)
         else:
             g.add_node(s)
+    # T4/P4 语义边并入 (fact→fact 边挂到两端 subject 实体上): 与上方 fact 边
+    # 同一时态/同 source_cwd 口径 (store.get_semantic_edges 内部联查); 语义边
+    # 端点实体必已在 seen (两端 active fact 已贡献), 只增边不加节点 — BFS/
+    # centrality/M3 下游零改动。无语义边时图与基线逐位一致。
+    for e in store.get_semantic_edges(as_of=as_of, source_cwd=source_cwd):
+        a = e["source_subject_id"]
+        b = e["target_subject_id"]
+        if not a or not b or a == b or a not in seen or b not in seen:
+            continue
+        w = float(e["weight"] or 0.0)
+        if g.has_edge(a, b):
+            # review M1: fact 边无 weight 属性 → pagerank 隐式计 1, 语义边
+            # 不得把既有边降到 1 以下 (基准取 1.0, 只增不减)
+            old = g[a][b].get("weight", 1.0)
+            if w > old:
+                g[a][b]["weight"] = w
+        else:
+            g.add_edge(a, b, weight=w)
     if not seen:
         return (g, {})
     pr = nx.pagerank(g) if g.number_of_edges() else {n: 0.0 for n in g.nodes}

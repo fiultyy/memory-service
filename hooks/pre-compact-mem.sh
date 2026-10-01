@@ -5,7 +5,8 @@
 # A方案取消 — SessionStart 恢复单点投影, 与本钩子正交): 本钩子只做一件事 —
 # 快照 transcript 进 spool, 由 spool-worker 蒸馏出 **assistant 每轮输出的
 # end step** (stop_reason=end_turn 主链 text) 入 KG。召回/consolidation 全
-# 手动 (skills/memsvc)。同步面 ~25ms (快照+nohup), compact 永不阻塞。
+# 手动 (skills/memsvc)。同步面 ~25ms (纯快照), compact 永不阻塞。
+# (H1 切换 2026-10-01: 蒸馏/入 KG 改由 mem_daemon 消费 spool, 本钩子纯快照。)
 #
 # 落库正确性: fact 级 NOOP 幂等(同 (s,p,o) 不重复 ADD) + spool 文件名
 # session_id+sha16 去重 + worker 失败保留重试 (.lock 可回收)。
@@ -96,13 +97,10 @@ if [ -n "${SPOOL_FILE:-}" ] && [ -f "${SPOOL_FILE}" ]; then
         && mv -- "${SPOOL_FILE}.harness.tmp" "${SPOOL_FILE}.harness" 2>/dev/null || true
 fi
 
-# ② 排干积压 + 处理新快照: 单例后台 worker (锁文件防并发双跑; 排干
-# spool 全部待处理文件后自行退出)。每次钩子触发都尝试拉起 — 已在跑
-# 则锁失败 no-op, 幂等。MEM_SPOOL_WORKER=0 → 只快照不蒸馏 (测试/演练)。
-if [ "${MEM_SPOOL_WORKER:-1}" = "1" ]; then
-    nohup "${SVC_DIR}/hooks/spool-worker.sh" \
-          ${CWD:+--cwd "$CWD"} >/dev/null 2>&1 &
-fi
+# ② (H1 切换票, 2026-10-01) 旧 spool-worker 拉起块已删 — 旧 worker→
+# endsteps→autodream 通道下线; spool 快照改由 mem_daemon 第二 watch 源段级
+# 消费 (docs/specs/graph-reform-v2-ingest-tags.md §二)。MEM_SPOOL_WORKER
+# env 随之失效 (保留无害)。本钩子职责收窄为纯快照。
 
 # ③ compact 永不阻塞。
 exit 0

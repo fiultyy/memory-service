@@ -8,6 +8,10 @@
    内容 sha256 前 16 位回退;
 4. 失败路径有日志 — worker filter-fail / retry-later 均 log + 文件保留可重试。
 
+H1 切换票 (2026-10-01): hook 不再拉起 spool-worker (旧通道下线, spool 由
+mem_daemon 第二 watch 源段级消费) — 5. 断言 worker 零拉起 + 快照照常落盘;
+worker 直跑用例保留 (脚本文件仍在, 作历史参照/手动排干)。
+
 红线: 全程 tmp 注入池 (MEM_SPOOL_DIR) + python3 shim 硬拦 autodream —
 生产 db 零触碰, 零 LLM 调用; 生产 spool 内容断言前后不变。
 """
@@ -17,6 +21,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import time
 
 REPO = pathlib.Path(__file__).parent
 HOOK_PRECOMPACT = REPO / "hooks" / "pre-compact-mem.sh"
@@ -268,3 +273,20 @@ def test_worker_filter_fail_logs_and_recovers(tmp_path):
     assert "sess-fltr" in log
     # .lock 回收: 文件回原名, 留待下次重试 (不丢记忆只延迟)
     assert raw.is_file() and not (spool / (raw.name + ".lock")).exists()
+
+
+# ── 5. H1 切换票: hook 不再拉起 worker ────────────────────────────
+
+def test_hook_no_longer_launches_worker(tmp_path):
+    """H1 (2026-10-01): nohup 拉起块已删 — 旧 worker 通道下线, spool 换
+    mem_daemon 消费。静态 (源无 nohup) + 行为 (无 worker.lock 落地) 双断言。"""
+    hook_src = HOOK_PRECOMPACT.read_text(encoding="utf-8")
+    assert "nohup" not in hook_src, "hook 不得再 nohup 拉起 spool-worker"
+    spool = tmp_path / "spool"
+    t = _tool_only_transcript(tmp_path, "t7.jsonl")
+    r = _run_hook(spool, t, "sess-nolaunch", tmp_path,
+                  extra_env={"MEM_SPOOL_WORKER": "1"})  # 显式开也无人拉起
+    assert r.returncode == 0, r.stderr
+    time.sleep(1.0)   # 旧 worker 若被拉起, worker.lock 毫秒级即现
+    assert not (spool / "worker.lock").exists(), "worker 不再被拉起"
+    assert _spool_jsonl(spool), "快照本身照常落盘 (通道保留, 换 daemon 消费)"

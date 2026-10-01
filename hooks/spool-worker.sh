@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# [已退役 2026-10-01, H1 切换票] pre-compact-mem.sh 不再拉起本 worker —
+# spool 消费切至 mem_daemon 第二 watch 源 (段级 distill, spec v2 §二:
+# docs/specs/graph-reform-v2-ingest-tags.md)。文件保留作历史参照/手动排干;
+# endsteps.py 本身未退役 (cli ingest-recent 等仍在用)。
+#
 # spool-worker.sh — PreCompact 快照排干 worker (P1 → 2026-08-27 v2 重接线;
 # 2026-08-28 v3: --scenes 用户声音通道, Codex 阅读优先级采纳)。
 #

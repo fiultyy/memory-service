@@ -139,12 +139,10 @@ def plan(conn: sqlite3.Connection, limit_groups: int | None = None) -> dict:
     return stats
 
 
-def _singleton(units: list[str]) -> list[dict] | None:
-    """单 fact 组省 laya: 过滤照走 (判结论价值), 幸存即自身成 chunk。"""
-    kept = chunk_graph._filter_units(units)
-    if kept is None:
-        return None
-    return [{"text": u, "units": [u]} for u in kept]
+def _singleton(units: list[str]) -> list[dict]:
+    """单 fact 组省 laya: 逐句过滤步已退役 (裁决#4, 2026-10-01) — 无条件
+    自身成 chunk (G2 全量迁移已落地执行, 本函数仅存档复跑兼容)。"""
+    return [{"text": u, "units": [u]} for u in units]
 
 
 def _report(st: dict) -> str:
@@ -154,7 +152,7 @@ def _report(st: dict) -> str:
         "═══ G2 存量重组干跑报告 ═══",
         f"active fact 总数: {st['total_facts']}{lim}",
         f"聚成 chunk 数: {st['chunks']}",
-        f"被过滤 (noul<0.25 判无结论价值) fact 数: {st['filtered']}",
+        f"被过滤 fact 数 (过滤步已退役 2026-10-01, 恒 0): {st['filtered']}",
         f"预计物理删除 fact 数: {st['delete_facts']}",
         f"预计保留 (chunk fact) 数: {st['chunks']}",
         f"laya 降级组 (原样保留不迁): {st['degraded_groups']}",

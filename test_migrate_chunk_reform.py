@@ -10,12 +10,10 @@ import store
 def _setup(tmp_path, monkeypatch, available=True):
     db.init(Path(tmp_path) / "mig.db")
     monkeypatch.setattr(laya_client, "laya_available", lambda: available)
-    # 逐句过滤: 含"寒暄"判噪声; 聚簇全 None (每句孤立 chunk); 其余题默认 None
+    # 过滤步已退役 (裁决#4 2026-10-01): 只剩 choice 聚簇题; 全守卫不过 →
+    # 每句孤立 chunk
     def fake_batch(state, questions, timeout=30.0):
-        if all(q.get("type") == "noul" for q in questions.values()):
-            return {qid: {"noul": 0.0 if "寒暄" in state else 0.8}
-                    for qid in questions}
-        return {qid: None for qid in questions}  # choice 题全守卫不过 → 孤立
+        return {qid: None for qid in questions}
     monkeypatch.setattr(laya_client, "laya_batch", fake_batch)
     return fake_batch
 
@@ -45,9 +43,10 @@ def test_plan_readonly(tmp_path, monkeypatch):
     assert before == after  # 干跑零写库
     assert st["total_facts"] == 5
     assert st["degraded_groups"] == 0
-    # 4 chunk: 甲2 + 乙1 + 丙0 (全滤); filtered = 甲噪声 + 丙噪声 = 2
-    assert st["chunks"] == 3
-    assert st["filtered"] == 2
+    # 过滤步退役 (裁决#4): 零滤 — 5 chunk (甲3 + 乙1 + 丙1, choice 全不中
+    # 各自孤立); filtered 恒 0
+    assert st["chunks"] == 5
+    assert st["filtered"] == 0
     assert st["delete_facts"] == 5
     assert st["orphan_entities_now"] == 0
 
@@ -67,12 +66,12 @@ def test_execute_wipes_old_and_keeps_chunks(tmp_path, monkeypatch):
     chunks = conn.execute(
         "select value, predicate, extractor, source_refs from fact "
         "where extractor='chunk_graph'").fetchall()
-    assert len(chunks) == 3
+    assert len(chunks) == 5  # 过滤步退役: 甲3 + 乙1 + 丙1 全成 chunk
     assert all(c[1] == "chunk_of" and c[0] for c in chunks)  # 有结论句
     import json
     refs = [json.loads(c[3]) for c in chunks]
-    assert all(any(fid in s for r in refs for s in r) for fid in fids[:4])  # 甲乙溯源含旧 fact id (丙全滤无 chunk)
-    # 丙主题全滤 → 无挂载 → 硬删; 甲乙被新 chunk 挂载或保留
+    assert all(any(fid in s for r in refs for s in r) for fid in fids)  # 全部旧 fact 溯源可追
+    # 丙 chunk 经 stub 挂到乙实体 → 丙主题无挂载 → 硬删; 甲乙保留
     names = {r[0] for r in conn.execute("select name from entity")}
     assert "丙主题" not in names
     assert {"甲主题", "乙主题"} <= names
@@ -98,25 +97,24 @@ def test_execute_idempotent_refused(tmp_path, monkeypatch):
 
 
 def test_degraded_group_retried_not_lost(tmp_path, monkeypatch):
-    """锚: 首轮 laya 批 None → 组降级; 重试轮成功 → 不计最终降级。"""
+    """锚: 首轮 laya 批 None → 组降级; 重试轮成功 → 不计最终降级。
+    (过滤步退役后降级面只剩聚簇批 — 单 fact 组 _singleton 不再调 laya。)"""
     _setup(tmp_path, monkeypatch)
     ids, _ = _seed()
     conn = db.get_conn()
     calls = {"n": 0}
 
     def flaky_batch(state, questions, timeout=30.0):
-        if all(q.get("type") == "noul" for q in questions.values()):
-            if "乙" in state and calls["n"] < 2:  # 乙组首轮过滤批 None
-                calls["n"] += 1
-                return None
-            return {qid: {"noul": 0.8} for qid in questions}
+        if "candidate units" in state and calls["n"] < 2:
+            calls["n"] += 1
+            return None  # 甲组 (3 units) 聚簇批前两轮 None
         return {qid: None for qid in questions}
     monkeypatch.setattr(laya_client, "laya_batch", flaky_batch)
     monkeypatch.setattr(mig.time, "sleep", lambda s: None)  # 重试轮间不真等
     st = mig.plan(conn)
     assert st["degraded_groups"] == 0  # 重试轮救回
-    assert any(gp["subject"] == "乙主题" for gp in st["group_plans"])
-    assert calls["n"] == 2  # 确认首轮确实 None 过 (非误过)
+    assert any(gp["subject"] == "甲主题" for gp in st["group_plans"])
+    assert calls["n"] == 2  # 确认前两轮确实 None 过 (非误过)
 
 
 def test_execute_survives_supersedes_fk_chain(tmp_path, monkeypatch):

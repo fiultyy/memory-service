@@ -143,6 +143,60 @@ def init(db_path: str | Path | None = None,
                embedding TEXT NOT NULL,
                updated_at TEXT NOT NULL
            )""")
+    # 图改造 v2 migration (spec H5, docs/specs/graph-reform-v2-ingest-tags.md):
+    # 老 db 无 atom/atom_edge/tag/tag_mount/distill_seen 五表 → CREATE IF NOT EXISTS
+    # (整表新增无 ALTER 需求; 与 schema.sql 两处声明同在, 重复 init 幂等)。
+    # fact 表自本批起 legacy 归档 (不删不改), 新写入走 atom 系表。
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS atom (
+            id          INTEGER PRIMARY KEY,
+            text        TEXT NOT NULL,
+            label       TEXT NOT NULL
+                        CHECK(label IN ('fact','judgment','experience','summary')),
+            p_dur       REAL DEFAULT 0.0,
+            valid_from  TEXT,
+            valid_to    TEXT,
+            source_refs TEXT,
+            source_cwd  TEXT,
+            needs_embed INTEGER DEFAULT 0,
+            needs_audit INTEGER DEFAULT 0,
+            created_at  TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_atom_valid ON atom(valid_from, valid_to);
+        CREATE TABLE IF NOT EXISTS atom_edge (
+            a_id INTEGER NOT NULL REFERENCES atom(id),
+            b_id INTEGER NOT NULL REFERENCES atom(id),
+            w    REAL NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'related'
+                 CHECK(kind IN ('related','contradicts','supersedes')),
+            PRIMARY KEY(a_id, b_id),
+            CHECK(a_id < b_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_atom_edge_b ON atom_edge(b_id);
+        CREATE TABLE IF NOT EXISTS tag (
+            id          INTEGER PRIMARY KEY,
+            name        TEXT NOT NULL,
+            kind        TEXT NOT NULL CHECK(kind IN ('factual','semantic')),
+            level       INTEGER NOT NULL DEFAULT 1,
+            description TEXT,
+            parent_id   INTEGER REFERENCES tag(id),
+            created_at  TEXT DEFAULT (datetime('now')),
+            UNIQUE(name, level)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tag_parent ON tag(parent_id);
+        CREATE TABLE IF NOT EXISTS tag_mount (
+            tag_id  INTEGER NOT NULL REFERENCES tag(id),
+            atom_id INTEGER NOT NULL REFERENCES atom(id),
+            w       REAL DEFAULT 0.0,
+            PRIMARY KEY(tag_id, atom_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tag_mount_atom ON tag_mount(atom_id);
+        CREATE TABLE IF NOT EXISTS distill_seen (
+            sha        TEXT PRIMARY KEY,
+            created_at TEXT DEFAULT (datetime('now')),
+            status     TEXT NOT NULL DEFAULT 'ok'
+        );
+    """)
     # perf/vec-index: sqlite-vec **硬依赖** (用户裁决 2026-08-26: 无降级 —
     # 失败响亮 raise VecIndexError 含可行动诊断, 不静默回退)。建 vec_entity/
     # vec_fact 两张 vec0 虚拟表 (cosine 度量)。

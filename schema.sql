@@ -99,3 +99,61 @@ CREATE TABLE IF NOT EXISTS fact_relations (
     PRIMARY KEY (source_id, target_id, edge_type)
 );
 CREATE INDEX IF NOT EXISTS idx_fact_relations_target ON fact_relations(target_id);
+
+-- 图改造 v2 (docs/specs/graph-reform-v2-ingest-tags.md §五 H5): 知识原子图 +
+-- 分层 tag 索引 + ingest 去重台账。fact 表自本批起为 legacy 归档 (不删不改)。
+CREATE TABLE IF NOT EXISTS atom (
+    id          INTEGER PRIMARY KEY,
+    text        TEXT NOT NULL,                          -- 知识原子结论句 (canonical)
+    label       TEXT NOT NULL
+                CHECK(label IN ('fact','judgment','experience','summary')),
+    p_dur       REAL DEFAULT 0.0,                       -- laya 审计 durable 概率 (组内 max)
+    valid_from  TEXT,                                   -- D4 双时态: 成员 fact 最早 created_at
+    valid_to    TEXT,                                   -- supersede/证伪清算写 (夜间)
+    source_refs TEXT,                                   -- JSON array: 成员原 fact 的 source_refs 并集
+    source_cwd TEXT,                                    -- 成员原 fact 溯源 cwd (多数决)
+    needs_embed INTEGER DEFAULT 0,                      -- H2: embed 失败夜间补扫标记
+    needs_audit INTEGER DEFAULT 0,                      -- H2: laya 审计欠账标记
+    created_at  TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_atom_valid ON atom(valid_from, valid_to);
+
+CREATE TABLE IF NOT EXISTS atom_edge (
+    a_id INTEGER NOT NULL REFERENCES atom(id),
+    b_id INTEGER NOT NULL REFERENCES atom(id),
+    w    REAL NOT NULL,                                 -- laya relatedness 分
+    kind TEXT NOT NULL DEFAULT 'related'
+         CHECK(kind IN ('related','contradicts','supersedes')),
+    PRIMARY KEY(a_id, b_id),
+    CHECK(a_id < b_id)                                  -- 无向边规范序 (有向型另起表)
+);
+CREATE INDEX IF NOT EXISTS idx_atom_edge_b ON atom_edge(b_id);
+
+-- tag 层 (裁决#1 递归层级, 硬帽应用层管): kind=factual (session:/repo: 铸币,
+-- 裁决#2) | semantic (开放命名); level 1 为事实层底座。
+CREATE TABLE IF NOT EXISTS tag (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL CHECK(kind IN ('factual','semantic')),
+    level       INTEGER NOT NULL DEFAULT 1,
+    description TEXT,
+    parent_id   INTEGER REFERENCES tag(id),             -- parent_of (层级涌现)
+    created_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE(name, level)
+);
+CREATE INDEX IF NOT EXISTS idx_tag_parent ON tag(parent_id);
+
+CREATE TABLE IF NOT EXISTS tag_mount (
+    tag_id  INTEGER NOT NULL REFERENCES tag(id),
+    atom_id INTEGER NOT NULL REFERENCES atom(id),
+    w       REAL DEFAULT 0.0,                           -- indexes 挂载分 (事实铸币=1.0 确定挂载)
+    PRIMARY KEY(tag_id, atom_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tag_mount_atom ON tag_mount(atom_id);
+
+-- H2: 段内容 sha 去重台账 (跨文件重放免疫); status=ok/poison (毒段 DLQ, m3 入权威 DDL)
+CREATE TABLE IF NOT EXISTS distill_seen (
+    sha        TEXT PRIMARY KEY,
+    created_at TEXT DEFAULT (datetime('now')),
+    status     TEXT NOT NULL DEFAULT 'ok'
+);

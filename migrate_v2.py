@@ -31,9 +31,14 @@ _LABELS = ("fact", "judgment", "experience", "summary")
 def load_inputs(root: Path) -> dict:
     """读 temp/ 蒸馏产物; proto_units/summaries 缺席时溯源与文本兜底降级。"""
     atoms = json.loads((root / "temp/full_e_atoms.json").read_text(encoding="utf-8"))
-    edges = [json.loads(l) for l in
-             (root / "temp/full_f_edges.jsonl").read_text(encoding="utf-8").splitlines()
-             if l.strip()]
+    edges = []
+    for l in (root / "temp/full_f_edges.jsonl").read_text(encoding="utf-8").splitlines():
+        if not l.strip():
+            continue
+        try:
+            edges.append(json.loads(l))  # F 尚在追加, 容忍撕裂尾行
+        except json.JSONDecodeError:
+            pass
     sp = root / "temp/full_a_summaries.json"
     summaries = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
     up = root / "temp/proto_units.json"

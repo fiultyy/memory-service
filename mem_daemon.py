@@ -164,9 +164,23 @@ def _spool_dir() -> Path:
     return Path(os.environ.get("MEM_SPOOL_DIR", str(_DEFAULT_SPOOL)))
 
 
-def _spool_dlq_dir() -> Path:
+# dsh 侧 spool: 圈外蒸馏旧 timer(memory-spool-drain) 停用后由本 daemon 接管,
+# 沙箱钩子只能写 ~/.dsh (tonight-decisions.md #52)。目录缺席则跳过。
+_DSH_SPOOL = Path.home() / ".dsh" / "memory-spool"
+
+
+def _spool_dirs() -> list[Path]:
+    """全部 spool watch 源: CC 侧注入池 + dsh 侧沙箱池。"""
+    dirs = [_spool_dir()]
+    dsh = Path(os.environ.get("MEM_DSH_SPOOL_DIR", str(_DSH_SPOOL)))
+    if dsh != dirs[0]:
+        dirs.append(dsh)
+    return dirs
+
+
+def _spool_dlq_dir(spool: Path | None = None) -> Path:
     """毒段死信目录: spool 目录同级 `<spool>.dlq` (注入池同理隔离)。"""
-    return Path(str(_spool_dir()) + ".dlq")
+    return Path(str(spool or _spool_dir()) + ".dlq")
 
 
 def _spool_key(jf: Path) -> str:
@@ -343,7 +357,7 @@ def _spool_recover_locks(spool: Path) -> None:
 
 def _to_dlq(jf: Path) -> bool:
     """毒段文件 (含 .harness sidecar) 移 DLQ; 失败 False 留待下轮再试。"""
-    dlq = _spool_dlq_dir()
+    dlq = _spool_dlq_dir(jf.parent)
     try:
         dlq.mkdir(parents=True, exist_ok=True)
         sidecar = jf.with_name(jf.name + ".harness")
@@ -356,7 +370,7 @@ def _to_dlq(jf: Path) -> bool:
         return False
 
 
-def _sweep_spool(state: dict, cwd: str) -> dict:
+def _sweep_spool(state: dict, cwd: str, spool_dir: Path | None = None) -> dict:
     """H1 spool 消费轮: 新快照 → 轮切 segment → sha 去重 → distill 入图。
 
     段级 ack: offset 推进到最后成功段尾 (绝对偏移 = 本轮 base offset +
@@ -369,7 +383,7 @@ def _sweep_spool(state: dict, cwd: str) -> dict:
       移 ``<spool>.dlq/`` + 日志 (毒段有界)。硬超时段登记 _INFLIGHT —
       僵尸线程未退出期间重试轮跳过不计 attempt (M1, 防双执行双入图)。
     """
-    spool = _spool_dir()
+    spool = spool_dir or _spool_dir()
     if not spool.is_dir():
         return state
     _spool_recover_locks(spool)
@@ -462,7 +476,7 @@ def _sweep_spool(state: dict, cwd: str) -> dict:
             state.pop(key, None)
             for k in [k for k in _INFLIGHT if k[0] == str(jf.resolve())]:
                 _INFLIGHT.pop(k, None)    # M1: DLQ 同清 (防僵尸完成后误残留)
-            _log(f"DLQ: {jf.name} → {_spool_dlq_dir()} "
+            _log(f"DLQ: {jf.name} → {_spool_dlq_dir(jf.parent)} "
                  f"(max-attempts {_SEGMENT_ATTEMPTS_MAX} 耗尽)")
         else:      # suspend / retry / dlq 移动失败 → 留存下轮
             state[key] = {"offset": ack, "attempts": attempts,
@@ -682,7 +696,8 @@ def run(cwd: str | None = None, interval: int = POLL_INTERVAL, once: bool = Fals
             # 逃生口缺省 0; 图改造观察期后本块连同 _sweep 一并删除。
             if os.environ.get("MEM_LEGACY_TRANSCRIPT_DREAM", "0") == "1":
                 state = _sweep(tdir, watch_cwd, state)
-            state = _sweep_spool(state, watch_cwd)   # H1: spool 第二 watch 源
+            for _sd in _spool_dirs():                # H1: CC 池 + dsh 池双 watch
+                state = _sweep_spool(state, watch_cwd, _sd)
             state = _maybe_dream(state, watch_cwd)  # M11: dreaming 阶段门控
             _save_state(state)
         except Exception as exc:

@@ -300,8 +300,9 @@ def test_llm_failure_skips_not_fallback(fresh_db, tmp_path, monkeypatch):
     assert db.get_conn().execute("SELECT COUNT(*) FROM fact").fetchone()[0] == 0
 
 
-def test_bootstrap_counts_errors_on_llm_failure(tmp_path, monkeypatch):
-    """bootstrap.init_memory 既有 except RuntimeError 记账: errors+skip 行。"""
+def test_bootstrap_provider_unreachable_raises_suspends(tmp_path, monkeypatch):
+    """裁决#5b (2026-10-01): ProviderUnreachable → bootstrap 挂起上抛
+    (M4 修正: 不再记 errors 记账 — 冷启动零 LLM 档已退役)。"""
     monkeypatch.setenv("MEM_EXTRACT_CHANNEL", CHANNEL_LLM)
     monkeypatch.setattr(embedding, "_CACHE_DB", tmp_path / "emb.db")
     embedding.clear_cache()
@@ -313,9 +314,8 @@ def test_bootstrap_counts_errors_on_llm_failure(tmp_path, monkeypatch):
     src = tmp_path / "src"
     src.mkdir()
     (src / "a.md").write_text("一些内容", encoding="utf-8")
-    r = bootstrap.init_memory(str(src))
-    assert r["errors"] >= 1
-    assert r["added"] == 0
+    with pytest.raises(ProviderUnreachable):
+        bootstrap.init_memory(str(src))
 
 
 # ── 验收 4: 实体卫生门四件套 ─────────────────────────────────────────

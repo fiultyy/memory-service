@@ -328,7 +328,9 @@ class ProviderUnreachable(ExtractFailed):
     B4-DISTILL (2026-09-01) 分型: 与「单段内容性 schema 两轮败」(基类
     ExtractFailed) 区分 — autodream 默认 llm 档对断供整跑响亮中止 (红线
     「LLM 断供即响亮跳过, 不绕」), 对后者响亮跳段继续 (一段坏输出不再
-    报废同文件其余全部段)。fallback:auto 档两者都走既有降级链不变。"""
+    报废同文件其余全部段)。裁决#5b (2026-10-01) 修订: fallback:auto 的
+    gazetteer 降级链已删除 — 任何档 provider 不可达均挂起上抛等恢复,
+    不再切 regex 兜底产离线记忆。"""
 
 
 # ── 原生结构化 (anthropic tool-use; 用户指令「结构化!」2026-08-27) ──────

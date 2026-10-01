@@ -211,7 +211,10 @@ def _decode_entity(row: Any) -> dict[str, Any]:
 # remove_aliases 涉键删除, 归属回退需全量重建 → 置 None。O(N²) 全量重建
 # (101 库实测 4135 次重建 78s) 由热路径增量消解。
 _exact_index: dict[str, str] | None = None
-_exact_index_gen = 0  # 实体表面变更代计数 (gazetteer 词典/span 缓存共用)
+# 实体表面变更代计数 — store 自有的索引/缓存失效信号 (H3b 2026-10-01 与
+# gazetteer 解耦: 本列只维护 exact 字典失效语义; gazetteer.py 词典/span
+# 缓存仍读它是 legacy 残留, 不再是本列的维护契约, 随 H1 切换票一并下线)。
+_exact_index_gen = 0
 
 
 def _invalidate_exact_index() -> None:
@@ -222,7 +225,7 @@ def _invalidate_exact_index() -> None:
 
 
 def _reset_derived_caches() -> None:
-    """连接切换时全量重置派生缓存 (db.init 调; gaz/span 缓存随 gen 失效)。"""
+    """连接切换时全量重置派生缓存 (db.init 调; 派生缓存随 gen 失效)。"""
     global _exact_index, _exact_index_gen
     _exact_index = None
     _exact_index_gen += 1
@@ -344,7 +347,7 @@ def add_aliases(entity_id: str, new_aliases: list[str]) -> None:
             merged.append(a)
     if merged == existing:
         return  # no-op (perf: resolver step1 重复命中高频; 不写不失效代
-                # — span/gaz 缓存与 exact 字典保持, 消级联重建)
+                # — 派生缓存与 exact 字典保持, 消级联重建)
     conn.execute(
         "UPDATE entity SET aliases = ? WHERE id = ?",
         (json.dumps(merged, ensure_ascii=False), entity_id),

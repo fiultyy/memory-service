@@ -91,20 +91,32 @@ class GateFailed(RuntimeError):
     **绝不静默当 keep, 绝不降级** (spec §③ 失败语义红线)。"""
 
 
+# embedding-topk 关键词 (裁决#4 读侧 gazetteer 退役, 2026-10-01): query 向量
+# → vec_entity ANN top-k, 相似度地板沿用仓内实体语义链接标定 0.45
+# (gazetteer._SEMANTIC_LINK_THRESHOLD 同源)。不调 laya — gate 延迟敏感。
+_KEYWORD_SIM_FLOOR = 0.45
+_KEYWORD_TOPK = 5
+
+
 def derive_keywords(query: str) -> list[str]:
-    """query 实体提取 (gazetteer 词典路, 确定性零 LLM/零 embed); 空则回退
-    :func:`scoring.query_tokens` 分词。CLI 手动面升格三字段与注入面同源
-    (v7 三句之一, 零分叉)。任何 gazetteer 异常 → 静默回退分词 (确定性兜底)。
+    """query 实体提取 (embedding-topk 本地: query 向量 → 既有 entity 向量
+    ANN, ≥0.45 的 canonical 名; 不调 laya — 延迟敏感)。embedding 离线 ([])
+    / 索引空 / 任何异常 → 回退 :func:`scoring.query_tokens` 分词 (确定性
+    兜底, A 路零 LLM 依赖红线不变)。CLI 手动面与注入面同源 (v7 三句之一,
+    零分叉)。
     """
-    names: list[str] = []
     try:
-        import gazetteer
-        masked = gazetteer._mask_code_zones(query or "")
-        hits = gazetteer._dict_entity_hits(masked, gazetteer._load_gazetteer())
-        names = [e.name for e in hits.values() if e.name]
+        import embedding
+        vec = embedding.embed(query or "")
+        if vec:
+            import resolver
+            names = [h["name"] for h in resolver._cosine_topk(vec, _KEYWORD_TOPK)
+                     if h.get("name") and h.get("score", 0.0) >= _KEYWORD_SIM_FLOOR]
+            if names:
+                return names
     except Exception:
-        names = []
-    return names or scoring.query_tokens(query or "")
+        pass  # 与旧 gazetteer 路同红线: 任何异常静默回退分词 (确定性兜底)
+    return scoring.query_tokens(query or "")
 
 
 def build_request(query: str, scope: str) -> dict[str, Any]:

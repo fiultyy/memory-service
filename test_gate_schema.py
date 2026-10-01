@@ -278,12 +278,18 @@ def test_build_request_three_fields(fresh_db):
     assert build_request(_QUERY, "manual")["keywords"] == req["keywords"]
 
 
-def test_derive_keywords_gazetteer_then_tokens(fresh_db):
-    """keywords 实体提取: gazetteer 词典命中 canonical 名; 未命中回退分词。"""
-    store.put_entity("vite", "technical_term")
+def test_derive_keywords_embedding_topk_then_tokens(fresh_db, monkeypatch):
+    """裁决#4 (2026-10-01): keywords 实体提取换 embedding-topk 本地 — query
+    向量 vs 既有 entity 向量 ANN (≥0.45 命中 canonical 名, 不调 laya);
+    embedding 离线 → query_tokens 分词兜底 (确定性)。"""
+    import embedding
+    v = [1.0, 0.0, 0.0]
+    monkeypatch.setattr(embedding, "embed", lambda t, providers=None: v)
+    store.put_entity("vite", "technical_term", name_embedding=v)
     kws = derive_keywords("vite 部署问题排查")
-    assert "vite" in kws
-    # 词典未覆盖 → query_tokens 分词兜底 (非空即可)。
+    assert "vite" in kws, f"embedding-topk 应命中既有实体, got {kws}"
+    # 离线 (embedding []) → query_tokens 分词兜底。
+    monkeypatch.setattr(embedding, "embed", lambda t, providers=None: [])
     assert derive_keywords("zzzqqq wwww") == scoring.query_tokens("zzzqqq wwww")
 
 

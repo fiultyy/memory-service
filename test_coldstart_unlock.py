@@ -17,6 +17,8 @@
 8. E7 C1b 矩阵: regex 挑战 llm → NOOP + contradiction_pending 七字段 +
    segcontra: 复活入队 (done 重入返 id 不返 None) + 消费端 rerun 仲裁;
    llm 挑战 regex → supersede 照旧 (无信号无入队)。
+9. 裁决#5b (2026-10-01): 冷启动零 LLM 档退役 — bootstrap 形 session +
+   llm 不可达 → ProviderUnreachable 挂起上抛, 零 fact 零分账 (不产离线记忆)。
 
 测试规范: def test_xxx() 函数让 pytest 收集。零网络零 LLM: llm 主径经
 monkeypatch llm_extract.extract 注入可控 Extraction; regex 通道走词典链;
@@ -36,7 +38,7 @@ import scoring
 import signals
 import store
 import upgrade
-from llm_extract import ExtractFailed
+from llm_extract import ExtractFailed, ProviderUnreachable
 from llm_provider import EdgeOut, EntityOut, Extraction
 
 
@@ -392,6 +394,31 @@ def test_e7_llm_challenger_supersede_unchanged(monkeypatch):
 # ExtractFailed 可导入性自检 (E10 红线引用面, 防 import 漂移)。
 def test_extract_failed_is_runtime_error():
     assert issubclass(ExtractFailed, RuntimeError)
+
+
+# ── 9. 裁决#5b: 冷启动零 LLM 档退役 — 不可达 = 挂起 ──────────────────
+
+def test_coldstart_unreachable_suspends_no_offline_memory(monkeypatch):
+    """bootstrap 形 cold start (session_id=memory:*) + llm 不可达 →
+    ProviderUnreachable 响亮上抛 (挂起等恢复), 零 fact / 零分账 stamp —
+    gazetteer 降级链已退役, 不再产离线记忆。"""
+    tmp = _fresh("sus")
+    tpath = _write_transcript(tmp / "t.jsonl", "Logseq 是笔记工具")
+    monkeypatch.setattr(embedding, "embed", lambda text, providers=None: [])
+    monkeypatch.setenv("MEM_EXTRACT_CHANNEL", "llm")
+
+    def _boom(text, provider=None):
+        raise ProviderUnreachable("simulated provider outage")
+
+    monkeypatch.setattr(llm_extract, "extract", _boom)
+    try:
+        autodream.autodream("memory:cold.md#0", tpath)
+    except ProviderUnreachable:
+        pass  # 挂起 = 预期
+    else:
+        raise AssertionError("冷启动不可达必须挂起 (ProviderUnreachable 上抛)")
+    n = db.get_conn().execute("SELECT COUNT(*) FROM fact").fetchone()[0]
+    assert n == 0, f"挂起语义: 零离线记忆, got {n} facts"
 
 
 # ── F2 微修单 (编排者): N2 解锁阈值 env 非法值回退专测 ────────────────

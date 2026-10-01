@@ -8,6 +8,10 @@
    recall_hits / agent_crud 信号写进生产 data/signals/ (实测: recall_hits
    4 行 + agent_crud 88 行死引用, 最早 2026-08-27)。autouse 夹具统一改道
    tmp_path; 各测试自己的 _patch_signals_dir 在夹具之后设置、依然生效。
+
+3. laya 开关逐测试 pin 关 (2026-10-01, M3): .env MEM_LAYA_ENABLED=1 经
+   import cli 渗入测试进程, recall laya lane 会抢先于 mock gate provider —
+   autouse 夹具 pin 0 + 清 laya_client TTL 缓存 (见 _pin_laya_off)。
 """
 
 import os
@@ -16,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+import laya_client
 import signals
 
 os.environ.setdefault("MEM_EXTRACT_CHANNEL", "regex")
@@ -36,3 +41,15 @@ def _isolate_signals_dir(tmp_path):
     signals._signals_dir = lambda: sig
     yield
     signals._signals_dir = orig
+
+
+@pytest.fixture(autouse=True)
+def _pin_laya_off(monkeypatch):
+    """3. M3 (2026-10-01): .env MEM_LAYA_ENABLED=1 经 import cli → _load_env
+    渗入测试进程 — recall 的 laya 批判 lane (recall.py ``laya_available()``)
+    抢先于注入的 mock gate provider, 击穿零 LLM gate 测试 (真探本地 laya)。
+    逐测试 pin 关 + 清 laya_client TTL 可用性缓存 (防上轮探测 True 跨测试
+    泄漏); laya 专项测试在测试体内自设 env=1, 后设者胜不受影响。"""
+    monkeypatch.setenv("MEM_LAYA_ENABLED", "0")
+    laya_client._avail_cache = None
+    yield

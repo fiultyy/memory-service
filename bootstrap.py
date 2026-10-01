@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 import autodream as autodream_mod
+from llm_extract import ProviderUnreachable
 
 
 # ── ADR-16f 过滤: 跳过 mem-service 投影产物 ─────────────────────────────
@@ -84,6 +85,10 @@ def re_ingest_file(
                     source_cwd=source_cwd,
                     harness=harness,
                 )
+            except ProviderUnreachable:
+                # 裁决#5b (2026-10-01): 冷启动零 LLM 档退役 — provider
+                # 不可达 = 挂起等恢复, 响亮上抛由调用方重试; 不再产离线记忆。
+                raise
             except RuntimeError as e:
                 totals["errors"] += 1
                 import sys as _sys
@@ -109,8 +114,9 @@ def init_memory(
     For each ``*.md`` in ``memory_dir`` (sorted by name): read text → write a
     synthetic one-record transcript JSONL (``{type:user, message:{content:text}}``)
     → ``autodream.autodream(session_id="memory:<file>", ..., fact_type=fact_type)``
-    →累加 counts. 提取走 M6/M7 占位通道 (gazetteer 词典+regex 三路, 零 LLM
-    inline — provider 断供不中断写入; wings LLM 为 M4 队列异步升级侧)。
+    →累加 counts. 提取走 llm 主径 (裁决#5b 2026-10-01: 冷启动零 LLM 档退役,
+    需 zhipu/laya 可达 — provider 不可达 :class:`ProviderUnreachable` 响亮
+    上抛挂起等恢复, 不再产离线记忆)。
 
     ``harness`` (B3, B3C-HYG): 来源 harness stamp 进 fact.harness (与
     cli ``--harness`` 存放位置方案同名同传, dsh 接钩子时传 dsh)。
@@ -153,8 +159,12 @@ def init_memory(
                         source_cwd=source_cwd,
                         harness=harness,
                     )
+                except ProviderUnreachable:
+                    # 裁决#5b (2026-10-01): 冷启动零 LLM 档退役 — provider
+                    # 不可达 = 挂起等恢复 (响亮上抛, 调用方等恢复后重跑,
+                    # 幂等契约保零重复), 不再产离线记忆。
+                    raise
                 except RuntimeError as e:
-                    # LLM 不可用 (block, 不降级 regex) — skip 该段, 不崩整个 init。
                     totals["errors"] += 1
                     import sys as _sys
                     print(f"  SKIP {md.name}#{ci}: {str(e)[:140]}", file=_sys.stderr)

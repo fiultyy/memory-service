@@ -1,5 +1,10 @@
 """mem-service autoDream — session transcript raw→KG incremental (ADR-10).
 
+graph-reform v2 退役面 (裁决#4/#5b, 2026-10-01): T3 laya 逐段过滤与
+fallback:auto 的 gazetteer 降级链已删除 — llm 档 provider 不可达 =
+:class:`llm_extract.ProviderUnreachable` 响亮上抛 (挂起等恢复, 不再产
+离线记忆); regex 占位通道分支保留, 归 H1 切换票下线。
+
 PreCompact hook entry: ``autodream(session_id, transcript_path, providers=None)``
 reads a CC transcript JSONL **preserving block grammar** (M8: ``_read_transcript``
 returns ``(block_type, text)`` pairs — tool_use/tool_result no longer skipped,
@@ -43,8 +48,9 @@ v1.7④⑤ 本车道增量 (LIF 分账 + 冷启动 D6 双窗口 + 无LLM兜底 l
 - **E7 C1b 通道门槛**: 顶替者信任严格低于被处决者 (regex 档证据 vs llm 档
   fact) → NOOP + ``contradiction_pending`` 信号轻记录 + 矛盾段
   ``segcontra:`` 前缀复活入队 (待主径重抽仲裁); 反向与同档 supersede 照旧。
-- **E10 fallback:auto**: llm 主径 + ExtractFailed 自动切 regex 兜底链
-  (显式 opt-in 档; 默认 llm 档断供仍响亮上抛 — 断供红线不变)。
+- **E10 fallback:auto**: ~~llm 主径 + ExtractFailed 自动切 regex 兜底链~~
+  (已退役 2026-10-01 裁决#5b: 降级链删除, 与默认 llm 档同语义 — 断供
+  响亮上抛挂起等恢复)。
 - **④ 低初值**: 主径 llm brand-new ADD 显式 ``lif_source=0.4`` (待验证,
   写侧立即生效); regex 产物本就 0.4 不动。
 
@@ -54,7 +60,6 @@ Returns ``{"added", "updated", "deleted", "noop"}``.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -404,10 +409,7 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
     # 仅 regex 通道 (休眠中) 保留。
     from llm_extract import extract_channel as _extract_channel
     from llm_extract import CHANNEL_REGEX as _CH_REGEX
-    from llm_extract import CHANNEL_FALLBACK as _CH_FALLBACK
-    _channel = _extract_channel()
-    use_regex_channel = _channel == _CH_REGEX
-    use_fallback_auto = _channel == _CH_FALLBACK
+    use_regex_channel = _extract_channel() == _CH_REGEX
     _queue_on = use_regex_channel
     for seg_idx, full_text in (truncated_segs if _queue_on else []):
         prov_of_seg = segments[seg_idx][0] if seg_idx < len(segments) else None
@@ -424,7 +426,6 @@ def _autodream_inner(session_id: str, transcript_path: str, providers: list | No
         source_cwd=source_cwd,
         transcript_path=transcript_path,
         use_regex_channel=use_regex_channel,
-        use_fallback_auto=use_fallback_auto,
         allow_enqueue=True,
         harness=harness,  # B3 (B3C-HYG): fact.harness 来源审计 stamp
     )
@@ -445,9 +446,7 @@ def rerun_segment(text: str, *, provenance: str | None = None,
     升级队列素材是入队时正文切片, 来源 harness 不可考不臆测 (fact: 素材
     升级路径由 dream._apply_upgrade 继承旧 fact 的 harness)。"""
     from llm_extract import CHANNEL_REGEX as _CH_REGEX
-    from llm_extract import CHANNEL_FALLBACK as _CH_FALLBACK
     from llm_extract import extract_channel as _extract_channel
-    _channel = _extract_channel()
     return _decide_segments(
         [(provenance or "system", text)],
         session_id=None,
@@ -455,8 +454,7 @@ def rerun_segment(text: str, *, provenance: str | None = None,
         fact_type=fact_type,
         source_cwd=source_cwd,
         transcript_path=None,
-        use_regex_channel=(_channel == _CH_REGEX),
-        use_fallback_auto=(_channel == _CH_FALLBACK),
+        use_regex_channel=(_extract_channel() == _CH_REGEX),
         allow_enqueue=False,
     )
 
@@ -470,111 +468,52 @@ def _decide_segments(
     source_cwd: str | None,
     transcript_path: str | None,
     use_regex_channel: bool,
-    use_fallback_auto: bool,
     allow_enqueue: bool,
     harness: str | None = None,
 ) -> dict[str, int]:
     """逐段提取 (通道分派) + Phase c 增量决策 (ADD/UPDATE/supersede/NOOP)。
 
     ``seg_list`` = [(provenance, seg_text)]。通道分派: regex 档直走 gazetteer
-    占位链; llm/fallback:auto 走 LLM 直抽 — fallback:auto 档
-    :class:`ExtractFailed` 自动切 regex 兜底链 + 降级标记 (E10, 默认 llm 档
-    仍响亮上抛); 降级段零产出时 C 层语义兜底与 A 层入队照 regex 档在场
-    (⑤ 链 ①②③ 档; embedding 同挂时 C 层内部静默跳过 = 仅①③档)。
+    占位链 (H1 切换票待下线); llm 档走 LLM 直抽 — provider 不可达
+    :class:`ProviderUnreachable` 响亮上抛 (裁决#5b: 挂起等恢复, 不降级
+    不产离线记忆), 单段内容性 :class:`ExtractFailed` 响亮跳段继续。
     ``allow_enqueue=False`` (队列重跑入口) 时 A 层不重入队。
     """
     import llm_extract as llm_extract_mod
     active_providers = list(providers) if providers else []
-    # 分段提取 + 三级空产出时序 (追加 A/C): 段提取零产出 →
-    #   C 层 (零 LLM 兜底): CJK span 批量 embed → vec_entity ANN ≥0.45 →
-    #     链接既有实体 (**只产实体声明不造谓词边** — span 无句式证据造边=
-    #     臆测, 谓词留 wings; 落库走 resolver step1 精确命中路径);
-    #   仍无 edges → A 层: enqueue_segment 全文入队 (wings 异步; C 不吞 A —
-    #     实体链接了语义内容还没提)。
-    # 幂等: 同 material_ref 拒重; M9 novelty (embedding 语言中立) 定优先级,
-    # wings 判「无事实」→ 合法 done, attempts≥3 封顶防重复浪费。
+    # 分段提取 — 零产出段的 A 层入队仅 regex 档在场 (wings 异步; 幂等由
+    # 同 material_ref 拒重保证, M9 novelty 定优先级, wings 判「无事实」→
+    # 合法 done, attempts≥3 封顶防重复浪费)。
     seg_results: list[tuple[str, Any, str]] = []  # (prov, result, seg_text D-B b)
     seg_to_enqueue: list[tuple[int, str, Any]] = []
-    seg_degraded: set[int] = set()  # fallback:auto 下已降级 regex 兜底链的段
-    # T3/E1 提取前过滤 (spec §三): MEM_LAYA_FILTER=1 且 laya 在线 → 逐段
-    # 1 noul "contains extractable facts?", noul<0.4 的噪声段跳过 LLM 抽取、
-    # gazetteer 保底照跑 (召回 100%)。任一段 None/异常 → 该段不过滤 (保守)。
-    # regex 档无 LLM 调用可省 → 不触发零意义网络。
-    # ponytail: 逐段单问而非整批共享 state——实测(2026-09-29, temp/
-    # eval_filter_rate.py)整批 state 下 noul 退化为 state 级常数(噪声段也
-    # ≈0.97, 过滤率≈0); 带任务头的单段 state 有真区分度(noise 0.0/signal
-    # 0.57)。逐段 ≈50ms×N, daily 非交互窗口可承受; 若 laya 支持逐问题
-    # 独立打分再回批。
-    laya_skip: set[int] = set()
-    # 0.4(票面, 整批语义) → 0.25: 逐段口径实测校准 (noise 恒 0.00 / signal
-    # 0.29-0.80, 0.4 会把浮动到 0.35 的信号段误滤)
-    _laya_filter_thresh = 0.25
-    if seg_list and not use_regex_channel and \
-            os.environ.get("MEM_LAYA_FILTER", "0") == "1":
-        try:
-            from laya_client import laya_available, laya_batch
-            if laya_available():
-                for i, (_, seg_t) in enumerate(seg_list):
-                    a = laya_batch(
-                        f"以下是待评估的会话片段:\n[{i}] {seg_t}",
-                        {f"seg_{i}": {"type": "noul", "instructions":
-                                      "Does the segment contain extractable "
-                                      "facts?"}})
-                    ans = (a or {}).get(f"seg_{i}")
-                    if isinstance(ans, dict) \
-                            and isinstance(ans.get("noul"), (int, float)) \
-                            and ans["noul"] < _laya_filter_thresh:
-                        laya_skip.add(i)
-        except Exception:
-            laya_skip = set()  # 保守: 过滤面任何异常 = 不过滤
+    # 退役 (graph-reform v2 裁决#4/#5b, 2026-10-01): T3 laya 逐段 noul 过滤
+    # 块 (生产从未启用, 纯死代码) 与 fallback:auto 的 gazetteer 降级链全面
+    # 删除 — provider 不可达即挂起等恢复 (ProviderUnreachable 响亮上抛,
+    # 由 spool/调用方等恢复后补审), 不再产离线记忆; C 层
+    # semantic_fallback 实体兜底同链退役 (FINDING c9: 对可命中段恒不可达
+    # 的防御性保险)。regex 占位通道分支保留 — 归 H1 切换票下线。
     for seg_idx, (seg_prov, seg_text) in enumerate(seg_list):
-        if use_regex_channel or seg_idx in laya_skip:
-            # ponytail/review L3: laya_skip 段走 gaz 保底但 regex_lane=False,
-            # 不享受 C 层 semantic_fallback —— 有意为之(噪声段不再烧兜底),
-            # 若实测漏召回再对齐 seg_degraded 语义
+        if use_regex_channel:
             result = gazetteer.extract(seg_text)
         else:
             try:
                 result = llm_extract_mod.extract(seg_text)  # 失败 ExtractFailed 上抛 (无降级红线)
-            except llm_extract_mod.ProviderUnreachable as e:
-                if not use_fallback_auto:
-                    raise  # 默认 llm 档断供: 响亮上抛不静默降级 (断供红线不变)
-                # v1.7⑤ E10: 显式 opt-in 降级档 — 断供同走兜底链 (语义不变)。
-                seg_degraded.add(seg_idx)
-                result = gazetteer.extract(seg_text)
+            except llm_extract_mod.ProviderUnreachable:
+                # 裁决#5b: provider 不可达 → 挂起等恢复 (fallback:auto
+                # 降级链已退役, 两档语义合一 — 响亮上抛, 不产离线记忆)。
+                raise
             except llm_extract_mod.ExtractFailed as e:
-                if use_fallback_auto:
-                    # v1.7⑤ E10: 显式 opt-in 降级档 — 内容性失败自动切 ① 词
-                    # 典+regex 三路兜底链, 产物 extractor=regex (lif_source
-                    # 0.4, 编排者裁决: 不加 SOURCE_WEIGHT 新键) = fallback
-                    # 来源降级标记。
-                    seg_degraded.add(seg_idx)
-                    result = gazetteer.extract(seg_text)
-                else:
-                    # B4-DISTILL (2026-09-01): 默认档单段内容性 schema 两轮败
-                    # → 响亮跳段继续 (爆炸半径=1 段)。实跑实证: 42 段中 1 段
-                    # 「object 未声明」把同文件其余 41 段好产出全部拖死。非
-                    # regex 回绕 (提取层不变; 断供走上方红线分支)。
-                    print(f"AUTODREAM-WARN: seg#{seg_idx} LLM 抽取两轮败, 跳段: "
-                          f"{e}", flush=True)
-                    continue
-        regex_lane = use_regex_channel or (seg_idx in seg_degraded)
-        if regex_lane and not result.entities and not result.edges:
-            # C 层: 语义兜底实体声明 (与 B 共用 _link_spans 管道)。防御性
-            # 兜底 — B 路在 extract 内对可语义命中的段恒先命中 (FINDING
-            # c9: 对可命中段本分支不可达; 保留作 B 未覆盖形态的保险)。
-            # embedding 也挂 → 内部静默跳过 (⑤ 降级三档: 仅①③档)。
-            c_ents = gazetteer.semantic_fallback_hits(seg_text)
-            if c_ents:
-                result.entities = c_ents  # 实体声明接管; edges 保持空
-        if not result.edges and allow_enqueue and (
-                use_regex_channel or (use_fallback_auto and seg_idx in seg_degraded)):
-            # A 层: 全文入队 — **与实体来源无关** (两档通道命中实体但无数
-            # 谓词边的段同样语义内容未提, 皆入 A; FINDING c9 根因修复)。
-            # 幂等由 enqueue 的 material_ref 拒重保证 (c10)。
-            # llm 通道: LLM 已看过全文没抽出边, 再喂 wings 是重复花钱 →
-            # 不入队 (队列退役清理 2026-08-27); fallback:auto 仅降级段入队
-            # (主径没看过这段 — 主径恢复后 sweep 补抽转正, ⑤链③档)。
+                # B4-DISTILL (2026-09-01): 默认档单段内容性 schema 两轮败
+                # → 响亮跳段继续 (爆炸半径=1 段)。实跑实证: 42 段中 1 段
+                # 「object 未声明」把同文件其余 41 段好产出全部拖死。
+                print(f"AUTODREAM-WARN: seg#{seg_idx} LLM 抽取两轮败, 跳段: "
+                      f"{e}", flush=True)
+                continue
+        if not result.edges and allow_enqueue and use_regex_channel:
+            # A 层: regex 档零边段全文入队 (wings 异步; 与实体来源无关 —
+            # 命中实体但无谓词边的段同样语义内容未提)。幂等由 enqueue 的
+            # material_ref 拒重保证 (c10)。llm 通道不入队 (LLM 已看过全文
+            # 没抽出边, 再喂 wings 是重复花钱, 队列退役清理 2026-08-27)。
             seg_to_enqueue.append((seg_idx, seg_text, seg_prov))
         # D-B b: seg_text 随产出下传 — Phase c 边处理时喂 dedupe 裁判
         # (名字族相关性 ≠ 同一性, "A 基于 B" 关系句是非同一性铁证)。

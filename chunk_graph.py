@@ -14,8 +14,8 @@ import store
 from laya_client import TOKEN_BUDGET
 import laya_client
 
-# 逐句口径与 T3 校准一致 (noise 恒 0.00 / signal 0.29-0.80, 0.4 会误滤)
-_FILTER_THRESH = 0.25
+# 退役 (裁决#4, 2026-10-01): _FILTER_THRESH/_filter_units 逐句 noul 过滤步
+# 删除 — 噪声句交由聚簇孤立 + 蒸馏层五类标签处置, 不再有硬阈值门。
 _UNIT_RE = re.compile(r"[^。！？；.!?;\n]+[。！？；.!?;]*")
 
 
@@ -47,26 +47,6 @@ def _answer_dict(answers: dict | None, qid: str) -> dict | None:
         return None
     ans = answers.get(qid)
     return ans if isinstance(ans, dict) else None
-
-
-def _filter_units(units: list[str]) -> list[str] | None:
-    """逐句 1 noul 过滤寒暄/噪声句; state 只含该句 (整批共享会把 noul 洗成常数,
-    仓内实测)。任一句守卫不过 → 保守保留该句; laya 不可用 → None (调用方降级全留)。"""
-    if not laya_client.laya_available():
-        return None
-    kept = []
-    for i, u in enumerate(units):
-        a = laya_client.laya_batch(u, {f"flt_{i}": {"type": "noul", "instructions":
-                          "Does this sentence carry a complete standalone "
-                          "conclusion worth remembering?"}})
-        if a is None:  # 整批 None (laya 抖动) → 组级降级, 与 _cluster_units 同口径
-            return None
-        ans = _answer_dict(a, f"flt_{i}")
-        # 守卫不过(缺 noul/非数值) → 保留 (保守, 与 T3 畸形段不过滤一致)
-        if not (isinstance(ans.get("noul"), (int, float))
-                and ans["noul"] < _FILTER_THRESH):
-            kept.append(u)
-    return kept
 
 
 def _cluster_units(units: list[str]) -> list[list[str]] | None:
@@ -109,16 +89,12 @@ def _cluster_units(units: list[str]) -> list[list[str]] | None:
 
 
 def aggregate_chunks(pack: list[str]) -> list[dict] | None:
-    """一个包: (a) 逐句 noul 过滤 (b) choice 聚簇。任一步 laya 批 None → None
-    (该包由调用方处理); 全句被滤 → 空列表。"""
+    """一个包: choice 聚簇 (逐句 noul 过滤步已退役, 裁决#4 2026-10-01 —
+    噪声句由聚簇孤立, 不再有硬阈值门)。laya 批 None → None (该包由调用方
+    处理)。"""
     if not laya_client.laya_available():
         return None
-    kept = _filter_units(pack)
-    if kept is None:
-        return None
-    if not kept:
-        return []
-    clusters = _cluster_units(kept)
+    clusters = _cluster_units(pack)
     if clusters is None:
         return None
     return [{"text": "".join(units), "units": units} for units in clusters]

@@ -1,5 +1,6 @@
-"""G1 chunk 抽取管道测试 — mock laya_batch 契约 + 真 db (tmp_path fixture,
-先例 test_laya_filter.py)。测试规范: def test_xxx() 函数让 pytest 收集。"""
+"""G1 chunk 抽取管道测试 — mock laya_batch 契约 + 真 db (tmp_path fixture)。
+逐句 noul 过滤步已退役 (裁决#4, 2026-10-01) — 聚簇面测试不再 monkeypatch
+_filter_units。测试规范: def test_xxx() 函数让 pytest 收集。"""
 from pathlib import Path
 
 import chunk_graph
@@ -50,39 +51,22 @@ def test_pack_units_oversized_singleton():
 
 # ── aggregate_chunks (mock laya) ────────────────────────────────────
 
-def _filter_answers(state, questions):
-    # 逐句过滤: 噪声句 noul=0.0, 结论句 noul=0.8
-    return {qid: {"noul": 0.0 if "寒暄" in state else 0.8} for qid in questions}
-
-
-def test_aggregate_filters_noise_and_clusters(tmp_path, monkeypatch):
+def test_aggregate_no_filter_all_units_retained(tmp_path, monkeypatch):
+    """裁决#4 (2026-10-01): 逐句 noul 过滤步退役 — 噪声句也进聚簇, 句集零
+    丢失 (硬阈值门不复存在)。"""
     calls = _setup(tmp_path, monkeypatch)
-    pack = ["你好呀寒暄。", "采纳斯普利特方案。", "分两步执行。"]
-    monkeypatch.setattr(chunk_graph, "_filter_units",
-                        lambda units: ["采纳斯普利特方案。", "分两步执行。"])
-    agg = {qid: {"choice": "1", "confidence": 0.9}
-           for qid in ("agg_0",)}  # agg_0 → 1 聚合; agg_1 低置信孤立
     laya_client.laya_batch.answers = \
-        lambda s, q: agg if "candidate units" in s else _filter_answers(s, q)
+        lambda s, q: {qid: {"choice": "1", "confidence": 0.9} for qid in q}
+    pack = ["你好呀寒暄。", "采纳斯普利特方案。", "分两步执行。"]
     out = chunk_graph.aggregate_chunks(pack)
-    assert out == [{"text": "采纳斯普利特方案。分两步执行。",
-                    "units": ["采纳斯普利特方案。", "分两步执行。"]}]
-
-
-def test_filter_units_state_per_sentence(tmp_path, monkeypatch):
-    """T3 教训锚: 过滤步 state 只含该句 (整批共享 state 会洗成常数), 低 noul 被滤。"""
-    calls = _setup(tmp_path, monkeypatch)
-    laya_client.laya_batch.answers = _filter_answers
-    pack = ["你好呀寒暄。", "采纳斯普利特方案。"]
-    assert chunk_graph._filter_units(pack) == ["采纳斯普利特方案。"]
-    assert [s for s, q in calls] == pack  # 每句恰一次, state=该句原文
-    assert all(list(q) == [f"flt_{i}"] for i, (s, q) in enumerate(calls))
+    kept = [u for c in out for u in c["units"]]
+    assert sorted(kept) == sorted(pack), "过滤步退役: 全部句保留交聚簇"
+    assert calls, "聚簇面照常调 laya_batch"
 
 
 def test_aggregate_malformed_answer_not_crash(tmp_path, monkeypatch):
     """键位守卫锚: choice 非法/缺 confidence/幻觉 id → 孤立成 chunk, 不炸。"""
     _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(chunk_graph, "_filter_units", lambda units: units)
     laya_client.laya_batch.answers = lambda s, q: {
         "agg_0": {"choice": "1"},               # 缺 confidence
         "agg_1": {"choice": "999", "confidence": 0.9},  # 幻觉 id
@@ -96,7 +80,6 @@ def test_aggregate_malformed_answer_not_crash(tmp_path, monkeypatch):
 
 def test_aggregate_batch_none_returns_none(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(chunk_graph, "_filter_units", lambda units: units)
     laya_client.laya_batch.answers = lambda s, q: None
     assert chunk_graph.aggregate_chunks(["甲。", "乙。"]) is None
 

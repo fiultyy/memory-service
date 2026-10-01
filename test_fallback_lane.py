@@ -1,24 +1,21 @@
-"""v1.7⑤ 无 LLM 兜底 lane (fallback:auto) + ⑤a 注入降级标注验收测试。
+"""fallback lane + ⑤a 注入降级标注验收测试 (graph-reform v2 H3a 重写, 裁决#4/#5b).
 
-覆盖 (派单 E9/E10/E11 + ⑤a + 编排者裁决两条):
-1. E10: fallback:auto 档 llm 断供 (ExtractFailed) → 自动切 gazetteer 兜底
-   链, 产物 extractor='regex' (编排者裁决: 不加 SOURCE_WEIGHT 新键, 降级
-   标记即 extractor 档); 段入队 (A 层, 主径恢复 sweep 补抽); 幂等 rerun
-   全 NOOP。
-2. 断供红线: 默认 llm 档同断供 → ExtractFailed 响亮上抛 (不静默降级)。
-3. E9/C2 三口分账: fallback fact 被召回/注入/重放 → LIF 列
-   /access_count/last_accessed_at 零变化, 只写 recall_sessions 观测集:
-   - 直写口 scoring.refresh_lif_on_recall;
-   - replay 口 dream._replay_recall_hits;
-   - 注入口 hooks/recall_inject (含 ⑤a 警示渲染: 全降级块 quality 属性 +
-     块顶警示 / 混合块逐条警示行)。
-4. E11: 主径恢复后 seg 补抽 rerun 转正 (extractor='llm', 低初值 0.4 无
-   stamp — rerun 无会话语义)。
+2026-10-01 语义反转: fallback:auto 的 gazetteer 降级链**全面退役** —
+provider 不可达 = 挂起等恢复 (ProviderUnreachable 响亮上抛), 不再产离线
+记忆。本文件重写钉新行为; 既有读侧面 (⑤a 降级标注渲染 / E9/C2 三口分账 /
+打标面=清洗面闭环) 不受写侧退役影响, 照旧覆盖:
+
+1. 裁决#5b: fallback:auto 档 llm 断供 → ProviderUnreachable 上抛挂起,
+   零 fact / 零 upgrade_queue (不降级不产离线记忆); 默认 llm 档同红线。
+2. 单段内容性 ExtractFailed → 响亮跳段继续 (B4-DISTILL, 爆炸半径=1 段)。
+3. E9/C2 三口分账: 降级来源 (存量 extractor='regex') fact 被召回/注入/重放
+   → LIF 列零变化, 只写 recall_sessions 观测集 (⑤a 警示渲染同测)。
+4. E12: embed 预热炸点被 try/except 吸收, 管道照常落库。
 5. 闭环: ⑤a 降级标注块被 corpus_prep 五 harness 整块剥净 (打标面=清洗面)。
 
 测试规范: def test_xxx() 函数让 pytest 收集。零网络零 LLM: llm_extract.extract
-monkeypatch 注入 ExtractFailed / 可控 Extraction; embedding.embed stub 离线;
-signals 目录指向 tmp。
+monkeypatch 注入 ProviderUnreachable / 可控 Extraction; embedding.embed stub
+离线; signals 目录指向 tmp。
 """
 import io
 import json
@@ -33,7 +30,6 @@ import llm_extract
 import scoring
 import signals
 import store
-import upgrade
 from llm_extract import ExtractFailed, ProviderUnreachable
 from llm_provider import EdgeOut, EntityOut, Extraction
 
@@ -101,58 +97,29 @@ def _active_fact(value: str) -> dict:
     return store.get_fact(rows[0]["id"])
 
 
-# ── 1. E10 降级链 ────────────────────────────────────────────────────
+# ── 1. 裁决#5b: 不可达 = 挂起 (降级链退役) ───────────────────────────
 
-def test_fallback_auto_degrades_to_gazetteer_chain(monkeypatch):
-    """fallback:auto + llm 断供 → gazetteer 兜底链产物 extractor='regex'
-    (lif_source 0.4 档, extract_sessions 不 stamp); 段入队待主径补抽;
-    同 session 重跑幂等全 NOOP。"""
+def test_fallback_auto_unreachable_suspends(monkeypatch):
+    """fallback:auto + llm 断供 → ProviderUnreachable 响亮上抛挂起等恢复:
+    零 fact 落库、零 upgrade_queue 入队 — 不再切 gazetteer 产离线记忆。"""
     tmp = _fresh("fb1")
     tpath = _write_transcript(tmp / "t.jsonl")
     _offline_embed(monkeypatch)
     _llm_down(monkeypatch)
     monkeypatch.setenv("MEM_EXTRACT_CHANNEL", "fallback:auto")
-    monkeypatch.delenv(scoring.COLDSTART_UNLOCK_ENV, raising=False)
 
-    out1 = autodream_run(tpath)
-    assert out1["added"] == 1, out1
-    fact = _active_fact("笔记工具")
-    assert fact["extractor"] == "regex", (
-        "编排者裁决: 降级产物 extractor='regex' 即降级标记, 不加新键")
-    assert fact["lif_source"] == 0.4
-    assert fact["extract_sessions"] == [], "降级链不是主径 — 不 stamp 分账列"
-    assert scoring.fact_is_fallback(fact) is True
-
-    # 有产出的降级段不重复入队 (A 层只收零边段 — 语义已提出, wings 重复花钱)。
-    refs = {r["material_ref"] for r in db.get_conn().execute(
-        "SELECT material_ref FROM upgrade_queue").fetchall()}
-    assert refs == set(), f"零边才有 A 层, got {refs}"
-
-    out2 = autodream_run(tpath)
-    assert out2 == {"added": 0, "updated": 0, "deleted": 0, "noop": 1}, out2
-
-
-_NO_EDGE_SENT = "今天讨论了 Logseq 的整体架构设计"
-
-
-def test_degraded_zero_edge_segment_enqueued(monkeypatch):
-    """A 层 (⑤链③档): 降级链零边段全文入队 (主径没看过这段 — 主径恢复后
-    sweep 补抽); llm 通道同样零边不入队 (主径已看过, 队列退役)。"""
-    tmp = _fresh("fb1b")
-    tpath = _write_transcript(tmp / "t.jsonl", _NO_EDGE_SENT)
-    _offline_embed(monkeypatch)
-    _llm_down(monkeypatch)
-    monkeypatch.setenv("MEM_EXTRACT_CHANNEL", "fallback:auto")
-    out = autodream_run(tpath)
-    assert out["added"] == 0, out
-    refs = {r["material_ref"] for r in db.get_conn().execute(
-        "SELECT material_ref FROM upgrade_queue").fetchall()}
-    assert f"segment:{tpath}#seg0" in refs, f"降级零边段应入队, got {refs}"
-
-
-def autodream_run(tpath: str) -> dict:
     import autodream
-    return autodream.autodream("s1", tpath)
+    try:
+        autodream.autodream("s1", tpath)
+    except ProviderUnreachable:
+        pass  # 挂起 = 预期 (响亮上抛)
+    else:
+        raise AssertionError("fallback:auto 断供必须挂起上抛 (降级链已退役)")
+    n_fact = db.get_conn().execute("SELECT COUNT(*) FROM fact").fetchone()[0]
+    assert n_fact == 0, f"挂起语义: 不产离线记忆, got {n_fact} facts"
+    n_q = db.get_conn().execute(
+        "SELECT COUNT(*) FROM upgrade_queue").fetchone()[0]
+    assert n_q == 0, f"降级入队链已退役, got {n_q} queue rows"
 
 
 def test_default_llm_channel_stays_loud(monkeypatch):
@@ -173,8 +140,7 @@ def test_default_llm_channel_stays_loud(monkeypatch):
 
 def test_schema_fail_skips_segment_continues(monkeypatch):
     """B4-DISTILL (2026-09-01): 默认 llm 档**单段内容性** schema 两轮败 →
-    响亮跳段, 其余段产出照常落库 (爆炸半径=1 段)。实跑实证: 42 段中 1 段
-    「object 未声明」曾把同文件其余段全部拖死。断供仍走 stays_loud 红线。"""
+    响亮跳段, 其余段产出照常落库 (爆炸半径=1 段)。断供仍走 stays_loud 红线。"""
     tmp = _fresh("fb2b")
     # 两块异 provenance (user_text + assistant_text) → 两段
     tpath = str(tmp / "t2.jsonl")
@@ -201,7 +167,7 @@ def test_schema_fail_skips_segment_continues(monkeypatch):
         "SELECT COUNT(*) FROM fact WHERE extractor='llm'").fetchone()[0] >= 1
 
 
-# ── 3. E9/C2 三口分账 ────────────────────────────────────────────────
+# ── 3. E9/C2 三口分账 (读侧面, 存量降级来源) ─────────────────────────
 
 def _seed_fallback_fact(tmp: Path) -> tuple[str, str]:
     eid = store.put_entity("Logseq", "concept")
@@ -322,39 +288,6 @@ def test_mixed_block_plain_tag_per_entry_warning(monkeypatch):
     _assert_fallback_untouched(fid_fb, "sm")
 
 
-# ── 4. E11 主径恢复补抽转正 ──────────────────────────────────────────
-
-def test_main_path_recovery_rerun_converts(monkeypatch):
-    """降级零边段入队后主径恢复 → 消费端 rerun_segment 决策管道补抽: 产物
-    extractor='llm' (转正), 低初值 0.4 且无 stamp (rerun 无会话语义)。"""
-    tmp = _fresh("fb5")
-    restore_sig = _patch_signals(tmp / "signals")
-    tpath = _write_transcript(tmp / "t.jsonl", _NO_EDGE_SENT)
-    _offline_embed(monkeypatch)
-    _llm_down(monkeypatch)
-    monkeypatch.setenv("MEM_EXTRACT_CHANNEL", "fallback:auto")
-    import autodream
-    assert autodream.autodream("s1", tpath)["added"] == 0
-
-    # 主径恢复 → 消费队列 rerun 补抽 (产出 is_a 三元组)。
-    _mock_llm_extract(monkeypatch, "Logseq", "is_a", "笔记工具")
-    stats = dream._consume_queue([])
-    try:
-        assert stats["queue_done"] == 1 and stats["queue_skipped"] == 0, stats
-        assert stats["facts_upgraded"] == 1, stats
-        fact = _active_fact("笔记工具")
-        assert fact["extractor"] == "llm", "补抽转正: extractor 毕业到主径档"
-        assert fact["lif_source"] == scoring.LOW_INIT_LIF_SOURCE, (
-            "转正仍待验证: rerun 无会话语义 → 低初值 0.4 无 stamp")
-        assert fact["extract_sessions"] == []
-        row = db.get_conn().execute(
-            "SELECT status FROM upgrade_queue WHERE material_ref = ?",
-            (f"segment:{tpath}#seg0",)).fetchone()
-        assert row["status"] == "done"
-    finally:
-        restore_sig()
-
-
 # ── 5. ⑤a 闭环: 打标面 = 清洗面 ─────────────────────────────────────
 
 def test_fallback_warning_block_not_reingested(monkeypatch):
@@ -381,16 +314,16 @@ def test_fallback_warning_block_not_reingested(monkeypatch):
         assert clean(mixed, h) == "", f"混合块回流: {h}"
 
 
-# ── 6. E12 embedding 同挂降级 (⑤ 链仅①③档) ─────────────────────────
+# ── 6. E12 embedding 预热炸点降级 (管道不炸) ─────────────────────────
 
-def test_embed_down_degraded_pipeline_still_completes(monkeypatch):
+def test_embed_down_pipeline_still_completes(monkeypatch):
     """E12 N6: autodream 的 embed_batch 预热炸点 (fact value 预热) raise 被
-    try/except 吸收 (写侧 vec 条件跳过), 兜底链照常落库 — 单事务不炸。
-    (resolver 内部 embed_batch 无守卫属 resolver 域, 非本 lane E12 面。)"""
+    try/except 吸收 (写侧 vec 条件跳过), llm 主径产出照常落库 — 单事务不炸。"""
     tmp = _fresh("fb6")
     tpath = _write_transcript(tmp / "t.jsonl")
-    _llm_down(monkeypatch)
+    _mock_llm_extract(monkeypatch, "Logseq", "is_a", "笔记工具")
     _offline_embed(monkeypatch)
+    monkeypatch.setenv("MEM_EXTRACT_CHANNEL", "llm")
     real_batch = embedding.embed_batch
 
     def _raise_on_value_warmup(texts, providers=None):
@@ -399,8 +332,7 @@ def test_embed_down_degraded_pipeline_still_completes(monkeypatch):
         return real_batch(texts, providers=providers)
 
     monkeypatch.setattr(embedding, "embed_batch", _raise_on_value_warmup)
-    monkeypatch.setenv("MEM_EXTRACT_CHANNEL", "fallback:auto")
     import autodream
     out = autodream.autodream("s1", tpath)  # 不 raise = 验收
     assert out["added"] == 1, out
-    assert _active_fact("笔记工具")["extractor"] == "regex"
+    assert _active_fact("笔记工具")["extractor"] == "llm"

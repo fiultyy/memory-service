@@ -4,7 +4,8 @@
 1. 建表迁移: 新库含表; 旧库副本(无表)幂等补表; 重复 init 无副作用。
 2. 入队幂等: 同 material_ref 二次入队不重复 (M8 segment 点 + M6 fact 点各测)。
 3. M9 断言: monkeypatch embed 可控向量 — 重复文本 novelty≈0 / 全新文本高;
-   gazetteer miss 实体惊喜; 表外谓词结构惊喜; priority=|surprise|^α 落列;
+   表外谓词结构惊喜 (实体 miss 轴已删, 裁决#4 2026-10-01 gazetteer 词典
+   特征退役); priority=|surprise|^α 落列;
    离线 embed → novelty/surprise NULL + priority 0 (降级不 crash)。
 4. G3 流转: fake 消费者 pending→in_flight(done) / 失败 attempts+1 退回 /
    attempts≥3→dead; 批取 priority 降序。
@@ -145,29 +146,26 @@ def test_novelty_duplicate_and_novel_text():
     assert new["surprise"] > dup["surprise"]
 
 
-def test_entity_and_structural_surprise():
-    """gazetteer miss: 大写词 'Zephyr' 不在词典也未被 regex 覆盖 → miss;
-    显式实体在词典 → 覆盖。表外谓词 'made_of' → structural; 表内 'uses' → 否。"""
-    tmp = _fresh_db("ent")
-    import store
-    store.put_entity("Rust 语言", "tool", aliases=["rust"])
+def test_structural_surprise_and_offline_degrade():
+    """实体 miss 轴已删 (裁决#4 2026-10-01, gazetteer 词典特征退役):
+    compute 返回不再含 entity_miss 键, ``entities`` 形参兼容保留被忽略;
+    表外谓词 'made_of' → structural; 表内 'uses' → 否。"""
+    _fresh_db("ent")
 
-    orig = _install_embed_map({})  # 离线 → novelty None, 只看两轴加成
+    orig = _install_embed_map({})  # 离线 → novelty None, 只看结构轴
     try:
-        miss = surprise.compute("Zephyr is fast", entities=("Zephyr",))
-        hit = surprise.compute("rust is fast", entities=("rust",))
-        struct = surprise.compute("x", predicates=("made_of",))
+        struct = surprise.compute("Zephyr is fast", entities=("Zephyr",))
         in_table = surprise.compute("x", predicates=("uses",))
+        off = surprise.compute("x", predicates=("made_of",))
     finally:
         embedding.embed = orig
 
-    assert miss["entity_miss"] == 1.0, f"词典 miss 应 1.0, got {miss}"
-    assert hit["entity_miss"] == 0.0, f"词典命中应 0.0, got {hit}"
-    assert struct["structural"] is True, "表外谓词应标记结构惊喜"
-    assert in_table["structural"] is False, "表内谓词不应标记"
+    assert "entity_miss" not in struct, "实体 miss 轴已删, 键不得残留"
+    assert struct["structural"] is False and in_table["structural"] is False
+    assert off["structural"] is True, "表外谓词应标记结构惊喜"
     # 离线: novelty None → surprise None, priority 0 (降级不 crash)。
-    assert miss["novelty"] is None and miss["surprise"] is None
-    assert miss["priority"] == 0.0
+    assert off["novelty"] is None and off["surprise"] is None
+    assert off["priority"] == 0.0
 
 
 def test_priority_formula_alpha():

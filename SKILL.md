@@ -58,6 +58,12 @@ cd /home/yy/projects/memory-service && python3 cli.py <subcommand> ...
 
 ## 子命令契约(严格对齐 cli.py)
 
+> **v2 图改造 (2026-10-01)**: 记忆入库唯一 sanctioned 径 = **distill 一步蒸馏**
+> (spool+daemon 自动消费 CC/dsh compact 快照; 文档型 memory files 走
+> `re_ingest_file`/`init-memory`, ADR-17 hook 不变)。
+> `write`/`ingest`/`autodream` 等 (s,p,o) 通道为 **legacy 归档面**, 新图
+> 召回不可见 (`MEM_RECALL_LEGACY_FACT=1` 回切)。
+
 16 个子命令(详见 `cli.py _main`):原 11 个 + 四动词 `write` / `confirm` / `invalidate` / `elevate` + `cite` + `stats-json`。
 
 CC 以 `mem` 为调用名(skill 名 = `mem`, 软链到 `~/.claude/skills/mem/`)。面向 CC 的调用 = `mem <subcommand>`,底层 = `cli.py <subcommand>`,两种写法等价:

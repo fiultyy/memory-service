@@ -275,11 +275,21 @@ def main() -> int:
         # value 扫描候选同理全拒 (长 prompt 稀释 bigram 命中任意 value)。
         # 跨项目 KB 1205/1206 fact source_cwd=NULL → cwd 过滤无区分度, 不用。
         ql = query.lower()
-        anchor_ids = {
-            e["id"] for e in recall_mod.search_entities(
-                scoring.query_tokens(query))
+        _ent_hits = [
+            e for e in recall_mod.search_entities(scoring.query_tokens(query))
             if e["name"].lower() in ql
-        }
+        ]
+        anchor_ids = {e["id"] for e in _ent_hits}
+        # v2 atom 面: atom 无 subject/object 实体列 → 锚定等价物 = 锚实体
+        # 全名出现在 atom.text (文本锚命中), 配额键用锚名 (伪锚)。
+        anchor_names = {e["name"] for e in _ent_hits}
+
+        def _atom_anchor(f: dict):
+            t = (f.get("text") or "").lower()
+            if not t:
+                return None
+            return next((n for n in anchor_names if n.lower() in t), None)
+
         if not anchor_ids:
             return 0  # prompt 未指名任何已知实体 → 无可注入, 跳过整个 recall
         # boost=False + 大候选窗: 稀释使被指名实体的关键 fact (~0.15) 排不进
@@ -311,21 +321,24 @@ def main() -> int:
         r for r in results if float(r.get("score", 0.0)) >= min_score
         and (r.get("fact", {}).get("subject_id") in anchor_ids
              or r.get("fact", {}).get("object_id") in anchor_ids
-             or r.get("fact", {}).get("gate_keep"))
+             or r.get("fact", {}).get("gate_keep")
+             or _atom_anchor(r.get("fact") or {}))
     ]
     # 每锚实体配额: 长 prompt 下 value 词重叠多的实体 (LLM) 会霸榜, 把
     # 低匹配但被指名实体的关键 fact (sqlite-vec 依赖关系) 挤出 top_k。
     # 分数序遍历 + 单锚配额 → 每个 prompt 指名实体都有代表。
     # gate_keep fact 不占锚配额 (gate 放行=独立入场券, 无锚可挂)。
+    # atom 行的锚 = 文本命中锚名 (伪锚键, 与实体 id 同配额语义)。
     per_anchor: dict[str, int] = {}
     hits = []
     for r in candidates:  # recall 已按 score 降序
         f = r.get("fact") or {}
         gate_keep = bool(f.get("gate_keep"))
         a = f.get("subject_id") if f.get("subject_id") in anchor_ids \
-            else f.get("object_id")
+            else (f.get("object_id") if f.get("object_id") in anchor_ids
+                  else _atom_anchor(f))
         if not gate_keep:
-            if a not in anchor_ids:
+            if a is None:
                 continue
             if per_anchor.get(a, 0) >= per_anchor_quota:
                 continue

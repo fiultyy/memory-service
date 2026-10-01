@@ -615,11 +615,11 @@ def _proj_memory_dir(memory_dir: str | None, cwd: str, harness: str = "cc") -> P
 def init_memory(memory_dir: str | None = None,
                 source_cwd: str | None = None,
                 harness: str = "cc") -> dict[str, int]:
-    """Seed KG from CC memory .md files (ADR-12)。``memory_dir`` 默认
-    ``cc_memory_dir(cwd)``(与 synthesis-index 一致; 旧默认硬编码 ``~/.claude`` 全局目录 → 读错),
-    ``source_cwd`` 默认 ``cwd``(ADR-14 记来源, 不再 NULL)。
-    ``harness`` (2026-09-01 dsh 接钩子): 存放位置方案, dsh → ``~/.dsh/projects/<enc>/memory``;
-    B3 (B3C-HYG) 起同名同传 bootstrap.init_memory → fact.harness 来源 stamp。"""
+    """Seed KG from CC memory .md files (ADR-12, v2 distill 径 — atom 口径计数)。
+    ``memory_dir`` 默认 ``cc_memory_dir(cwd)``(与 synthesis-index 一致; 旧默认硬编码
+    ``~/.claude`` 全局目录 → 读错), ``source_cwd`` 默认 ``cwd``(ADR-14 记来源, 不再 NULL)。
+    ``harness`` (2026-09-01 dsh 接钩子): 存放位置方案, dsh → ``~/.dsh/projects/<enc>/memory``
+    (v2 atom 图无 harness 列, 仅作目录解析透传)。"""
     cwd = source_cwd or os.getcwd()
     mem_dir = _proj_memory_dir(memory_dir, cwd, harness)
     return bootstrap.init_memory(mem_dir, source_cwd=source_cwd or cwd,
@@ -646,12 +646,13 @@ def synthesis_index(scope: str | None = None, memory_dir: str | None = None,
 
 def prune(scope: str | None = None, memory_dir: str | None = None,
           dry_run: bool = False, harness: str = "cc") -> dict:
-    """CC memory md 删除 → KG fact soft-delete (ADR-17d)。手动触发
-    (PostToolUse 不捕 ``rm``, 无 tool 触发删除 → 不自动)。re-ingest 的 DELETE 对称。
-    Thin wrapper over ``bootstrap.prune_deleted``。``harness`` 同 synthesis-index。"""
+    """CC memory md 删除 → 新图 atom 双时态软删 valid_to=now (ADR-17d, v2)。
+    手动触发 (PostToolUse 不捕 ``rm``, 无 tool 触发删除 → 不自动)。
+    re-ingest 的 DELETE 对称; 多源 atom 不动, 物理不 DELETE。
+    Thin wrapper over ``bootstrap.prune_memory``。``harness`` 同 synthesis-index。"""
     cwd = scope or os.getcwd()
     mem_dir = _proj_memory_dir(memory_dir, cwd, harness)
-    return bootstrap.prune_deleted(mem_dir, source_cwd=cwd, dry_run=dry_run)
+    return bootstrap.prune_memory(mem_dir, source_cwd=cwd, dry_run=dry_run)
 
 
 # ── embed-backfill (存量 active fact value → L2 cache, ADR-13 通电) ──

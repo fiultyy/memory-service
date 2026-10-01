@@ -217,6 +217,11 @@ def main(argv: list[str]) -> None:
     atoms, st = plan(inp, conn)
     if conn:
         conn.close()
+    try:  # H6: 装载后向量索引同步 (passive, 失败不回滚装载)
+        import vec_index
+        vec_index.backfill_atoms()
+    except Exception as e:
+        print(f"[warn] vec_atom 回填跳过: {type(e).__name__}: {e}")
     print(report(st))
     print(f"[execute] → {target}: {execute(target, inp, atoms)}")
 

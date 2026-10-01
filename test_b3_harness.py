@@ -5,9 +5,11 @@
 2. 老库迁移: pre-harness 旧库 init → ALTER 补列; 幂等 (二次启动不炸不重复);
    legacy 行 harness 保持 NULL (不回填, writer 不可考不臆测)。
 3. put_fact 写入 + _decode_fact 出口键 (row-key 守卫兼容未迁移 db)。
-4. 写入面 stamp: autodream 管道 (_decide_segments 单点) / bootstrap.init_memory /
-   bootstrap.re_ingest_file / cli.mem_write (传参 + MEM_HARNESS env 回落 + NULL) /
-   dream wings 升级继承旧 fact harness。
+4. 写入面 stamp: autodream 管道 (_decide_segments 单点) / cli.mem_write
+   (传参 + MEM_HARNESS env 回落 + NULL) / dream wings 升级继承旧 fact harness。
+   (v2 2026-10-01: bootstrap.init_memory/re_ingest_file 改走 distill→atom 图,
+   无 harness 列, 原 bootstrap 两条 stamp 测试随该写径退役 — 手动 ingest 面由
+   tests/test_manual_ingest.py 锁。)
 5. stats/stats-json 的 by_harness 分组 (NULL → ``unknown`` 键)。
 
 测试规范: def test_xxx() 函数让 pytest 收集 (本项目头号雷区=模块级裸 assert 死代码)。
@@ -150,31 +152,6 @@ def test_autodream_default_harness_cc(tmp_path):
     autodream_mod.autodream("sess-b3-cc", str(t))
     got = _all_harness_map()
     assert got and set(got.values()) == {"cc"}, f"缺省应 stamp cc, got {got}"
-
-
-def test_init_memory_stamps_harness(tmp_path):
-    _mk_db(tmp_path)
-    import bootstrap
-    d = tmp_path / "memdir"
-    d.mkdir()
-    (d / "native.md").write_text("用户使用 rust", encoding="utf-8")
-    (d / "mem-x.md").write_text("---\nsource: mem-service\n---\n用户 uses rust",
-                                encoding="utf-8")  # ADR-16f 投影产物被跳过
-    r = bootstrap.init_memory(d, harness="dsh")
-    assert r["files"] == 1 and r["added"] >= 1, f"init_memory 应产出 fact, got {r}"
-    got = _all_harness_map()
-    assert got and set(got.values()) == {"dsh"}, f"全部 fact 应 stamp dsh, got {got}"
-
-
-def test_re_ingest_file_stamps_harness(tmp_path):
-    _mk_db(tmp_path)
-    import bootstrap
-    md = tmp_path / "note.md"
-    md.write_text("用户使用 rust", encoding="utf-8")
-    r = bootstrap.re_ingest_file(md, harness="omp")
-    assert r["added"] >= 1, f"re_ingest_file 应产出 fact, got {r}"
-    got = _all_harness_map()
-    assert got and set(got.values()) == {"omp"}, f"全部 fact 应 stamp omp, got {got}"
 
 
 def test_mem_write_harness_param_env_then_null(tmp_path, monkeypatch):

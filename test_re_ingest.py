@@ -1,82 +1,70 @@
-"""re-ingest 自验证 (ADR-17 b/c). db.init(tmp) 隔离"""
-import os
+"""re-ingest 自验证 (ADR-17 b/c, v2 distill 径). db.init(tmp) 隔离 + stub distill.
+
+v2 改造 (2026-10-01): md → 空行切段 → 逐段 distill_segment (s,p,o) fact
+管道退役。锁: 溯源三件套 / 投影跳过 / 幂等 (段 sha 二跑零新增)。
+"""
+import shutil
 import tempfile
 from pathlib import Path
 
 import db
 import bootstrap
-import gazetteer
-from llm_provider import EdgeOut, EntityOut, Extraction
 
-# M6 seam 迁移: 提取主径 adapter(wings LLM)→gazetteer(占位)。本测锁的契约是
-# EdgeOut.topic → fact.topic 落库管道 (ADR-C), 故 patch gazetteer.extract 返回
-# 带 topic 的固定 Extraction (providers 不再喂提取, 占位径零 LLM)。
-def _fake_gaz(text: str) -> Extraction:
-    return Extraction(
-        entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
-        edges=[EdgeOut("用户", "uses", "rust", topic="用户使用 rust")],
-        confidence=0.7, source_meta={"provider": "fake", "extractor_label": "regex"})
+
+class _StubDistill:
+    """记录型 stub: 段文本 sha 记忆模拟 distill_seen 幂等, 零 LLM/零写图。"""
+
+    def __init__(self):
+        self.calls = []
+        self._seen = set()
+
+    def distill_segment(self, text, session_id, cwd, ts):
+        import hashlib
+        self.calls.append((text, session_id, cwd, ts))
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if sha in self._seen:
+            return {"atoms": 0, "edges": 0, "merged": 0,
+                    "supersede_proposals": [], "skipped": "seen"}
+        self._seen.add(sha)
+        return {"atoms": 1, "edges": 0, "merged": 0, "supersede_proposals": []}
+
 
 # db.init(tmp) 隔离
 tmpdir = tempfile.mkdtemp()
-tmppath = Path(tmpdir) / "mem.db"
-db.init(tmppath)  # 直接传新路径,强制重建连接
+db.init(Path(tmpdir) / "mem.db")
 
-# 1. 造 native.md('用户使用 rust') → re-ingest → KG 有 (用户,uses,rust), added>=1
-_orig_gaz = gazetteer.extract
-gazetteer.extract = _fake_gaz
+stub = _StubDistill()
+_real = bootstrap.distill_mod
+bootstrap.distill_mod = stub
 try:
+    # 1. 造 native.md → re-ingest → distill 收段, atom 计数, 溯源三件套
     native_md = Path(tmpdir) / "native.md"
     native_md.write_text("用户使用 rust 进行开发", encoding="utf-8")
     r1 = bootstrap.re_ingest_file(native_md, source_cwd="/test")
-finally:
-    gazetteer.extract = _orig_gaz
-print(f"Test 1 (native.md): {r1}")
-assert r1.get("added", 0) >= 1, f"Expected added>=1, got {r1}"
+    print(f"Test 1 (native.md): {r1}")
+    assert r1.get("atoms", 0) >= 1, f"Expected atoms>=1, got {r1}"
+    text, session_id, cwd, ts = stub.calls[0]
+    assert session_id == "memory:native.md", session_id
+    assert cwd == tmpdir, cwd
+    assert ts and ts.startswith("20"), ts
 
-# 验证 KG 有该 fact
-conn = db.get_conn()
-rows = conn.execute("SELECT * FROM fact").fetchall()
-print(f"  KG facts after test1: {len(rows)} rows")
-assert len(rows) >= 1, "Expected at least 1 fact"
-# T1: topic 持久化断言 — SELECT topic 不只是行数(ADR-C LLM EdgeOut.topic → fact.topic)
-topics = [r["topic"] for r in conn.execute("SELECT topic FROM fact").fetchall()]
-print(f"  T1 topics persisted: {topics}")
-assert "用户使用 rust" in topics, f"topic 应持久化为投入值, got {topics}"
+    # 2. 造 mem-x.md(frontmatter source:mem-service) → re-ingest → skipped, 无新段
+    n_before = len(stub.calls)
+    mem_x_md = Path(tmpdir) / "mem-x.md"
+    mem_x_md.write_text(
+        "---\nsource: mem-service\n---\n这是投影产物", encoding="utf-8")
+    r2 = bootstrap.re_ingest_file(mem_x_md, source_cwd="/test")
+    print(f"Test 2 (mem-x.md): {r2}")
+    assert r2.get("skipped", 0) == 1, f"Expected skipped=1, got {r2}"
+    assert len(stub.calls) == n_before, "投影 md 不应喂 distill"
 
-# 2. 造 mem-x.md(frontmatter source:mem-service) → re-ingest → skipped, KG 无新
-mem_x_md = Path(tmpdir) / "mem-x.md"
-mem_x_md.write_text(
-    "---\nsource: mem-service\n---\n这是投影产物",
-    encoding="utf-8")
-r2 = bootstrap.re_ingest_file(mem_x_md, source_cwd="/test")
-print(f"Test 2 (mem-x.md): {r2}")
-assert r2.get("skipped", 0) == 1, f"Expected skipped=1, got {r2}"
-
-rows2 = conn.execute("SELECT * FROM fact").fetchall()
-print(f"  KG facts after test2: {len(rows2)} rows (unchanged)")
-assert len(rows2) == len(rows), "Expected no new facts"
-
-# 3. 重跑 native.md → UPDATE/NOOP(幂等,不重复)
-rows_before = conn.execute("SELECT * FROM fact").fetchall()
-_orig_gaz = gazetteer.extract
-gazetteer.extract = _fake_gaz
-try:
+    # 3. 重跑 native.md → distill_seen sha 判重 → 零新增 (幂等)
     r3 = bootstrap.re_ingest_file(native_md, source_cwd="/test")
+    print(f"Test 3 (native.md re-run): {r3}")
+    assert r3.get("atoms", 0) == 0 and r3.get("skipped_segs", 0) >= 1, \
+        f"Idempotency violation: {r3}"
+
+    print("\n✓ All tests passed")
 finally:
-    gazetteer.extract = _orig_gaz
-print(f"Test 3 (native.md re-run): {r3}")
-rows_after = conn.execute("SELECT * FROM fact").fetchall()
-print(f"  KG facts after test3: {len(rows_after)} rows")
-
-# 幂等验证: 不新增 (UPDATE/NOOP) 或增量极小
-added_after = r3.get("added", 0)
-print(f"  added on re-run: {added_after}")
-# 允许少量新增 (LLM 抽取波动), 但不应大幅增长
-assert added_after < 5, f"Idempotency violation: added={added_after} on re-run"
-
-print("\n✓ All tests passed")
-
-# 清理
-import shutil
-shutil.rmtree(tmpdir)
+    bootstrap.distill_mod = _real
+    shutil.rmtree(tmpdir)

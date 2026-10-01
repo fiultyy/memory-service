@@ -62,7 +62,7 @@ def test_cli_init_and_prune_harness_dsh(monkeypatch):
     seen = {}
     monkeypatch.setattr(bootstrap, "init_memory",
                         lambda mem_dir, source_cwd=None, harness="cc": seen.update(init_dir=mem_dir, sc=source_cwd) or {})
-    monkeypatch.setattr(bootstrap, "prune_deleted",
+    monkeypatch.setattr(bootstrap, "prune_memory",
                         lambda mem_dir, source_cwd=None, dry_run=False:
                         seen.update(prune_dir=mem_dir) or {})
     cli.init_memory(source_cwd=FAKE_CWD, harness="dsh")

@@ -1,5 +1,10 @@
 """mem-service llm_extract — LLM 直抽主径通道 (batch 12, 用户指令 2026-08-27).
 
+**[legacy 2026-10-01, graph-reform v2]** 生产调用方已归零: 手动/文档型
+ingest (bootstrap.re_ingest_file / init_memory) 改走 ``src/distill.py``
+一步蒸馏, autodream 旧管道仅经 env gate 保留 (``MEM_EXTRACT_CHANNEL``)。
+文件保留作 legacy (s,p,o) fact 抽取器, 不删; 仅测试与 gate 常量引用。
+
 背景: T2 全量冷启动质量实测 — regex/gazetteer 占位层产出垃圾事实 (虚词
 实体「可能/的同时完成」、巨型吸尘器实体「前一次」277 别名吸附 37% active
 fact、自环)。用户裁决: regex 前置通道上门禁暂闭 (env ``MEM_EXTRACT_CHANNEL``,

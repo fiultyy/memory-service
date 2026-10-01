@@ -1,25 +1,35 @@
-"""mem-service bootstrap — KG init from CC memory .md (ADR-12).
+"""mem-service bootstrap — CC memory .md → v2 新图 (ADR-12, v2 改造 2026-10-01).
 
-cli ``init-memory`` entry: scan a CC memory dir (``*.md``), feed each file's
-text through the autodream pipeline (LLM 蝴蝶翼 extract ADR-11 + 增量决策
-ADD/UPDATE/DELETE/NOOP ADR-10 + 幂等) as a synthetic one-record transcript,
-persisting facts with ``fact_type='permanent'`` (长期知识不衰减 ADR-8).
+cli ``init-memory`` entry: scan a CC memory dir (``*.md``), 逐文件经
+``src/distill.py`` 段级一步蒸馏入 atom/tag 图 (graph-reform v2, spec §二/§五)。
+旧 autodream/llm_extract (s,p,o) fact 管道退役为 legacy (fact 表归档, 不再写)。
 
-Reuses autodream wholesale — no独立 增量/抽取 logic (DRY): bootstrap is a thin
-scan + tmp-transcript + autodream-call loop. Idempotent via autodream's 增量
-contract: re-running on an unchanged dir ⇒ NOOP/UPDATE, not duplicate ADDs.
+- ``re_ingest_file`` (ADR-17 b/c): 单 md 增量, PostToolUse hook 调用点
+  (hook → ``cli re-ingest <file> --cwd``, 签名不变)。md → 按空行切段
+  (>1500 字段再按句号细分) → 逐段 ``distill.distill_segment``。
+- 溯源: ``session_id="memory:<文件名>"`` → distill 事实tag 铸币产出
+  ``session:memory:<文件名>`` (与库内存量迁移 tag 同形); ``cwd=md 所在目录``
+  → atom.source_cwd; ``ts=file mtime`` → atom.valid_from。
+- ADR-16f 投影跳过 (:29) 原样保留 (MEMORY.md / source:mem-service)。
+- 幂等: distill 段内容 sha 去重 (distill_seen), 重跑同 md 零新增。
+- ``prune_memory`` (ADR-17d v2 面): 文件删除 → 该文件独占 atom 置
+  ``valid_to=now`` (双时态软删, spec D4); 多源 atom 不动。旧
+  ``prune_deleted`` (fact 表) 保留为 legacy 工具, 生产入口已切 ``prune_memory``。
 
-Returns ``{"files": n, "added": ..., "updated": ..., "deleted": ..., "noop": ...}``.
+挂起语义 (裁决#5b): distill 外呼 (zhipu/laya) 不可用 → ``LayaUnavailable``
+族响亮上抛等恢复, 不再产离线记忆; 段级 sha 幂等保重跑零重复。
+
+Returns ``{"files": n, "segments": .., "atoms": .., "edges": .., "merged": ..}``.
 """
 
 from __future__ import annotations
 
-import json
-import tempfile
+import re
+import time
 from pathlib import Path
 
-import autodream as autodream_mod
-from llm_extract import ProviderUnreachable
+import db
+from src import distill as distill_mod  # v2 一步蒸馏 (H2)
 
 
 # ── ADR-16f 过滤: 跳过 mem-service 投影产物 ─────────────────────────────
@@ -41,185 +51,199 @@ def _is_mem_service_projection(text: str, filename: str | None = None) -> bool:
     return "source: mem-service" in fm_block or "source:mem-service" in fm_block
 
 
+_SEG_MAX = 1500  # 段长帽: 超过按句号细分
+
+
+def _segments(text: str) -> list[str]:
+    """md → 段列表: 按空行切段; >1500 字的段再按句号细分 (累积不超帽)。
+
+    无句号的长段保持整段 (ponytail: 硬帽是软目标, 切英文句点/换行的收益
+    不抵歧义 — distill 内部还有 split_units 二道切)。空文本 → []。"""
+    out: list[str] = []
+    for seg in (s.strip() for s in re.split(r"\n\s*\n", text)):
+        if not seg:
+            continue
+        if len(seg) <= _SEG_MAX:
+            out.append(seg)
+            continue
+        buf = ""
+        for sent in re.split(r"(?<=。)", seg):
+            if buf and len(buf) + len(sent) > _SEG_MAX:
+                out.append(buf)
+                buf = sent
+            else:
+                buf += sent
+        if buf:
+            out.append(buf)
+    return out
+
+
+def _mtime_iso(p: Path) -> str:
+    """file mtime → ISO-UTC (与库内 atom.valid_from 存量格式同形)。"""
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(p.stat().st_mtime))
+
+
 def re_ingest_file(
     file_path: str | Path,
-    source_cwd: str | None = None,
-    providers: list | None = None,
-    harness: str = "cc",
+    source_cwd: str | None = None,  # legacy 兼容位 (v2 溯源改 cwd=md 所在目录)
+    providers: list | None = None,  # legacy 兼容位 (v2 distill 不用)
+    harness: str = "cc",            # legacy 兼容位 (atom 图无 harness 列)
 ) -> dict[str, int]:
-    """单 md → KG 增量 (ADR-17 b/c). 反向 re-ingest 手动触发点 + PostToolUse hook 调用点。
+    """单 md → KG 增量 (ADR-17 b/c, v2 distill 径). 反向 re-ingest 手动触发点
+    + PostToolUse hook 调用点 (``cli re-ingest`` 签名不变)。
 
-    read md text → 过滤 ADR-16f(source:mem-service) → synthetic transcript →
-    autodream(fact_type='permanent') → 返回 {added,updated,deleted,noop,skipped}。
-    幂等: 重跑同 md → UPDATE/NOOP。``harness`` (B3, B3C-HYG): 来源 harness
-    stamp 进 fact.harness (缺省 cc — re-ingest 面 md 本在 CC 投影目录)。
-    """
+    read md → 跳过 ADR-16f 投影 → 空行切段 (>1500 按句号细分) → 逐段
+    ``distill.distill_segment(text, session_id="memory:<name>", cwd=md 所在
+    目录, ts=mtime)``。返回 atom 口径计数 ``{segments, atoms, edges, merged,
+    skipped_segs}``; 投影/索引 md → ``skipped=1``; 段被 distill 判重/毒
+    (skipped key) → ``skipped_segs`` 计。挂起: ``LayaUnavailable`` 族上抛
+    (段级幂等, 调用方重跑零重复)。"""
     file_path = Path(file_path)
     if not file_path.is_file():
-        return {"added": 0, "updated": 0, "deleted": 0, "noop": 0, "skipped": 0,
+        return {"segments": 0, "atoms": 0, "edges": 0, "merged": 0,
+                "skipped_segs": 0, "skipped": 0,
                 "error": f"Not a file: {file_path}"}
-
     text = file_path.read_text(encoding="utf-8")
     # ADR-16f: 跳过 mem-service 投影产物 + #1 跳过 MEMORY.md (自指循环)
     if _is_mem_service_projection(text, filename=file_path.name):
-        return {"added": 0, "updated": 0, "deleted": 0, "noop": 0, "skipped": 1}
+        return {"segments": 0, "atoms": 0, "edges": 0, "merged": 0,
+                "skipped_segs": 0, "skipped": 1}
 
-    totals = {"added": 0, "updated": 0, "deleted": 0, "noop": 0, "errors": 0}
-    CHUNK = 4000
-    chunks = [text[i:i + CHUNK] for i in range(0, len(text), CHUNK)] or [""]
-    tmp: tempfile._TemporaryFileWrapper | None = None
-    for ci, chunk in enumerate(chunks):
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".jsonl", delete=False, encoding="utf-8")
-        try:
-            tmp.write(json.dumps(
-                {"type": "user", "message": {"content": chunk}},
-                ensure_ascii=False) + "\n")
-            tmp.close()
-            try:
-                r = autodream_mod.autodream(
-                    session_id=f"memory:{file_path.name}#{ci}",
-                    transcript_path=tmp.name,
-                    providers=providers,
-                    fact_type="permanent",  # ADR-17b: 永久知识
-                    source_cwd=source_cwd,
-                    harness=harness,
-                )
-            except ProviderUnreachable:
-                # 裁决#5b (2026-10-01): 冷启动零 LLM 档退役 — provider
-                # 不可达 = 挂起等恢复, 响亮上抛由调用方重试; 不再产离线记忆。
-                raise
-            except RuntimeError as e:
-                totals["errors"] += 1
-                import sys as _sys
-                print(f"  SKIP {file_path.name}#{ci}: {str(e)[:140]}", file=_sys.stderr)
-                continue
-        finally:
-            if tmp:
-                Path(tmp.name).unlink(missing_ok=True)
-        for k in ("added", "updated", "deleted", "noop"):
+    # 溯源三件套: session tag 名与库内存量 session:memory:<name> 同形;
+    # cwd=md 所在目录 (memory dir 不在 repo 白名单 → 只铸 session tag, §六);
+    # ts=mtime (静态文档的时间轴, 非 ingest 时刻)。
+    session_id = f"memory:{file_path.name}"
+    cwd = str(file_path.parent)
+    ts = _mtime_iso(file_path)
+
+    totals = {"segments": 0, "atoms": 0, "edges": 0, "merged": 0, "skipped_segs": 0}
+    for seg in _segments(text):
+        r = distill_mod.distill_segment(seg, session_id=session_id, cwd=cwd, ts=ts)
+        totals["segments"] += 1
+        if r.get("skipped"):
+            totals["skipped_segs"] += 1
+        for k in ("atoms", "edges", "merged"):
             totals[k] += r.get(k, 0)
     return totals
 
 
 def init_memory(
     memory_dir: str | Path,
-    providers: list | None = None,
-    fact_type: str = "permanent",
-    source_cwd: str | None = None,
-    harness: str = "cc",
+    providers: list | None = None,  # legacy 兼容位
+    fact_type: str = "permanent",   # legacy 兼容位 (distill 自带五类标签)
+    source_cwd: str | None = None,  # legacy 兼容位 (透传 re_ingest_file, 不用)
+    harness: str = "cc",            # legacy 兼容位
 ) -> dict[str, int]:
-    """Seed the KG from CC memory ``.md`` files (ADR-12).
+    """Seed the KG from CC memory ``.md`` files (ADR-12, v2 distill 径).
 
-    For each ``*.md`` in ``memory_dir`` (sorted by name): read text → write a
-    synthetic one-record transcript JSONL (``{type:user, message:{content:text}}``)
-    → ``autodream.autodream(session_id="memory:<file>", ..., fact_type=fact_type)``
-    →累加 counts. 提取走 llm 主径 (裁决#5b 2026-10-01: 冷启动零 LLM 档退役,
-    需 zhipu/laya 可达 — provider 不可达 :class:`ProviderUnreachable` 响亮
-    上抛挂起等恢复, 不再产离线记忆)。
-
-    ``harness`` (B3, B3C-HYG): 来源 harness stamp 进 fact.harness (与
-    cli ``--harness`` 存放位置方案同名同传, dsh 接钩子时传 dsh)。
-
-    Idempotent: a re-run on an unchanged dir yields NOOP/UPDATE (autodream 增量
-    decision), not duplicate ADDs — safe to re-run after editing memory files.
-    """
+    逐文件走 :func:`re_ingest_file` (切段/投影跳过/挂起/幂等同其契约);
+    计数 atom 口径。挂起: 任一文件 distill 外呼不可达 → ``LayaUnavailable``
+    上抛, 已入图段保留 (段级 sha 幂等保重跑零重复)。``files`` 只计被
+    ingest 的文件, 投影跳过计 ``skipped``。"""
     memory_dir = Path(memory_dir)
     if not memory_dir.is_dir():
-        return {"files": 0, "added": 0, "updated": 0, "deleted": 0, "noop": 0,
-                "skipped": str(memory_dir)}
-
-    totals = {"files": 0, "added": 0, "updated": 0, "deleted": 0, "noop": 0, "errors": 0, "skipped": 0}
+        return {"files": 0, "segments": 0, "atoms": 0, "edges": 0, "merged": 0,
+                "skipped_segs": 0, "skipped": 0, "error": str(memory_dir)}
+    totals = {"files": 0, "segments": 0, "atoms": 0, "edges": 0, "merged": 0,
+              "skipped_segs": 0, "skipped": 0}
     for md in sorted(memory_dir.glob("*.md")):
-        text = md.read_text(encoding="utf-8")
-        # ADR-16f: 跳过 mem-service 投影产物 + #1 跳过 MEMORY.md (自指循环)
-        if _is_mem_service_projection(text, filename=md.name):
-            totals["skipped"] += 1
+        r = re_ingest_file(md, source_cwd=source_cwd, harness=harness)
+        if r.get("skipped") or r.get("error"):
+            totals["skipped"] += 1 if r.get("skipped") else 0
             continue
-        # 分段: 大 .md 切 CHUNK 字段, 各段独立喂 autodream — 覆盖全文 (非截断丢后部),
-        # 每段短不超时。单条记忆多 <CHUNK 不分段 (1 段)。
-        CHUNK = 4000
-        chunks = [text[i:i + CHUNK] for i in range(0, len(text), CHUNK)] or [""]
-        for ci, chunk in enumerate(chunks):
-            # Synthetic one-record transcript per chunk: autodream reads
-            # user message.content; NamedTemporaryFile + finally unlink.
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".jsonl", delete=False, encoding="utf-8")
-            try:
-                tmp.write(json.dumps(
-                    {"type": "user", "message": {"content": chunk}},
-                    ensure_ascii=False) + "\n")
-                tmp.close()
-                try:
-                    r = autodream_mod.autodream(
-                        session_id=f"memory:{md.name}#{ci}",
-                        transcript_path=tmp.name,
-                        providers=providers,
-                        fact_type=fact_type,
-                        source_cwd=source_cwd,
-                        harness=harness,
-                    )
-                except ProviderUnreachable:
-                    # 裁决#5b (2026-10-01): 冷启动零 LLM 档退役 — provider
-                    # 不可达 = 挂起等恢复 (响亮上抛, 调用方等恢复后重跑,
-                    # 幂等契约保零重复), 不再产离线记忆。
-                    raise
-                except RuntimeError as e:
-                    totals["errors"] += 1
-                    import sys as _sys
-                    print(f"  SKIP {md.name}#{ci}: {str(e)[:140]}", file=_sys.stderr)
-                    continue
-            finally:
-                Path(tmp.name).unlink(missing_ok=True)
-            for k in ("added", "updated", "deleted", "noop"):
-                totals[k] += r.get(k, 0)
         totals["files"] += 1
+        for k in ("segments", "atoms", "edges", "merged", "skipped_segs"):
+            totals[k] += r.get(k, 0)
     return totals
 
 
-# ── ADR-17d DELETE 同步: CC memory md 删 → KG fact soft-delete ────────
+# ── ADR-17d DELETE 同步 (v2 面): md 删 → atom 双时态软删 ────────────────
+def _native_md_names(mem_dir: Path) -> set[str]:
+    """现存 native md 文件名集: 排除投影 (ADR-B ``MEM_FILE_RE`` + frontmatter
+    二次确认) 与 ``MEMORY.md`` 索引。native 撞名 (mem-dead-notes.md) 留集防
+    误判孤儿 (F1), 详见 prune_deleted docstring。"""
+    from projection import MEM_FILE_RE
+    if not mem_dir.is_dir():
+        return set()  # ponytail: dir 都没了 → 所有 memory 源 atom 视为孤儿
+    existing: set[str] = set()
+    for p in mem_dir.glob("*.md"):
+        if p.name == "MEMORY.md":
+            continue
+        if MEM_FILE_RE.match(p.name):
+            try:
+                txt = p.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                txt = ""
+            if _is_mem_service_projection(txt):
+                continue
+        existing.add(p.name)
+    return existing
+
+
+def prune_memory(memory_dir: str | Path,
+                 source_cwd: str | None = None,
+                 dry_run: bool = False) -> dict:
+    """CC memory md 删除 → 新图 atom 软删 (ADR-17d v2 面, D4 双时态)。
+
+    候选 = ``session:memory:*`` 事实tag 挂载的 valid atom。scoping (同旧
+    prune_deleted 纪律, 防跨项目误删): ``atom.source_cwd IN (source_cwd,
+    memory_dir)`` — v2 re-ingest 落 memory_dir (md 所在目录), 存量迁移
+    atom 落项目 cwd; 其他项目 / NULL 老数据不碰。atom 的 memory 源文件集
+    (其全部 ``session:memory:<file>`` tag 名) 与现存 native md 集互斥 →
+    全部源已删 → 独占 → ``valid_to=now``; 任一源仍在 (多源 atom) 不动。
+    物理不 DELETE — 回滚 = valid_to 置回 NULL。
+
+    返回 ``{checked, pruned, pruned_ids, native_md_present, dry_run}``。"""
+    mem_dir = Path(memory_dir)
+    existing = _native_md_names(mem_dir)
+    scope_cwds = {str(c) for c in (source_cwd, mem_dir) if c}
+
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT t.name AS tname, m.atom_id AS aid "
+        "FROM tag t JOIN tag_mount m ON m.tag_id = t.id "
+        "WHERE t.name LIKE 'session:memory:%'").fetchall()
+    files_by_atom: dict[int, set[str]] = {}
+    for r in rows:
+        files_by_atom.setdefault(r["aid"], set()).add(
+            r["tname"][len("session:memory:"):])
+
+    to_prune: list[int] = []
+    if files_by_atom:
+        q = ",".join("?" * len(files_by_atom))
+        for a in conn.execute(
+                f"SELECT id, valid_to, source_cwd FROM atom WHERE id IN ({q})",
+                list(files_by_atom)):
+            if a["valid_to"] is None and a["source_cwd"] in scope_cwds \
+                    and files_by_atom[a["id"]].isdisjoint(existing):
+                to_prune.append(a["id"])
+    if to_prune and not dry_run:
+        now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+        conn.executemany(
+            "UPDATE atom SET valid_to=? WHERE id=? AND valid_to IS NULL",
+            [(now, aid) for aid in to_prune])
+    return {"checked": len(files_by_atom), "pruned": len(to_prune),
+            "pruned_ids": sorted(to_prune),
+            "native_md_present": sorted(existing), "dry_run": dry_run}
+
+
+# ── legacy: fact 表 (v1 归档) prune, 生产入口已切 prune_memory ──────────
 def prune_deleted(
     memory_dir: str | Path,
     source_cwd: str,
     dry_run: bool = False,
 ) -> dict:
-    """CC memory md 删除 → KG fact soft-delete 同步 (ADR-17d)。
+    """[legacy] CC memory md 删除 → KG **fact** soft-delete 同步 (ADR-17d v1)。
 
-    扫 ``source_cwd`` 的 active fact, 按 ``source_refs`` 里 ``memory:<filename>#``
-    反查源 md; 源 md 全部已不在 ``memory_dir`` → ``status='deleted'`` (可逆)。
-    ``dry_run`` 只报不删。投影 ``mem-*.md`` 与 ``MEMORY.md`` 不算源 (它们是产物,
-    非用户记忆)。re_ingest_file 的逆: re-ingest 加, prune 删孤儿。
+    v2 起生产 prune 走 :func:`prune_memory` (atom 双时态面); 本函数保留作
+    legacy fact 归档库的手动同步工具。扫 ``source_cwd`` 的 active fact, 按
+    ``source_refs`` 里 ``memory:<filename>#`` 反查源 md; 源 md 全部已不在
+    ``memory_dir`` → ``status='deleted'`` (可逆)。``dry_run`` 只报不删。
 
-    返回 ``{checked, pruned, pruned_ids, native_md_present, dry_run}``。
-    """
-    import db
+    返回 ``{checked, pruned, pruned_ids, native_md_present, dry_run}``。"""
     import json
-    import re
 
-    mem_dir = Path(memory_dir)
-    # 现存 native md: 排除投影文件(ADR-B ``MEM_FILE_RE`` 单一源) + MEMORY.md 索引。
-    # 陷阱: native 文件常叫 mem-service-*.md, 也 startswith "mem-" → 不能用前缀区分,
-    # ADR-B ``mem-`` + 4hex + ``-`` 前缀天然区分(mem-service-* 的 serv 非 4-hex, 不匹配)。
-    from projection import MEM_FILE_RE
-    if mem_dir.is_dir():
-        existing = set()
-        for p in mem_dir.glob("*.md"):
-            if p.name == "MEMORY.md":
-                continue
-            if MEM_FILE_RE.match(p.name):
-                # 撞正则: frontmatter 确认是否真投影(source:mem-service)
-                # 真投影 → 排除(产物非源); 无 frontmatter → native 撞名, 留 existing
-                # 防 native(如 mem-dead-notes.md, dead=合法 4-hex)被误判孤儿删(F1)
-                try:
-                    txt = p.read_text(encoding="utf-8", errors="ignore")
-                except OSError:
-                    txt = ""
-                if _is_mem_service_projection(txt):
-                    continue
-            existing.add(p.name)
-    else:
-        existing = set()  # ponytail: dir 都没了 → 所有 memory 源 fact 视为孤儿
-
+    existing = _native_md_names(Path(memory_dir))
     mem_ref = re.compile(r"memory:([^#\]]+)#")
     conn = db.get_conn()
     rows = conn.execute(
@@ -258,23 +282,25 @@ def prune_deleted(
             "dry_run": dry_run}
 
 
-def _demo() -> None:  # ponytail self-check (mock provider, no network)
-    import os
-    import tempfile as _t
-    from llm_provider import EdgeOut, EntityOut, Extraction
+def _demo() -> None:  # ponytail self-check (stub distill, no network/db)
+    import tempfile
+    from types import SimpleNamespace
 
-    class _Fake:
-        base_url = None
-        def extract_facts(self, text: str):
-            return Extraction(
-                entities=[EntityOut("用户", "person"), EntityOut("rust", "tool")],
-                edges=[EdgeOut("用户", "uses", "rust", topic="用户使用 rust")],
-                confidence=0.7, source_meta={"provider": "fake"})
-
-    d = _t.mkdtemp()
-    open(os.path.join(d, "x.md"), "w").write("用户使用 rust")
-    r = init_memory(d, providers=[_Fake()])
-    assert r["added"] > 0, r
+    calls = []
+    stub = SimpleNamespace(
+        distill_segment=lambda text, session_id, cwd, ts:
+        (calls.append((session_id, cwd)), {"atoms": 1, "edges": 0, "merged": 0,
+                                           "supersede_proposals": []})[1])
+    global distill_mod
+    real = distill_mod
+    distill_mod = stub
+    try:
+        d = tempfile.mkdtemp()
+        Path(d, "x.md").write_text("用户使用 rust", encoding="utf-8")
+        r = init_memory(d)
+    finally:
+        distill_mod = real
+    assert r["atoms"] >= 1 and calls[0][0] == "memory:x.md", (r, calls)
     print("init_memory ok:", r)
 
 

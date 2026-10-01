@@ -400,6 +400,21 @@ def remove_aliases(entity_id: str, to_remove: list[str]) -> None:
 
 # ── Fact ────────────────────────────────────────────────────────────
 
+_LEGACY_FACT_WARNED = False
+
+
+def _warn_legacy_fact() -> None:
+    """v2 图改造 (2026-10-01): put_fact 产 (s,p,o) fact 只进 legacy fact 表,
+    新图召回面 (atom) 不可见 (MEM_RECALL_LEGACY_FACT=1 可回切)。唯一 sanctioned
+    写径 = distill (spool+daemon / re_ingest_file)。每进程警示一次。"""
+    global _LEGACY_FACT_WARNED
+    if not _LEGACY_FACT_WARNED:
+        _LEGACY_FACT_WARNED = True
+        import sys
+        print("[legacy] put_fact: (s,p,o) 通道, v2 atom 召回不可见; "
+              "新径=distill(spool+daemon / re_ingest_file)", file=sys.stderr)
+
+
 def put_fact(
     subject_id: str,
     predicate: str,
@@ -441,6 +456,7 @@ def put_fact(
     Literal/unary facts: pass ``value`` only (object_id stays None).
     Binary entity→entity facts: pass ``object_id`` (value optional).
 
+
     ``original_lif`` (ADR-8v2): semantics shifted from ADR-8 decay base to the
     source-dim initial-value snapshot — defaults to ``LIF``. The LIF-Scorer
     node composes LIF from the five dims; this store writes them verbatim
@@ -471,6 +487,7 @@ def put_fact(
     不回填同款惯例); 各写入面 (autodream/ingest-recent/re-ingest/
     init-memory/write) 负责传入调用 harness。
     """
+    _warn_legacy_fact()
     conn = db.get_conn()
     fid = fact_id or _uid()
     frozen_lif = float(LIF) if original_lif is None else float(original_lif)

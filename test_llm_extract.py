@@ -300,22 +300,11 @@ def test_llm_failure_skips_not_fallback(fresh_db, tmp_path, monkeypatch):
     assert db.get_conn().execute("SELECT COUNT(*) FROM fact").fetchone()[0] == 0
 
 
-def test_bootstrap_provider_unreachable_raises_suspends(tmp_path, monkeypatch):
-    """裁决#5b (2026-10-01): ProviderUnreachable → bootstrap 挂起上抛
-    (M4 修正: 不再记 errors 记账 — 冷启动零 LLM 档已退役)。"""
-    monkeypatch.setenv("MEM_EXTRACT_CHANNEL", CHANNEL_LLM)
-    monkeypatch.setattr(embedding, "_CACHE_DB", tmp_path / "emb.db")
-    embedding.clear_cache()
-    db.init(str(tmp_path / "m.db"))
-    monkeypatch.setattr(llm_extract, "extract",
-                        lambda seg, provider=None: (_ for _ in ()).throw(
-                            ProviderUnreachable("provider 不可达")))
-    import bootstrap
-    src = tmp_path / "src"
-    src.mkdir()
-    (src / "a.md").write_text("一些内容", encoding="utf-8")
-    with pytest.raises(ProviderUnreachable):
-        bootstrap.init_memory(str(src))
+# [v2 2026-10-01] test_bootstrap_provider_unreachable_raises_suspends 退役:
+# bootstrap.init_memory 改走 src/distill (atom 图), 不再经 llm_extract —
+# 挂起契约 (LayaUnavailable 穿出) 迁至 test_bootstrap_skip.py /
+# tests/test_manual_ingest.py。llm_extract 自身的响亮失败 lane 由上方
+# test_llm_failure_skips_not_fallback (autodream legacy 径) 锁。
 
 
 # ── 验收 4: 实体卫生门四件套 ─────────────────────────────────────────

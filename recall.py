@@ -289,6 +289,10 @@ def _row_to_atom(r: Any) -> dict[str, Any]:
     score_fact 的 match 面; LIF/confidence 由 p_dur (laya durable 概率)
     承担质量先验 — atom 无 LIF 机制, p_dur 是其最接近的信任标量。"""
     p = float(r["p_dur"] or 0.0)
+    try:  # 对抗审查 minor: 投影正文自包含 (ADR-A) — source_refs 带出
+        refs = json.loads(r["source_refs"]) if r["source_refs"] else []
+    except (ValueError, TypeError):
+        refs = []
     return {
         "id": f"atom:{r['id']}",
         "atom_id": r["id"],
@@ -299,6 +303,7 @@ def _row_to_atom(r: Any) -> dict[str, Any]:
         "topic": None,
         "LIF": p,
         "confidence": p,
+        "source_refs": refs,
         "source_cwd": r["source_cwd"],
         "valid_from": r["valid_from"],
         "valid_to": r["valid_to"],
@@ -315,6 +320,7 @@ def _recall_atoms(
     min_score: float | None = None,
     as_of: str | None = None,
     cwd: str | None = None,
+    mem_dir: str | Path | None = None,
     with_tag: bool = False,
     use_gate: bool = False,
     gate_provider: Any = None,
@@ -326,8 +332,9 @@ def _recall_atoms(
     取舍 (spec §五-H6 / PR 报告同步):
     - 实体腿 (subject/object entity 图) 对 atom 无意义 → 不进 atom 面,
       只留在 legacy fact 分支 (recall 主体); BFS 实体扩展同理。
-    - LIF 强化 / recall_hits 信号 / gate_score 记账 / mem-*.md 投影均为
-      fact 表机制, atom 面跳过 (纯读, 无写路径); _snaptag 形状保留
+    - LIF 强化 / recall_hits 信号 / gate_score 记账仍为 fact 表机制, atom
+      面纯读跳过; mem-*.md per-hit 投影已 H6b 接通 (project_atom_md 同构,
+      仅手动 recall 带 cwd/mem_dir 时建文件 — 注入面零投影不变)
       (kg_uri=kg://atom/<id>, mem_path=None)。
     - gate_score 记账跳过 → gate_account 参数在此面无效 (atom 无该列)。
     """
@@ -489,13 +496,22 @@ def _recall_atoms(
 
     # LIF 强化 / recall_hits 信号: fact 表机制, atom 面纯读跳过 (无对应列,
     # dream 消费面不认 atom id)。boost 参数在此面无效。
+    # H6b: mem-*.md per-hit 投影接通 — project_fact_md 的 atom 同构
+    # (mem_dir 显式或 cwd 推导; 都无则只算 tag 不建文件, 与 fact 面同款;
+    # 注入 hook 不传 cwd → 注入面依旧零投影, SessionStart 单点不变)。
     now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    mem_dir_obj = Path(mem_dir) if mem_dir else (
+        projection.cc_memory_dir(cwd) if cwd else None)
     for s in scored:
         f = s["fact"]
         topic = (f["text"] or "")[:120]
+        mem_path = None
+        if mem_dir_obj is not None:
+            projection.project_atom_md(f, mem_dir_obj, recalled_at=now_iso)
+            mem_path = projection._atom_filename(int(f["atom_id"]), f["text"] or "")
         f["_snaptag"] = {
             "fact_id": f["id"],
-            "mem_path": None,  # mem-*.md 投影是 fact 表机制; atom 面不建文件
+            "mem_path": mem_path,
             "kg_uri": f"kg://atom/{f['atom_id']}",
             "display": topic,
             "topic": topic,
@@ -607,7 +623,7 @@ def recall(
             return _recall_atoms(
                 query, verbose=verbose, top_k=top_k, session_id=session_id,
                 use_vec=use_vec, min_score=min_score, as_of=as_of, cwd=cwd,
-                with_tag=with_tag, use_gate=use_gate,
+                mem_dir=mem_dir, with_tag=with_tag, use_gate=use_gate,
                 gate_provider=gate_provider, weights=weights, delta=delta)
 
     tokens = scoring.query_tokens(query)

@@ -28,6 +28,14 @@ import scoring
 import store
 
 
+@pytest.fixture(autouse=True)
+def _pin_legacy_fact_face(monkeypatch):
+    """H6b (2026-10-01): synthesis_index 缺省换 atom 面 — 本文件卫生三动作
+    (dedup/prune/resort) 语义构建在 fact 投影上, 整文件 pin 回切档
+    ``MEM_PROJECTION_LEGACY_FACT=1`` (atom 面投影见 test_projection_atom.py)。"""
+    monkeypatch.setenv("MEM_PROJECTION_LEGACY_FACT", "1")
+
+
 def _base_score(s: dict, query: str) -> float:
     """verbose 条目的折前公式分 (gate_mod 乘前): 用条目自带的融合输入重算。"""
     return scoring.score_fact(

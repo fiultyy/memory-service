@@ -18,9 +18,19 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 import db
 import projection
 import store
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_fact_face(monkeypatch):
+    """H6b (2026-10-01): synthesis_index 缺省换 atom 面 — 本文件是 **fact 面
+    回归套件**, 整文件 pin ``MEM_PROJECTION_LEGACY_FACT=1`` (回切档完整旧行为);
+    atom 面见 test_projection_atom.py。"""
+    monkeypatch.setenv("MEM_PROJECTION_LEGACY_FACT", "1")
 
 
 def _mk_fact(subj="用户", pred="uses", value="rust", LIF=0.7, conf=0.8,

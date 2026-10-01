@@ -163,6 +163,7 @@ def read_fact_id(md_path: Path) -> str | None:
     """从投影 ``mem-*.md`` **frontmatter**(首 ``---...---`` 块)读 ``fact_id``。
 
     限定 frontmatter 块: body 里若出现 ``fact_id:`` 也不误匹配(防幽灵 id)。
+    H6b: atom 投影件同键 (``fact_id: atom-N``) — 单一扫描面不改。
     容错: 文件缺/损坏/无 frontmatter/无 fact_id → None(synthesis 跳过, 不崩)。"""
     try:
         text = md_path.read_text(encoding="utf-8")
@@ -175,6 +176,70 @@ def read_fact_id(md_path: Path) -> str | None:
         return None
     m = re.search(r"^fact_id:\s*(\S+)\s*$", text[3:end], re.MULTILINE)
     return m.group(1) if m else None
+
+
+# ── H6b (v2 图改造, 2026-10-01): atom 面投影 — 形态契约 (ADR-A/B/C) 原样,
+# 数据源换活图 atom (fact 冻结为 legacy 归档)。散 index 载体由 atom 面召回
+# per-hit 建 (project_atom_md), synthesis 回查 atom 表; legacy fact 投影件
+# 判 orphan (索引行删/文件留, 默认语义) — MEM_PROJECTION_LEGACY_FACT=1 回切。──
+ATOM_FID_RE = re.compile(r"^atom-(\d+)$")
+
+
+def _atom_filename(atom_id: int, text: str) -> str:
+    """ADR-B: ``mem-{hex4}-{sanitize(text)}.md`` — atom id 是整型 rowid, hex4 =
+    ``04x`` (>0xffff 取末 4 hex, 前缀无唯一性契约同 fact uuid 前 4 位);
+    slug 源 = atom.text (结论句天然是一句话 topic, ADR-C 的 atom 等价物)。
+    断言 MEM_FILE_RE (同 _mem_filename, 不静默写坏契约文件)。
+    ponytail: rowid 顺序分配 → 过 64k 后末 4 hex 冲突是确定性的 (与 uuid 前 4
+    位随机不同), 但还需 60 字 slug 也相同才真撞文件 — 4.5k atom 量级远未到期;
+    逼近 64k 时把 MEM_FILE_RE/_MEM_LINE_NEW_RE 放宽到 {4,6} hex 并重写旧件。"""
+    h = f"{atom_id:04x}" if atom_id <= 0xFFFF else f"{atom_id:x}"[-4:]
+    name = f"mem-{h}-{_sanitize_slug(text)}.md"
+    if not MEM_FILE_RE.match(name):
+        raise ValueError(
+            f"projection filename violates MEM_FILE_RE: {name!r} "
+            f"(atom_id={atom_id!r}, text={text!r})")
+    return name
+
+
+def project_atom_md(atom: dict, mem_dir: Path,
+                    recalled_at: str | None = None) -> Path:
+    """投影单 atom → ``mem-{hex4}-{slug}.md`` (H6b; project_fact_md 同构形态)。
+
+    frontmatter 键形不变: ``description``=text / ``source: mem-service`` /
+    ``fact_id: atom-N`` (键名保留 → read_fact_id 单一扫描面) / ``recalled_at``;
+    正文: label / text / source_refs / p_dur + ``kg://atom/N`` 溯源。
+    接受 ``recall._row_to_atom`` 形状 (``atom_id`` 或 ``id="atom:N"``)。
+    原子写 ``.tmp`` + ``os.replace``, 幂等 (同 atom 重写)。"""
+    m = ATOM_FID_RE.match(str(atom.get("id") or ""))
+    aid = atom.get("atom_id")
+    aid = int(aid) if aid is not None else (int(m.group(1)) if m else None)
+    if aid is None:
+        raise ValueError(f"project_atom_md: 无 atom id ({atom.get('id')!r})")
+    text = (atom.get("text") or atom.get("value") or "").strip()
+    label = atom.get("label") or "?"
+    refs = atom.get("source_refs") or []
+    fname = _atom_filename(aid, text)
+    p = mem_dir / fname
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    content = f"""---
+description: {_yaml_scalar(text)}
+source: mem-service
+fact_id: atom-{aid}
+recalled_at: {recalled_at or ''}
+---
+# {text}
+
+- label: {label}
+- text: {text}
+- source_refs: {refs}
+- p_dur: {atom.get('p_dur') or 0.0}
+- kg://atom/{aid}
+"""
+    tmp = p.with_suffix(".md.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, p)  # 原子: 防 synthesis 扫读到半写
+    return p
 
 
 # ── ADR-15 P2: synthesis_index (MEMORY 投影行唯一写入口) ────────────
@@ -280,28 +345,67 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
         return {"projected": 0, "deduped": 0, "orphans": 0, "pruned": 0,
                 "cold_start": True}
 
-    # 3. 批量回 KG(WHERE id IN (...), 一次非 N+1)。取 topic(ADR-C)投影用。
+    # 3. 批量回 KG 取现值 (H6b: 活图 atom 面 — fact 表已冻结为 legacy 归档,
+    #    不再投影; 其投影件判 orphan。``MEM_PROJECTION_LEGACY_FACT=1`` 回切
+    #    旧 fact 面 (与 MEM_RECALL_LEGACY_FACT 同款逃生口, 回切档 atom 件
+    #    反向判 orphan — 完整旧行为)。WHERE id IN 一次查, 非 N+1。
+    import json as _json
+
     conn = db.get_conn()
-    placeholders = ",".join("?" * len(fact_ids))
-    rows = conn.execute(
-        f"SELECT id, subject_id, predicate, value, LIF, confidence, source_cwd, topic "
-        f"FROM fact WHERE id IN ({placeholders})",
-        fact_ids,
-    ).fetchall()
-    present_ids = {r["id"] for r in rows}
-    facts = [
-        {
-            "id": r["id"],
-            "subject_id": r["subject_id"],
-            "predicate": r["predicate"],
-            "value": r["value"],
-            "LIF": r["LIF"],
-            "confidence": r["confidence"],
-            "source_cwd": r["source_cwd"],
-            "topic": r["topic"] if "topic" in r.keys() else None,
-        }
-        for r in rows
-    ]
+    atom_ids = [int(m.group(1)) for fid in fact_ids
+                if (m := ATOM_FID_RE.match(fid))]
+    legacy_ids = [fid for fid in fact_ids if not ATOM_FID_RE.match(fid)]
+    facts: list[dict] = []
+    present_ids: set[str] = set()
+    if os.environ.get("MEM_PROJECTION_LEGACY_FACT", "0") == "1" or \
+            os.environ.get("MEM_RECALL_LEGACY_FACT", "0") == "1":
+        # 对抗审查 minor: 逃生口对称 — 单设 MEM_RECALL_LEGACY_FACT=1 (recall
+        # 回 fact 面, 建 fact 件) 而投影面仍 atom 默认 → 散件下一轮 synthesis
+        # 全判 orphan (静默失效)。单一旋钮 = 连贯回滚: 任一 legacy env 即投影
+        # 也回 fact 面 (MEM_PROJECTION_LEGACY_FACT 仍是投影面专用覆盖)。
+        if legacy_ids:
+            ph = ",".join("?" * len(legacy_ids))
+            rows = conn.execute(
+                f"SELECT id, subject_id, predicate, value, LIF, confidence, "
+                f"source_cwd, topic FROM fact WHERE id IN ({ph})",
+                legacy_ids,
+            ).fetchall()
+            present_ids = {r["id"] for r in rows}
+            facts = [
+                {
+                    "id": r["id"],
+                    "subject_id": r["subject_id"],
+                    "predicate": r["predicate"],
+                    "value": r["value"],
+                    "LIF": r["LIF"],
+                    "confidence": r["confidence"],
+                    "source_cwd": r["source_cwd"],
+                    "topic": r["topic"] if "topic" in r.keys() else None,
+                }
+                for r in rows
+            ]
+    elif atom_ids:
+        ph = ",".join("?" * len(atom_ids))
+        rows = conn.execute(
+            f"SELECT id, text, label, p_dur, source_refs FROM atom "
+            f"WHERE valid_to IS NULL AND id IN ({ph})",
+            atom_ids,
+        ).fetchall()
+        present_ids = {f"atom-{r['id']}" for r in rows}
+        for r in rows:
+            pd_ = float(r["p_dur"] or 0.0)
+            try:
+                refs = _json.loads(r["source_refs"]) if r["source_refs"] else []
+            except (ValueError, TypeError):
+                refs = []
+            facts.append({
+                "id": f"atom-{r['id']}", "atom_id": r["id"],
+                "topic": r["text"],   # ADR-C 等价物: 结论句即 topic
+                "text": r["text"], "label": r["label"],
+                # mem_score 先验 = p_dur (与 recall._row_to_atom 同口径)
+                "LIF": pd_, "confidence": pd_,
+                "subject_id": None, "source_refs": refs,
+            })
     orphan_ids = [fid for fid in fact_ids if fid not in present_ids]
 
     # 4. 批量实体名(entity WHERE id IN (present.subject_id))。
@@ -372,9 +476,19 @@ def _format_mem_line(fact: dict, subj_name: str) -> str:
     """ADR-A 原生索引行: ``- [{topic}](mem-{4hex}-{slug}.md) — {topic}``。
 
     链接文本 = topic, 链接 = 相对路径(``mem-{4hex}-{slug}.md``, 与 MEMORY.md 同目录),
-    hook = topic。无 [mem] 标记 / 无 score / 无 kg://(纯原生, CC 代码层召回可消费)。"""
+    hook = topic。无 [mem] 标记 / 无 score / 无 kg://(纯原生, CC 代码层召回可消费)。
+    H6b: atom 行 (id="atom-N") 走 ``_atom_filename`` (rowid hex4), 格式同构。"""
     topic = _fact_topic(fact, subj_name)
-    fname = _mem_filename(fact["id"], topic)
+    _m = ATOM_FID_RE.match(str(fact.get("id") or ""))
+    aid = fact.get("atom_id")
+    aid = int(aid) if aid is not None else (int(_m.group(1)) if _m else None)
+    if aid is not None:
+        # 对抗审查 minor: 链接目标 slug 必须与 project_atom_md 落盘件同源
+        # (裸 text, 空文本 → "fact" 占位) — 不能走 _fact_topic 的 "?" 回退,
+        # 否则空 text atom 的索引行指向不存在的 mem-xxxx-?.md (死链)。
+        fname = _atom_filename(aid, str(fact.get("text") or fact.get("topic") or ""))
+    else:
+        fname = _mem_filename(fact["id"], topic)
     return f"- [{_md_link_text(topic)}]({fname}) — {_md_link_text(topic)}"
 
 

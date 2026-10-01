@@ -322,6 +322,11 @@ _DISTILL_POOL = concurrent.futures.ThreadPoolExecutor(
 # _sha_seen 兜底去重。
 _INFLIGHT: dict[tuple[str, str], concurrent.futures.Future] = {}
 
+# 挂账#1 tag 面目标库: run() 启动时显式登记 (db._conn_path), _h7_distill_sweep
+# 只认它 — 不从 db._conn 环境态推断 (对抗审查 blocker: hygiene/distill 补扫
+# 会先绑生产连接, 裸测试上下文单测选择即击穿推断守卫, 44 行生产写入事故)。
+_DAEMON_DB: str | None = None
+
 
 def _distill_segment_hard(distill_mod, seg_text: str, session_id: str,
                           cwd: str, ts: str,
@@ -628,7 +633,9 @@ def _maybe_dream(state: dict, cwd: str) -> dict:
             state = _run_hygiene(state, cwd)
         return state
     try:
-        stats = dream.run_cycle(source_cwd=cwd)
+        # source_cwd=None: 全局单体 KG (ADR-14), 接管已停用 memory-dream.timer
+        # 的全局信号消费口径 (2026-10-01 挂账收口)。
+        stats = dream.run_cycle(source_cwd=None)
         _log(f"dream cycle → {stats}")
     except Exception as exc:
         _log(f"ERROR dream cycle: {exc} (continuing)")
@@ -639,14 +646,34 @@ def _maybe_dream(state: dict, cwd: str) -> dict:
 
 def _h7_distill_sweep() -> None:
     """H7 夜间补扫: ``distill.audit_pending`` (laya 恢复后补审挂起 atom) +
-    ``distill.reembed_needing`` (embed 失败补向量)。passive — 模块未落位/
-    异常均记日志不杀轮 (仓内惯例: provider 失败不阻断 daemon)。"""
+    ``distill.reembed_needing`` (embed 失败补向量) + v2 挂账#1 tag 面
+    (``tag_dream.audit_mounts`` 挂载审计 / ``mount_new_atoms`` laya 竞争挂载)。
+
+    tag 面目标库 = ``_DAEMON_DB`` (run() 启动显式登记), **不从 ``db._conn``
+    环境态推断** — 对抗审查 blocker: 同函数更早路径 (_run_hygiene / distill
+    补扫自身) 会先 get_conn() 绑生产连接, 裸测试上下文单测选择即击穿守卫
+    把 cos-挂载写进生产库 (实测 44 行事故, 2026-10-01)。audit 先于 mount:
+    本轮新挂载不重评 (下轮再审), 限 mount(回落 cos)→audit(删)→再 mount 振荡。
+    passive — 模块未落位/异常均记日志不杀轮 (仓内惯例)。"""
     try:
         d = _distill()
         _log(f"distill audit_pending → {d.audit_pending()}")
         _log(f"distill reembed_needing → {d.reembed_needing()}")
     except Exception as exc:
         _log(f"ERROR distill 补扫: {exc} (continuing)")
+    if _DAEMON_DB is None:
+        return  # 未經 run() 登记 (裸调用/测试上下文) — tag 面不猜目标库
+    # v2 挂账#1: tag 挂载/审计补扫 — 独立 try/except (distill 补扫同款 passive)
+    try:
+        try:
+            import tag_dream
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+            import tag_dream
+        _log(f"tag audit_mounts → {tag_dream.audit_mounts(_DAEMON_DB)}")
+        _log(f"tag mount_new_atoms → {tag_dream.mount_new_atoms(_DAEMON_DB)}")
+    except Exception as exc:
+        _log(f"ERROR tag 补扫: {exc} (continuing)")
 
 
 def run(cwd: str | None = None, interval: int = POLL_INTERVAL, once: bool = False) -> int:
@@ -654,6 +681,8 @@ def run(cwd: str | None = None, interval: int = POLL_INTERVAL, once: bool = Fals
     watch_cwd = cwd or os.getcwd()
     tdir = _transcript_dir(watch_cwd)
     db.get_conn()  # ensure schema initialised
+    global _DAEMON_DB   # tag 面目标库登记 (挂账#1, 见 _h7_distill_sweep)
+    _DAEMON_DB = db._conn_path
     _log(
         f"start: cwd={watch_cwd} dir={tdir} interval={interval}s "
         f"once={once} flag={'tengu_onyx_plover CLOSED (file-watch mode)'}"

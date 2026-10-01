@@ -2,8 +2,8 @@
 
 spec: docs/specs/graph-reform-v2-ingest-tags.md §一/§四/§五-H4。
 初铸不调 laya (F 验边占用容器) — 挂载 w 用确定性信号 (簇成员=1.0,
-新 atom 挂载=余弦); laya 挂载审计是 F 完成后的独立 refinement pass
-(audit_mounts 空实现留接口)。
+新 atom 挂载=余弦); laya 挂载审计/竞争裁决是独立 refinement pass
+(audit_mounts + mount_new_atoms(use_laya=True), 挂账#1 已通电)。
 
 算法对任务卡原文的一处实测修正 (参数不变 cos_lo=0.60/topk=8):
   任务卡: kNN 图 → 连通分量。实测本库语料同域致密, 连通分量退化为单一
@@ -35,8 +35,26 @@ import numpy as np
 
 import db
 import embedding
+import laya_client
 from llm_provider import ZhipuAnthropicProvider
-from src.distill import parse_llm_json  # 括号深度扫描兜底复用 (H2)
+from src.distill import (  # laya 评分口径复用 (H2/挂账#1)
+    CRIT_EDGE,
+    _LAYA_SHARD,
+    _laya_one,
+    _prob,
+    parse_llm_json,  # 括号深度扫描兜底复用 (H2)
+)
+
+_AUDIT_DROP = 0.30  # laya 低分卸载线 (边判 strong≥0.5 / rubber-stamp 带≥0.3 既有校准)
+_AUDIT_DEL_CAP = 200  # 单轮卸载帽 (对抗审查 major: laya 评分回归一夜清空挂载层的爆炸半径护栏 — 超出留待下轮, 自然限速+观察窗)
+
+
+def _rel_q(tag_name: str, tag_desc: str, atom_text: str) -> dict:
+    """tag↔atom 主题相关度 laya score 问 (audit/mount 共用, distill edg_ 同型)。"""
+    return {"type": "score",
+            "instructions": f"How related are the memory items "
+                            f"[tag: {tag_name} — {tag_desc}] and [{atom_text[:130]}] in topic?",
+            "criteria": CRIT_EDGE}
 
 SYS_NAME = (
     "你是知识图谱的语义标签铸造器。下面给你若干语义簇, 每簇带编号和成员样本句。"
@@ -286,10 +304,15 @@ def mint_semantic_tags(db_path, min_cluster: int = 4, cos_lo: float = 0.60,
     return res
 
 
-def mount_new_atoms(db_path) -> int:
-    """新 atom (needs_embed=1 或无 semantic mount) 试挂既有 semantic tag:
-    atom 向量距各 tag description 向量最近者 ≥_MOUNT_COS 即挂 (w=cos)。
-    挂不上的返回后仍无 mount, 留待下轮 mint 新社区发现。"""
+def mount_new_atoms(db_path, use_laya: bool = True) -> int:
+    """新 atom (needs_embed=1 或无 semantic mount) 试挂既有 semantic tag。
+
+    laya 可用 (use_laya 且 laya_available): 每 atom 取 cos≥_MOUNT_COS 的
+    top-3 候选 tag, 全部 (atom, tag) 对一次 laya 批评 (40 问/片), w=laya 分
+    且 ≥_AUDIT_DROP 才挂 — 最近≠最相关, 竞争裁决 (挂账#1)。
+    laya 不可用 → 回落原行为: 最近 tag ≥_MOUNT_COS 即挂 (w=cos)。
+    挂不上的返回后仍无 mount, 留待下轮 mint 新社区发现。
+    原子性: INSERT OR IGNORE 幂等, 不要求事务。"""
     conn = db.init(db_path)
     tags = conn.execute(
         "SELECT id, name, description FROM tag WHERE kind='semantic'").fetchall()
@@ -304,11 +327,16 @@ def mount_new_atoms(db_path) -> int:
         return 0
     tv = embedding.embed_batch([t["description"] or t["name"] for t in tags])
     av = embedding.embed_batch([r["text"] for r in rows])
-    T = np.vstack([np.asarray(v, np.float32) for v in tv if len(v) > _EMBED_DIM_MIN])
+    # 对抗审查 minor: 保留下标映射 — 坏向量过滤若不记 idx, T 行号与 tags 错位,
+    # 部分 embed 失败时挂载/laya 问句系统性指向错误 tag (静默错挂)。
+    tidx = [i for i, v in enumerate(tv) if len(v) > _EMBED_DIM_MIN]
+    T = np.vstack([np.asarray(tv[i], np.float32) for i in tidx])
     if not len(T):
         return 0
     T /= np.linalg.norm(T, axis=1, keepdims=True)
+    with_laya = use_laya and laya_client.laya_available()
     mounted = 0
+    pairs: list[tuple[int, int, str]] = []  # (atom_id, T 行号, atom text)
     for r, v in zip(rows, av):
         if len(v) <= _EMBED_DIM_MIN:
             continue
@@ -317,21 +345,97 @@ def mount_new_atoms(db_path) -> int:
         if n == 0:
             continue
         sims = T @ (a / n)
-        j = int(np.argmax(sims))  # 最近 = top-3 之首 (laya 竞争裁决留 audit_mounts)
-        if sims[j] >= _MOUNT_COS:
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO tag_mount(tag_id, atom_id, w) "
-                "VALUES(?, ?, ?)", (tags[j][0], r["id"], round(float(sims[j]), 4)))
-            mounted += cur.rowcount or 0  # 已挂 (needs_embed 候选重入) 不计数
-    conn.commit()
+        if with_laya:
+            # stable: 并列 cos 时截断确定化 (同 atom 两轮送同一候选集)
+            pairs.extend((r["id"], int(j), r["text"])
+                         for j in np.argsort(-sims, kind="stable")[:3]
+                         if sims[j] >= _MOUNT_COS)
+        else:
+            j = int(np.argmax(sims))
+            if sims[j] >= _MOUNT_COS:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO tag_mount(tag_id, atom_id, w) "
+                    "VALUES(?, ?, ?)",
+                    (tags[tidx[j]][0], r["id"], round(float(sims[j]), 4)))
+                mounted += cur.rowcount or 0  # 已挂 (needs_embed 候选重入) 不计数
+    if with_laya and pairs:
+        idx_same = CRIT_EDGE.index("same-topic")
+        for s0 in range(0, len(pairs), _LAYA_SHARD):
+            shard = pairs[s0:s0 + _LAYA_SHARD]
+            qs = {f"p{i}": _rel_q(tags[tidx[j]]["name"], tags[tidx[j]]["description"], text)
+                  for i, (_aid, j, text) in enumerate(shard)}
+            state = ("candidate tag mounts:\n" + "\n".join(
+                f"[{i}] [tag: {tags[tidx[j]]['name']} — {tags[tidx[j]]['description']}] "
+                f"[{text[:130]}]" for i, (_aid, j, text) in enumerate(shard)))
+            answers = _laya_one(state, qs)
+            if answers is None:
+                break  # 被动: 已挂数保留, 余对下轮再裁
+            for i, (aid, j, _text) in enumerate(shard):
+                w = _prob(answers.get(f"p{i}"), idx_same)
+                if w is not None and w >= _AUDIT_DROP:
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO tag_mount(tag_id, atom_id, w) "
+                        "VALUES(?, ?, ?)", (tags[tidx[j]][0], aid, w))
+                    mounted += cur.rowcount or 0
+            conn.commit()
+            time.sleep(1.0)  # 片间 1s (distill 同口径)
+    else:
+        conn.commit()
     return mounted
 
 
-def audit_mounts(db_path) -> int:
-    """laya 挂载审计 refinement pass — TODO (F 验边完成后的独立票):
-    semantic tag_mount 抽样送 laya_batch 评分, 低分卸载/降权; 新 atom 的
-    top-3 候选 tag 由 laya 竞争裁决 (初铸只取最近)。本初铸不调 laya。"""
-    return 0
+def audit_mounts(db_path, limit: int = 0) -> int:
+    """laya 挂载审计 refinement pass (挂账#1): 全量 (limit>0 截断) semantic
+    tag_mount 送 laya 评 [tag↔atom 主题相关度]; w<_AUDIT_DROP 卸载 DELETE,
+    ≥_AUDIT_DROP 降权为真实分 UPDATE。计数 = 卸载+降权行数。
+
+    幂等: 重跑重评分, w 收敛到 laya 分, 已卸载行不再出现。阈值 0.30 依据
+    既有校准: 边判 strong≥0.5 / rubber-stamp 带≥0.3 — 挂载是 refinement 非
+    写径红线, 故 laya 不可用 return 0 被动夜间再扫 (区别于 distill 挂起
+    语义); 畸形答案跳过不处置; 片间崩溃只丢本片 (每片 commit, 行级独立)。
+    单轮卸载帽 _AUDIT_DEL_CAP: laya 评分回归 (same-topic 整体<0.3) 时一夜
+    DELETE 全量 4030 行不可逆 — 帽外低分行原样留待下轮 (自然限速+观察窗;
+    daemon 只接 mount/audit 不接 mint, 无自动重建路径, 故必须限爆炸半径)。"""
+    conn = db.init(db_path)
+    rows = conn.execute(
+        "SELECT m.tag_id, m.atom_id, t.name, t.description, a.text "
+        "FROM tag_mount m JOIN tag t ON t.id=m.tag_id "
+        "JOIN atom a ON a.id=m.atom_id WHERE t.kind='semantic' "
+        "ORDER BY m.tag_id, m.atom_id").fetchall()
+    if limit > 0:
+        rows = rows[:limit]
+    if not rows or not laya_client.laya_available():
+        return 0
+    idx_same = CRIT_EDGE.index("same-topic")
+    handled = 0
+    deleted = 0
+    for s0 in range(0, len(rows), _LAYA_SHARD):
+        shard = rows[s0:s0 + _LAYA_SHARD]
+        qs = {f"m{i}": _rel_q(name, desc, text)
+              for i, (_tid, _aid, name, desc, text) in enumerate(shard)}
+        state = ("semantic tag mounts:\n" + "\n".join(
+            f"[{i}] [tag: {name} — {desc}] [{text[:130]}]"
+            for i, (_tid, _aid, name, desc, text) in enumerate(shard)))
+        answers = _laya_one(state, qs)
+        if answers is None:
+            break  # 被动: 返回已处置数, 下轮再扫
+        for i, (tag_id, atom_id, *_rest) in enumerate(shard):
+            w = _prob(answers.get(f"m{i}"), idx_same)
+            if w is None:
+                continue  # 畸形答案 → 跳过不处置 (下轮再评)
+            if w < _AUDIT_DROP:
+                if deleted >= _AUDIT_DEL_CAP:
+                    continue  # 单轮卸载帽满 — 低分行原样留待下轮
+                conn.execute("DELETE FROM tag_mount WHERE tag_id=? AND atom_id=?",
+                             (tag_id, atom_id))
+                deleted += 1
+            else:
+                conn.execute("UPDATE tag_mount SET w=? WHERE tag_id=? AND atom_id=?",
+                             (w, tag_id, atom_id))
+            handled += 1
+        conn.commit()
+        time.sleep(1.0)  # 片间 1s (distill 同口径)
+    return handled
 
 
 def _print_stats(db_path: str) -> None:
@@ -361,13 +465,15 @@ def _print_stats(db_path: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
-        print("usage: python3 src/tag_dream.py <db> [--mint|--mount]  "
+        print("usage: python3 src/tag_dream.py <db> [--mint|--mount|--audit]  "
               "(无 flag = dry-run 统计)")
         return 0
     import cli  # 模块导入即 _load_env() (.env: ZHIPU_API_KEY 等)
     db_path, flags = argv[0], set(argv[1:])
     if "--mount" in flags:
         print("mounted:", mount_new_atoms(db_path))
+    elif "--audit" in flags:
+        print("audited:", audit_mounts(db_path))
     elif "--mint" in flags:
         r = mint_semantic_tags(db_path)
         print(json.dumps(r, ensure_ascii=False, indent=1))

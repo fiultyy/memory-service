@@ -440,7 +440,7 @@ def test_daemon_dream_gate_interval():
         # 到期 (now-间隔-1) → 触发, state 记 last_run。
         state = {"_dreaming": {"last_run": time.time() - 86401}}
         out = mem_daemon._maybe_dream(state, "/w")
-        assert calls == ["/w"], calls
+        assert calls == [None], calls  # 挂账#1: source_cwd=None 全局口径 (ADR-14)
         assert "_dreaming" in out and out["_dreaming"]["last_run"] >= time.time() - 5
         # run_cycle 抛异常 → 不传播 (daemon 不死), state 仍推进 last_run。
         calls.clear()
@@ -452,3 +452,26 @@ def test_daemon_dream_gate_interval():
     finally:
         dream.run_cycle = orig_cycle
         mem_daemon._DREAM_INTERVAL = orig_interval
+
+
+# ── 挂账#1 tag 面守卫: 只认 run() 登记的 _DAEMON_DB (对抗审查 blocker) ──
+def test_h7_tag_face_requires_daemon_db_registration(tmp_path, monkeypatch):
+    """裸调用 (未 run()) 时, 即使 db._conn 已被更早路径绑定 (_run_hygiene /
+    distill 补扫都会 get_conn), tag 面也不得从环境态推断目标库 — 单测选择
+    曾因此把 44 行 cos-挂载写进生产库 (2026-10-01)。登记后照常跑且
+    audit 先于 mount (本轮新挂载不重评)。"""
+    import sys
+    import types
+    target = str(tmp_path / "h7guard.db")
+    db.init(target)                      # 模拟更早路径已绑定任意连接
+    calls = []
+    recorder = types.ModuleType("tag_dream")
+    recorder.mount_new_atoms = lambda p, use_laya=True: (calls.append(("mount", p)), 0)[1]
+    recorder.audit_mounts = lambda p, limit=0: (calls.append(("audit", p)), 0)[1]
+    monkeypatch.setitem(sys.modules, "tag_dream", recorder)
+    monkeypatch.setattr(mem_daemon, "_DAEMON_DB", None)
+    mem_daemon._h7_distill_sweep()       # distill 补扫照常 (laya off 被动), tag 面跳过
+    assert calls == []
+    monkeypatch.setattr(mem_daemon, "_DAEMON_DB", target)
+    mem_daemon._h7_distill_sweep()
+    assert calls[0] == ("audit", target) and calls[1] == ("mount", target)

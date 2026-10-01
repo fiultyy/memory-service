@@ -1,8 +1,9 @@
-"""H4 tag_dream 测试: mock embedding/zhipu (零网络/零生产库), tmp db 隔离。
+"""H4 tag_dream 测试: mock embedding/zhipu/laya (零网络/零生产库), tmp db 隔离。
 
 覆盖: 聚类+挂载 / 小簇丢弃 / 撞名后缀 / 幂等重跑(成员重叠复用) /
 层级第二层涌现+parent_of / 新 atom 挂载(阈值+needs_embed 候选) /
-空库零调用 / dry-run 零 LLM。
+空库零调用 / dry-run 零 LLM / 挂账#1 laya 审计(audit_mounts) +
+top-3 竞争挂载(mount_new_atoms use_laya)。
 """
 import json
 import sys
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 仓根平铺�
 
 import db  # noqa: E402
 import embedding  # noqa: E402
+import laya_client  # noqa: E402
 import src.tag_dream as td  # noqa: E402
 
 DIM = 128  # > _EMBED_DIM_MIN(100) 才过坏向量判据
@@ -218,6 +220,189 @@ def _bridge2(cos):
     return v
 
 
+def _mix(cos_a, cos_b):
+    """与 _oh(4) cos=cos_a、_oh(5) cos=cos_b 的单位向量 (余维补正交)。"""
+    s = (1.0 - cos_a * cos_a - cos_b * cos_b) ** 0.5
+    v = [0.0] * DIM
+    v[4], v[5], v[6] = cos_a, cos_b, s
+    return v
+
+
+# ── 挂账#1: laya 审计 + 竞争挂载 (全 mock, 零网络) ──────────
+def _laya(monkeypatch, available=True, batch=None):
+    """pin laya 可用性 + 注入 laya_batch mock (tag_dream 经 laya_client 模块
+    属性调用, conftest autouse pin env=0 不影响函数级 patch)。"""
+    monkeypatch.setattr(laya_client, "laya_available", lambda: available)
+    if batch is not None:
+        monkeypatch.setattr(laya_client, "laya_batch", batch)
+
+
+def _laya_batch_by_marker(marker, low=0.1, high=0.6, calls=None):
+    """内容驱动 mock: instructions 含 marker → same-topic=low, 否则 high
+    (内容驱动免依赖问序)。"""
+
+    def batch(state, questions, timeout=30.0):
+        out = {}
+        for k, q in questions.items():
+            if calls is not None:
+                calls.append(q)
+            v = low if marker in q["instructions"] else high
+            out[k] = {"probabilities": {"0": 0.05, "1": 0.05, "2": v}}
+        return out
+
+    return batch
+
+
+def _sem_tag(conn, name, desc):
+    return conn.execute(
+        "INSERT INTO tag(name, kind, level, description) "
+        "VALUES(?, 'semantic', 1, ?)", (name, desc)).lastrowid
+
+
+def _seed_mounts(conn):
+    """两 semantic tag × 三挂载 (w=1.0): #low/#low2 待卸载, #ok 待降权。"""
+    t1 = _sem_tag(conn, "标签甲", "甲主题")
+    t2 = _sem_tag(conn, "标签乙", "乙主题")
+    _add_atoms(conn, ["低分句 #low", "高分句 #ok", "另一低分 #low2"])
+    for tid, txt in ((t1, "低分句 #low"), (t1, "高分句 #ok"), (t2, "另一低分 #low2")):
+        aid = conn.execute("SELECT id FROM atom WHERE text=?", (txt,)).fetchone()[0]
+        conn.execute("INSERT INTO tag_mount(tag_id, atom_id, w) VALUES(?, ?, 1.0)",
+                     (tid, aid))
+
+
+def test_audit_low_deleted_high_reweighted(db_path, monkeypatch):
+    conn = db.get_conn()
+    _seed_mounts(conn)
+    _laya(monkeypatch, batch=_laya_batch_by_marker("#low"))
+    n = td.audit_mounts(db_path)
+    assert n == 3  # 2 卸载 + 1 降权
+    rows = {(r[0], round(r[1], 4)) for r in conn.execute(
+        "SELECT a.text, m.w FROM tag_mount m JOIN atom a ON a.id=m.atom_id")}
+    assert rows == {("高分句 #ok", 0.6)}  # 低分行 DELETE, 高分行 w=1.0→0.6
+
+
+def test_audit_laya_unavailable_zero_writes(db_path, monkeypatch):
+    conn = db.get_conn()
+    _seed_mounts(conn)
+    def _boom(state, questions, timeout=30.0):
+        raise AssertionError("laya 不可用时不应发批")
+    _laya(monkeypatch, available=False, batch=_boom)
+    assert td.audit_mounts(db_path) == 0
+    assert tuple(conn.execute("SELECT COUNT(*), SUM(w) FROM tag_mount"
+                              ).fetchone()) == (3, 3.0)  # 零 DB 变更
+
+
+def test_audit_malformed_answers_skipped(db_path, monkeypatch):
+    conn = db.get_conn()
+    _seed_mounts(conn)
+
+    def batch(state, questions, timeout=30.0):
+        out = {}
+        for k, q in questions.items():
+            ins = q["instructions"]
+            if "#bad1" in ins:
+                out[k] = {"probabilities": "not-a-dict"}  # 非 dict
+            elif "#bad2" in ins:
+                pass  # 缺 answer 键
+            else:
+                out[k] = {"probabilities": {"2": 0.6}}
+        return out
+
+    t = _sem_tag(conn, "标签丙", "丙主题")
+    _add_atoms(conn, ["畸形一 #bad1", "畸形二 #bad2"])
+    for txt in ("畸形一 #bad1", "畸形二 #bad2"):
+        aid = conn.execute("SELECT id FROM atom WHERE text=?", (txt,)).fetchone()[0]
+        conn.execute("INSERT INTO tag_mount(tag_id, atom_id, w) VALUES(?, ?, 1.0)",
+                     (t, aid))
+    _laya(monkeypatch, batch=batch)
+    n = td.audit_mounts(db_path)
+    assert n == 3  # 仅正常答案处置 (3 seeded 行); 畸形跳过不炸
+    ws = {r[0]: r[1] for r in conn.execute(
+        "SELECT a.text, m.w FROM tag_mount m JOIN atom a ON a.id=m.atom_id")}
+    assert ws["畸形一 #bad1"] == 1.0 and ws["畸形二 #bad2"] == 1.0  # 原样不动
+    assert ws["高分句 #ok"] == 0.6
+
+
+def test_audit_limit_truncates(db_path, monkeypatch):
+    conn = db.get_conn()
+    _seed_mounts(conn)
+    calls = []
+    _laya(monkeypatch, batch=_laya_batch_by_marker("#low", calls=calls))
+    n = td.audit_mounts(db_path, limit=2)
+    assert n == 2 and len(calls) == 2  # 只送评 2 问
+    # 截断保留第三行 (t2/#low2) 原样; 已扫两行 = #low 卸载 + #ok 降权 0.6
+    ws = {r[0]: r[1] for r in conn.execute(
+        "SELECT a.text, m.w FROM tag_mount m JOIN atom a ON a.id=m.atom_id")}
+    assert ws == {"高分句 #ok": 0.6, "另一低分 #low2": 1.0}
+
+
+def _seed_two_tags(db_path, monkeypatch):
+    """mint 两 semantic tag (描述向量 _oh(4)/_oh(5)), 返回 conn。"""
+    conn = db.get_conn()
+    _add_atoms(conn, ["甲%d #c0" % i for i in range(5)] + ["乙%d #c1" % i for i in range(5)])
+    _fake_embed(monkeypatch, {"#c0": _oh(0), "#c1": _oh(1), "#d0": _oh(4), "#d1": _oh(5)})
+    _zhipu(monkeypatch, [_arr([
+        {"id": 0, "name": "标签甲", "description": "甲主题 #d0"},
+        {"id": 1, "name": "标签乙", "description": "乙主题 #d1"},
+    ])])
+    td.mint_semantic_tags(db_path)
+    return conn
+
+
+def test_mount_laya_top3_competition(db_path, monkeypatch):
+    conn = _seed_two_tags(db_path, monkeypatch)
+    # 新 atom 与标签甲 cos0.7 / 标签乙 cos0.6 (均过 0.55) → 两候选同批竞争
+    _add_atoms(conn, ["竞争句 #race"])
+    monkeypatch.setattr(embedding, "embed_batch",
+                        _fake_embed_batch({"#d0": _oh(4), "#d1": _oh(5),
+                                           "#race": _mix(0.7, 0.6)}))
+    calls = []
+
+    def batch(state, questions, timeout=30.0):
+        calls.extend(questions.values())
+        out = {}
+        for k, q in questions.items():
+            hi = "标签乙" in q["instructions"]  # 乙高分 / 甲低分
+            out[k] = {"probabilities": {"0": 0.05, "1": 0.05, "2": 0.9 if hi else 0.1}}
+        return out
+
+    _laya(monkeypatch, batch=batch)
+    n = td.mount_new_atoms(db_path)
+    assert n == 1
+    assert len(calls) == 2  # top-3 两候选都送评 (不足 3 取实有)
+    r = conn.execute(
+        "SELECT t.name, m.w FROM tag_mount m JOIN tag t ON t.id=m.tag_id "
+        "JOIN atom a ON a.id=m.atom_id WHERE a.text='竞争句 #race'").fetchone()
+    assert r[0] == "标签乙" and abs(r[1] - 0.9) < 1e-6  # 只挂高分, w=laya 分
+
+
+def test_mount_laya_off_falls_back_nearest(db_path, monkeypatch):
+    conn = _seed_two_tags(db_path, monkeypatch)
+    _add_atoms(conn, ["回落句 #d0"])
+    monkeypatch.setattr(embedding, "embed_batch",
+                        _fake_embed_batch({"#d0": _oh(4), "#d1": _oh(5)}))
+    def _boom(state, questions, timeout=30.0):
+        raise AssertionError("laya off 不应发批")
+    _laya(monkeypatch, available=False, batch=_boom)
+    n = td.mount_new_atoms(db_path)
+    assert n == 1  # 现行为原样: 最近 tag cos≥0.55 即挂 w=cos
+    r = conn.execute(
+        "SELECT t.name, m.w FROM tag_mount m JOIN tag t ON t.id=m.tag_id "
+        "JOIN atom a ON a.id=m.atom_id WHERE a.text='回落句 #d0'").fetchone()
+    assert r[0] == "标签甲" and abs(r[1] - 1.0) < 1e-6
+
+
+def test_mount_laya_no_candidates_zero(db_path, monkeypatch):
+    conn = _seed_two_tags(db_path, monkeypatch)
+    _add_atoms(conn, ["无关句 #zz"])  # 默认向量 _oh(11) 与两 tag cos=0
+    monkeypatch.setattr(embedding, "embed_batch",
+                        _fake_embed_batch({"#d0": _oh(4), "#d1": _oh(5)}))
+    def _boom(state, questions, timeout=30.0):
+        raise AssertionError("无候选不应发批")
+    _laya(monkeypatch, batch=_boom)
+    assert td.mount_new_atoms(db_path) == 0
+
+
 # ── 空库/簇不足: 零 LLM 零写入 ─────────────────────────────
 def test_mint_no_clusters_zero_calls(db_path, monkeypatch):
     conn = db.get_conn()
@@ -247,3 +432,17 @@ def test_cli_dry_run_no_llm(db_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "communities" in out and "tag_mount: 0" in out
     assert fake.calls == []
+
+
+def test_audit_delete_cap_bounds_blast_radius(db_path, monkeypatch):
+    """单轮卸载帽 (对抗审查 major): laya 评分回归全低分时 DELETE 有界,
+    帽外低分行原样留存 (不降权不删), 留待下轮 — 爆炸半径护栏。"""
+    conn = db.get_conn()
+    _seed_mounts(conn)
+    monkeypatch.setattr(td, "_AUDIT_DEL_CAP", 1)
+    _laya(monkeypatch, batch=_laya_batch_by_marker("#low"))
+    n = td.audit_mounts(db_path)
+    assert n == 2  # 2 low: 帽 1 → 删 1 留 1 (留的不计 handled); 1 high 降权
+    assert conn.execute("SELECT COUNT(*) FROM tag_mount").fetchone()[0] == 2
+    ws = sorted(round(r[0], 2) for r in conn.execute("SELECT w FROM tag_mount"))
+    assert ws == [0.6, 1.0]  # 留存 low 行 w 不动, high 行降为 0.6

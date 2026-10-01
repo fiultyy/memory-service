@@ -33,6 +33,11 @@ VEC_DIM = int(os.environ.get("MEM_VEC_DIM", "2560"))
 # 备选 vec0.so (诊断信息用; openclaw 生产同版本扩展)。
 _ALT_VEC0_SO = "/home/yy/tools/openclaw/node_modules/sqlite-vec-linux-x64/vec0.so"
 
+# sqlite-vec vec0 KNN LIMIT 硬帽 (超限 OperationalError: "k value in knn query
+# too large"); _ann_topk 统一 clamp。recall 全量 sim 扫描取 min(total, 帽),
+# 帽外是最远一半向量 (sim 最低), 缺席语义 = sim 0, 不影响 top 路径。
+_KNN_LIMIT = 4096
+
 
 def _pack_f32(vec: list[float]) -> memoryview:
     """vec → little-endian float32 blob (sqlite-vec 原生二进制输入)。
@@ -94,6 +99,11 @@ def ensure_tables(conn) -> None:
     conn.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_fact USING vec0("
         f"fact_id TEXT PRIMARY KEY, value_embedding float[{d}] distance_metric=cosine)")
+    # H6: atom 命名空间 (v2 图召回向量腿; atom.id 是 INTEGER — vec0 整型主键
+    # 原生支持, 与 vec_fact 的 TEXT id 不同)。
+    conn.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_atom USING vec0("
+        f"atom_id INTEGER PRIMARY KEY, text_embedding float[{d}] distance_metric=cosine)")
 
 
 def available() -> bool:
@@ -149,6 +159,25 @@ def delete_fact(fact_id: str) -> None:
     _conn().execute("DELETE FROM vec_fact WHERE fact_id = ?", (fact_id,))
 
 
+def sync_atom(atom_id: int, vec: list[float] | None) -> None:
+    """upsert vec_atom 行 (H6)。vec 空/维度不匹配 = 数据条件 (atom 无向量,
+    embed 失败标 needs_embed 由 reembed_needing 补) → 跳过; SQL 失败 = 真故障
+    → 传播。与 sync_fact 同语义, 但不设 heal 标记 (atom 无 resolver 消费面)。"""
+    _require_loaded()
+    if not vec or len(vec) != VEC_DIM:
+        return
+    conn = _conn()
+    conn.execute("DELETE FROM vec_atom WHERE atom_id = ?", (atom_id,))
+    conn.execute(
+        "INSERT INTO vec_atom(atom_id, text_embedding) VALUES (?, ?)",
+        (atom_id, _pack_f32(vec)))
+
+
+def delete_atom(atom_id: int) -> None:
+    _require_loaded()
+    _conn().execute("DELETE FROM vec_atom WHERE atom_id = ?", (atom_id,))
+
+
 def _conn():
     import db
     return db.get_conn()
@@ -172,6 +201,14 @@ def fact_topk(vec: list[float], k: int) -> list[tuple[str, float]]:
     return _ann_topk("vec_fact", "fact_id", "value_embedding", vec, k)
 
 
+def atom_topk(vec: list[float], k: int) -> list[tuple[int, float]]:
+    """top-k (atom_id, cosine_sim) (H6 atom 命名空间; live 过滤由调用方)。"""
+    _require_loaded()
+    if not vec:
+        return []
+    return _ann_topk("vec_atom", "atom_id", "text_embedding", vec, k)
+
+
 def _ann_topk(table: str, id_col: str, vec_col: str,
               vec: list[float], k: int) -> list[tuple[str, float]]:
     if len(vec) != VEC_DIM:
@@ -180,7 +217,7 @@ def _ann_topk(table: str, id_col: str, vec_col: str,
     rows = conn.execute(
         f"SELECT {id_col}, distance FROM {table} "
         f"WHERE {vec_col} MATCH ? ORDER BY distance LIMIT ?",
-        (_pack_f32(vec), k)).fetchall()
+        (_pack_f32(vec), min(k, _KNN_LIMIT))).fetchall()
     # cosine distance = 1 - cosine_sim (vec0 distance_metric=cosine)。
     return [(r[0], 1.0 - r[1]) for r in rows]
 
@@ -229,6 +266,34 @@ def backfill_all() -> dict[str, int]:
             out["facts"] += 1
         else:
             out["skipped"] += 1
+    out.update(backfill_atoms())
+    return out
+
+
+def backfill_atoms() -> dict[str, int]:
+    """H6 atom 向量批量回填: live atom (valid_to IS NULL) text embed → vec_atom。
+    幂等 (vec0 PK + delete-then-insert)。migrate_v2 装载后跑一次 (cli
+    vec-backfill 亦含此步); 生产命中 embeddings.db L2 缓存, 不重复请求模型。
+    embed 失败 (离线) → skipped 计数, passive。"""
+    import embedding
+    _require_loaded()
+    conn = _conn()
+    out = {"atoms": 0, "atoms_skipped": 0}
+    rows = conn.execute(
+        "SELECT id, text FROM atom WHERE valid_to IS NULL "
+        "AND text IS NOT NULL AND text != ''").fetchall()
+    if not rows:
+        return out
+    vecs = embedding.embed_batch([r["text"] for r in rows])
+    if vecs is None:
+        out["atoms_skipped"] = len(rows)
+        return out
+    for r, v in zip(rows, vecs):
+        if v and len(v) == VEC_DIM:
+            sync_atom(r["id"], v)
+            out["atoms"] += 1
+        else:
+            out["atoms_skipped"] += 1
     return out
 
 

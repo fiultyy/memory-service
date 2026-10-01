@@ -29,6 +29,9 @@ _ensure_tables 的 ALTER-guard 仅作旧库兼容补列。
 (H5 DDL 无该列), 既有 atom 向量经 embedding.embed_batch(texts) 取 (生产命中
 embeddings.db text-hash 缓存, 不重复请求模型)。ponytail: 每段全量扫 + 重取
 既有向量, O(N_atoms); atom 过万再建 atom 向量表/ANN 索引。
+(H6 补注: 召回面已建 vec_atom ANN 命名空间 — distill 插入后增量 sync
+(_sync_atom_vecs) + reembed_needing 补扫回填; 本模块写侧配对仍走内存余弦,
+迁移到 ANN 是 atom 过万后的独立优化。)
 """
 from __future__ import annotations
 
@@ -48,6 +51,7 @@ import db
 import embedding
 import laya_client
 from llm_provider import ZhipuAnthropicProvider
+from typing import Any
 
 # ── v4 判据 SYS (temp/full_distill.py SYS_A + SYS_C 原样移植) ──────────
 SYS_JUDGE = (
@@ -458,12 +462,19 @@ def distill_segment(segment_text: str, session_id: str, cwd: str,
             n_edges += 1
         _mint_fact_tags(conn, [d["aid"] for d in new_atoms],
                         session_id, cwd, ts)
+        # ≥0.90 并入既有 atom 的源也挂本段事实 tag (prune 反查可见性, 验收 minor)
+        if merged_refs:
+            _mint_fact_tags(conn, sorted(merged_refs), session_id, cwd, ts)
         conn.execute("INSERT OR IGNORE INTO distill_seen(sha, status, created_at) "
                      "VALUES(?, 'ok', ?)", (sha, ts))
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
+    # H6: 插入事务后增量同步 vec_atom (召回向量腿)。import 放函数内防循环
+    # 依赖; passive — 任何失败 (维度不匹配/vec 面异常) 只丢向量不炸蒸馏,
+    # atom 已落 needs_embed 时由 reembed_needing 夜间补。
+    _sync_atom_vecs([(d["aid"], d["vec"]) for d in new_atoms if d.get("vec") is not None])
     return {"atoms": n_atoms, "edges": n_edges, "merged": n_merged,
             "supersede_proposals": supersede_proposals}
 
@@ -504,11 +515,26 @@ def audit_pending() -> int:
     return fixed
 
 
+def _sync_atom_vecs(pairs: list[tuple[int, Any]]) -> None:
+    """H6: (atom_id, vec) → vec_index.sync_atom 增量同步。passive — 任何
+    异常吞掉 (向量是召回增强面, 不是蒸馏本体; 维度不匹配 sync_atom 内部
+    已跳过)。"""
+    try:
+        import vec_index
+        if not vec_index.available():
+            return
+        for aid, vec in pairs:
+            vec_index.sync_atom(aid, [float(x) for x in vec])
+    except Exception:
+        pass
+
+
 def reembed_needing() -> int:
     """needs_embed=1 的 atom 补向量 (embedding.embed_batch)。
 
     atom 表不存向量 (H5 DDL) — 补向量 = 预热 embedding 模块 L2 缓存
     (embeddings.db), 使后续 recall/配对免请求直取; 成功即清标记。
+    H6: 补成后同步入 vec_atom 索引 (召回向量腿), passive。
     返回修复数; embed 不可用 → 0 (passive, 调用方夜间再扫)。只补向量,
     补后不追溯 cos 合并/候选边 — 归属由 H4 tag dreaming 夜间挂载收口。"""
     conn = db.get_conn()
@@ -520,8 +546,11 @@ def reembed_needing() -> int:
     if got is None:
         return 0
     fixed = 0
-    ids = [r["id"] for r, v in zip(rows, got) if _valid_vec(v)]
-    for aid in ids:
-        conn.execute("UPDATE atom SET needs_embed=0 WHERE id=?", (aid,))
-        fixed += 1
+    done: list[tuple[int, Any]] = []
+    for r, v in zip(rows, got):
+        if _valid_vec(v):
+            conn.execute("UPDATE atom SET needs_embed=0 WHERE id=?", (r["id"],))
+            done.append((r["id"], v))
+            fixed += 1
+    _sync_atom_vecs(done)
     return fixed

@@ -271,16 +271,21 @@ def run_gate_laya(
     cand_texts: dict[str, str],
     query: str,
     anchors: set[str],
+    p_keep: float = 0.35,
 ) -> dict[str, dict[str, Any]] | None:
     """Laya 批量版 gate (T1, temp/laya-batch-request-design.md §2.1)。
 
-    每候选 1 个 score question 双产出口: P(high) ≥ 0.35 → keep, 期望值/2 →
-    match_score。matched_anchor 程序化补回 (grill B3): anchors 子串匹配候选
-    文本 (大小写不敏感); keep 但锚不上 → keep=False (高分布上锚不上 = 判定
+    每候选 1 个 score question 双产出口: P(high) ≥ *p_keep* → keep, 期望值/2 →
+    match_score。``p_keep`` (H6): keep 阈值, 缺省 0.35 = legacy fact 面原值
+    (零回归); atom 召回面传 recall.GATE_P_HIGH_KEEP (H6 校准, 来源
+    temp/gate_calib_v2.json / scripts/gate_calibration_v2.py)。
+    matched_anchor 程序化补回 (grill B3): anchors 子串匹配候选
+    文本 (大小写不敏感); keep 但锚不上 → keep=False (高分布上锚不上 = 刭定
     无效, 与 v1.7③ 硬约束同语义)。
 
     Returns:
-        ``{fact_id: {"keep", "match_score", "matched_anchor"}}`` (answers 侧);
+        ``{fact_id: {"keep", "match_score", "matched_anchor", "p_high"}}``
+        (answers 侧; ``p_high`` = 原始 P(high), H6 校准面消费);
         laya_batch 整批失败 → None (调用方回落原 :func:`run_gate`)。
     """
     if not cand_texts:
@@ -310,9 +315,10 @@ def run_gate_laya(
         matched = next(
             (x for x in anchors if x and x.lower() in text), None)
         verdicts[fid] = {
-            "keep": a["probabilities"]["2"] >= 0.35 and matched is not None,
+            "keep": a["probabilities"]["2"] >= p_keep and matched is not None,
             "match_score": laya_client.norm_score(a, 3),
             "matched_anchor": matched or "",
+            "p_high": float(a["probabilities"]["2"]),
         }
     return verdicts
 

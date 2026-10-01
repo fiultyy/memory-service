@@ -17,6 +17,10 @@ recall is acceptable for single-machine MVP.
 Returns Facts, never MemoryItems (the MemoryItem layer does not exist — ADR-2).
 ``--verbose`` (``verbose=True``) exposes per-Fact hit detail (entity/match/
 centrality/lif/score) as a debug surface in lieu of a dedicated ``query`` cli.
+
+H6 (v2 图改造): 候选主源切换为 atom 表 (文本腿 + vec_atom 向量腿 + tag 遍历
+腿, 见 :func:`_recall_atoms`)。下方 entity/fact 流水降级为 legacy 面 —
+``MEM_RECALL_LEGACY_FACT=1`` 回切, live atom 为空时自动回落 (零回归)。
 """
 
 from __future__ import annotations
@@ -59,6 +63,17 @@ VEC_MIN = 0.30   # cosine ≥ 此的 active fact 入向量候选(避免全 noise
 VEC_TOP_N = 20   # 向量候选上限(扩展 entity/value 候选集)
 # ADR-4 bfs hint: direct-match 薄(候选 < 阈值)且 use_bfs=False 时 suggest_bfs。
 SUGGEST_BFS_THRESHOLD = 3
+
+# ── H6 (v2 图改造): atom 召回面常量 ──────────────────────────────────
+# 主候选源 = atom 表 (spec §五-H6); fact 面降级 legacy (env 回切见 recall 头)。
+TAG_TOP_PER_ATOM = 2   # tag 遍历腿: 每 hit atom 取 top-N semantic tag (by w)
+TAG_SIBLING_CAP = 8    # tag 遍历腿: 并入兄弟 atom 总帽 (去重/排除已命中)
+# gate P(high) keep 阈值 (atom 面)。来源: temp/gate_calib_v2.json
+# (scripts/gate_calibration_v2.py 2026-10-01 实测, seed=42): 60 对 (簇名 query,
+# 30 真相关/30 跨簇不相关) — relevant median 0.231 / irrelevant median 0.139,
+# 最优切点 raw 0.194 (accuracy 0.733, 圆整 0.20)。旧 fact 面 0.35 在此标注集
+# 仅 ~0.53 accuracy (relevant p75=0.27 全被砍)。改前先重跑校准。
+GATE_P_HIGH_KEEP = 0.20
 
 
 def _cosine(a: list[float] | None, b: list[float] | None) -> float:
@@ -255,6 +270,256 @@ def _facts_for_entities(entity_ids: list[str], as_of: str | None = None) -> list
     return facts
 
 
+def _atom_temporal_clause(as_of: str | None = None) -> tuple[str, list]:
+    """Atom validity WHERE fragment (H6)。atom 无 status 列 — 默认即
+    ``valid_to IS NULL`` (live), as_of 给定时点查询 (与 _temporal_clause 同
+    UTC 字典序前提)。"""
+    if as_of is None:
+        return ("valid_to IS NULL", [])
+    return (
+        "(valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)",
+        [as_of, as_of],
+    )
+
+
+def _row_to_atom(r: Any) -> dict[str, Any]:
+    """atom 行 → fact 形状 dict (下游 cli/注入面契约零分叉)。
+
+    ``id`` 加 ``atom:`` 前缀防与 legacy fact id 混淆; ``value``=text 供
+    score_fact 的 match 面; LIF/confidence 由 p_dur (laya durable 概率)
+    承担质量先验 — atom 无 LIF 机制, p_dur 是其最接近的信任标量。"""
+    p = float(r["p_dur"] or 0.0)
+    return {
+        "id": f"atom:{r['id']}",
+        "atom_id": r["id"],
+        "text": r["text"],
+        "label": r["label"],
+        "p_dur": p,
+        "value": r["text"],
+        "topic": None,
+        "LIF": p,
+        "confidence": p,
+        "source_cwd": r["source_cwd"],
+        "valid_from": r["valid_from"],
+        "valid_to": r["valid_to"],
+    }
+
+
+def _recall_atoms(
+    query: str,
+    *,
+    verbose: bool = False,
+    top_k: int | None = None,
+    session_id: str | None = None,
+    use_vec: bool = False,
+    min_score: float | None = None,
+    as_of: str | None = None,
+    cwd: str | None = None,
+    with_tag: bool = False,
+    use_gate: bool = False,
+    gate_provider: Any = None,
+    weights: tuple[float, float, float] | None = None,
+    delta: float | None = None,
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """H6 atom 召回面: 候选 = 文本腿 + 向量腿 + tag 遍历腿, gate 裁决 tag 翼。
+
+    取舍 (spec §五-H6 / PR 报告同步):
+    - 实体腿 (subject/object entity 图) 对 atom 无意义 → 不进 atom 面,
+      只留在 legacy fact 分支 (recall 主体); BFS 实体扩展同理。
+    - LIF 强化 / recall_hits 信号 / gate_score 记账 / mem-*.md 投影均为
+      fact 表机制, atom 面跳过 (纯读, 无写路径); _snaptag 形状保留
+      (kg_uri=kg://atom/<id>, mem_path=None)。
+    - gate_score 记账跳过 → gate_account 参数在此面无效 (atom 无该列)。
+    """
+    tokens = scoring.query_tokens(query)
+    conn = db.get_conn()
+    tc, tp = _atom_temporal_clause(as_of)
+    if cwd:
+        rows = conn.execute(
+            f"SELECT * FROM atom WHERE {tc} AND (source_cwd = ? OR source_cwd IS NULL)",
+            (*tp, cwd),
+        ).fetchall()
+    else:
+        rows = conn.execute(f"SELECT * FROM atom WHERE {tc}", tp).fetchall()
+
+    # ── 文本腿 (关键词腿的 atom 形态): query token 字面子串命中 atom.text
+    cand: dict[int, dict[str, Any]] = {}
+    for r in rows:
+        text = (r["text"] or "").lower()
+        if any(tok and tok in text for tok in tokens):
+            cand[r["id"]] = _row_to_atom(r)
+
+    # ── 向量腿: vec_atom ANN (H6 命名空间)。embed 失败 passive ([] → 跳过,
+    #    回落文本腿); 一次全量 MATCH 同时作 sim_by_id 来源 (文本腿候选的
+    #    vec_sim 也取到, 与 fact 面 perf/vec-index 批量化同型)。
+    sim_by_id: dict[int, float] = {}
+    qv = embedding.embed(query) if use_vec else []
+    if qv:
+        import vec_index
+        total = conn.execute("SELECT COUNT(*) FROM vec_atom").fetchone()[0]
+        if total:
+            sim_by_id = dict(vec_index.atom_topk(qv, total))
+            top = [aid for aid, s in sorted(sim_by_id.items(),
+                                            key=lambda x: -x[1])
+                   if s >= VEC_MIN][: VEC_TOP_N * 3]
+            if top:
+                ph = ",".join("?" * len(top))
+                vrows = {r["id"]: r for r in conn.execute(
+                    f"SELECT * FROM atom WHERE id IN ({ph}) AND {tc}",
+                    (*top, *tp)).fetchall()}
+                for aid in top:
+                    r = vrows.get(aid)
+                    if r is not None and aid not in cand:
+                        cand[aid] = _row_to_atom(r)
+        # ADR-14 cwd 过滤 (向量腿候选; 文本腿 SQL 已过滤, 同 fact 面口径)
+        if cwd:
+            cand = {aid: a for aid, a in cand.items()
+                    if not a["source_cwd"] or a["source_cwd"] == cwd}
+
+    # ── tag 遍历腿 (spec §一 召回联动): 命中 atom 的 semantic tag
+    #    (top TAG_TOP_PER_ATOM by w) → 同 tag 兄弟 atom (排除已命中, 去重,
+    #    cap TAG_SIBLING_CAP) 以 tag w × cos 加权入场 — 走 gate B 翼裁决。
+    #    权重公式含 cos → 无 query 向量 (use_vec 关/embed 失败) 时该腿惰性
+    #    (纯文本召回不做无相关性信号的扩张; 与 fact 面 BFS 扩张腿 opt-in
+    #    同先例)。sibling 若有 token 命中早已进文本腿 (排除已命中), 故此腿
+    #    的增量价值本就全在语义侧。
+    tag_wing: dict[int, float] = {}
+    if cand and qv:
+        hit_ids = list(cand)
+        ph = ",".join("?" * len(hit_ids))
+        per_atom: dict[int, list[tuple[int, float]]] = {}
+        for r in conn.execute(
+            "SELECT m.atom_id, m.tag_id, m.w FROM tag_mount m "
+            f"JOIN tag t ON t.id = m.tag_id "
+            f"WHERE t.kind = 'semantic' AND m.atom_id IN ({ph}) "
+            "ORDER BY m.w DESC", hit_ids,
+        ):
+            lst = per_atom.setdefault(r["atom_id"], [])
+            if len(lst) < TAG_TOP_PER_ATOM:
+                lst.append((r["tag_id"], float(r["w"] or 0.0)))
+        tag_ids = {tid for lst in per_atom.values() for tid, _ in lst}
+        if tag_ids:
+            tph = ",".join("?" * len(tag_ids))
+            sib_w: dict[int, float] = {}
+            for r in conn.execute(
+                f"SELECT m.atom_id, m.w FROM tag_mount m "
+                f"WHERE m.tag_id IN ({tph})", tuple(tag_ids),
+            ):
+                aid = r["atom_id"]
+                if aid in cand:
+                    continue  # 排除已命中
+                w = float(r["w"] or 0.0)
+                if w > sib_w.get(aid, 0.0):  # 多 tag 命中取 max
+                    sib_w[aid] = w
+            # 相关度 = cos (qv 在场保证; sim_by_id 为 vec_atom 全量 sim 映射)
+            ranked = sorted(
+                ((aid, w) for aid, w in sib_w.items() if w > 0.0),
+                key=lambda x: -x[1])[: TAG_SIBLING_CAP * 4]
+            if ranked:
+                rph = ",".join("?" * len(ranked))
+                srows = {r["id"]: r for r in conn.execute(
+                    f"SELECT * FROM atom WHERE id IN ({rph}) AND {tc}",
+                    (*[a for a, _ in ranked], *tp)).fetchall()}
+                for aid, w in ranked:
+                    r = srows.get(aid)
+                    if r is None or len(tag_wing) >= TAG_SIBLING_CAP:
+                        continue
+                    if cwd and r["source_cwd"] and r["source_cwd"] != cwd:
+                        continue  # ADR-14
+                    rel = sim_by_id.get(aid, 0.0)
+                    if rel <= 0.0:
+                        continue
+                    tag_wing[aid] = w * rel
+                    cand[aid] = _row_to_atom(r)
+
+    # ── 打分: 复用 score_fact (centrality=0 — atom 无实体图); tag 翼权重走
+    #    bfs_proximity 槽 (BFS_WEIGHT·w×cos 小项, 与 fact 面 BFS 邻近同型)。
+    scored = []
+    for aid, atom in cand.items():
+        scored.append(scoring.score_fact(
+            atom, query, centrality=0.0,
+            vec_sim=sim_by_id.get(aid, 0.0),
+            weights=weights, delta=delta,
+            bfs_proximity=min(1.0, tag_wing.get(aid, 0.0)),
+        ))
+
+    # 噪音地板: tag 翼绕过 (图遍历入场, 与 fact 面 BFS 裁决位同型 — 由 gate 收口)
+    floor = SCORE_FLOOR if min_score is None else min_score
+    scored = [s for s in scored
+              if s["score"] >= floor or s["fact"]["atom_id"] in tag_wing]
+
+    # ── gate (use_gate): 只判 tag 翼 (B 翼)。laya 批判 lane 优先 (锚 =
+    #    query token, ≥2 字), 不可用/锚空 → 回落 gate.run_gate; 两者都败 →
+    #    tag 翼全部不入返回 (A 路永不经 gate, 与 fact 面同语义)。
+    if use_gate and tag_wing:
+        cand_texts = {s["fact"]["id"]: s["fact"]["text"] for s in scored
+                      if s["fact"]["atom_id"] in tag_wing}
+        verdicts = None
+        try:
+            if laya_client.laya_available():
+                anchors = {t for t in tokens if len(t) >= 2}
+                if anchors:
+                    verdicts = gate.run_gate_laya(
+                        cand_texts, query, anchors, p_keep=GATE_P_HIGH_KEEP)
+            if verdicts is None:
+                verdicts = gate.run_gate(
+                    cand_texts, query, provider=gate_provider, scope="recall")
+        except Exception:  # noqa: BLE001 — gate 任何失败 ≡ 不可用
+            verdicts = None
+        if verdicts is None:
+            scored = [s for s in scored
+                      if s["fact"]["atom_id"] not in tag_wing]
+        else:
+            kept: list[dict[str, Any]] = []
+            for s in scored:
+                fid = s["fact"]["atom_id"]
+                if fid not in tag_wing:
+                    kept.append(s)
+                    continue
+                v = verdicts.get(s["fact"]["id"])
+                if v is not None and v.get("keep"):
+                    s["fact"]["gate_keep"] = True
+                    s["fact"]["match_score"] = float(v["match_score"])
+                    kept.append(s)
+            scored = kept
+
+    scored.sort(key=lambda s: s["score"], reverse=True)
+    if top_k is not None:
+        scored = scored[: max(0, top_k)]
+
+    # LIF 强化 / recall_hits 信号: fact 表机制, atom 面纯读跳过 (无对应列,
+    # dream 消费面不认 atom id)。boost 参数在此面无效。
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    for s in scored:
+        f = s["fact"]
+        topic = (f["text"] or "")[:120]
+        f["_snaptag"] = {
+            "fact_id": f["id"],
+            "mem_path": None,  # mem-*.md 投影是 fact 表机制; atom 面不建文件
+            "kg_uri": f"kg://atom/{f['atom_id']}",
+            "display": topic,
+            "topic": topic,
+            "mem_score": s["mem_score"],
+            "recalled_at": now_iso,
+            "session_id": session_id,
+        }
+        s["tag"] = f["_snaptag"]
+
+    if verbose:
+        for s in scored:
+            s["entities"] = []  # atom 无实体锚 (形状与 fact 面对齐)
+        return scored
+    if with_tag:
+        return {
+            "query": query,
+            "session_id": session_id,
+            "suggest_bfs": False,  # BFS 是 fact 实体图机制; atom 面扩展由 tag 腿承担
+            "results": [{"fact": s["fact"], "score": s["score"], "tag": s["tag"]}
+                        for s in scored],
+        }
+    return [s["fact"] for s in scored]
+
+
 def recall(
     query: str,
     *,
@@ -331,6 +596,20 @@ def recall(
         Sorted list of Facts (bare) or score-detail dicts (verbose).
         Empty list when no entity matches or no Facts score.
     """
+    # H6 (v2 图改造): 候选主源换 atom 表。MEM_RECALL_LEGACY_FACT=1 显式回切
+    # legacy fact 面 (观察期保险); 缺省走 atom 面, 但 live atom 为空 (未迁移
+    # 库 / 纯 fact 测试库) 时自动回落 fact 面 — 旧路径零回归。
+    if os.environ.get("MEM_RECALL_LEGACY_FACT", "0") != "1":
+        conn = db.get_conn()
+        if conn.execute(
+            "SELECT 1 FROM atom WHERE valid_to IS NULL LIMIT 1"
+        ).fetchone() is not None:
+            return _recall_atoms(
+                query, verbose=verbose, top_k=top_k, session_id=session_id,
+                use_vec=use_vec, min_score=min_score, as_of=as_of, cwd=cwd,
+                with_tag=with_tag, use_gate=use_gate,
+                gate_provider=gate_provider, weights=weights, delta=delta)
+
     tokens = scoring.query_tokens(query)
     entities = search_entities(tokens)
     # ponytail: also surface candidate facts whose value literally contains a

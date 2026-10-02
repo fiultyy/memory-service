@@ -313,6 +313,8 @@ def _row_to_atom(r: Any) -> dict[str, Any]:
         "valid_to": r["valid_to"],
         # v3 三列透传 (行 dict 原样; subjects 是 JSON 字符串, 调用面按需 loads)
         "subjects": r["subjects"],
+        # v4 段级 atom 结论句 (句级 atom 为 None; 消费面 display/description 用)
+        "gist": r["gist"] if "gist" in r.keys() else None,
         "event_at": r["event_at"],
         "last_seen_at": r["last_seen_at"],
     }
@@ -691,7 +693,8 @@ def _recall_atoms(
         projection.cc_memory_dir(cwd) if cwd else None)
     for s in scored:
         f = s["fact"]
-        topic = (f["text"] or "")[:120]
+        # v4: 段级 atom 的展示面 = gist (结论句); 句级回退原文
+        topic = ((f.get("gist") or f["text"]) or "")[:120]
         mem_path = None
         if mem_dir_obj is not None:
             projection.project_atom_md(f, mem_dir_obj, recalled_at=now_iso)

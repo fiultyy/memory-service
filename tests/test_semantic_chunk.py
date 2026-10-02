@@ -233,3 +233,35 @@ def test_bootstrap_v4_lane(tmp_path, monkeypatch):
     assert r["segments"] == 1 and r["atoms"] == 1
     assert got and got[0][0] == "整篇一段" and got[0][1] == "结论"
     assert got[0][2] == "memory:note.md" and got[0][3] == str(tmp_path)
+
+
+def test_gist_downstream(tmp_path, monkeypatch):
+    """gist 下游消费: _row_to_atom 透传 / snaptag display 优先 gist /
+    project_atom_md description=gist 正文含整段 / _det_lanes 条目用 gist。"""
+    import recall as R
+    import projection as PR
+    conn = _init(tmp_path)
+    _mock_avail(monkeypatch)
+    _mock_judge(monkeypatch, label="preference", summary="回复用中文")
+    _mock_laya(monkeypatch)
+    _mock_embed(monkeypatch)
+    D.distill_chunk("用户要求所有回复都用中文, 包括代码注释。", "回复中文",
+                    "s1", "/w", "2026-10-03T00:00:00+00:00")
+    # _row_to_atom 透传 + 召回 display
+    res = R.recall("回复 语言", min_score=0.0)
+    assert res and res[0]["gist"] == "回复用中文"
+    assert res[0]["_snaptag"]["display"].startswith("回复用中文")
+    # 投影: description=gist, 正文自包含整段
+    mem_dir = tmp_path / "mem"
+    PR.project_atom_md(res[0], mem_dir)
+    f = next(mem_dir.glob("mem-*.md"))
+    body = f.read_text(encoding="utf-8")
+    assert "description: 回复用中文" in body
+    assert "- gist: 回复用中文" in body
+    assert "用户要求所有回复都用中文" in body
+    # lane: preference 条目用 gist
+    import importlib
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+    import recall_inject as RI
+    lanes = RI._det_lanes()
+    assert any("回复用中文" in ln for ln in lanes), lanes

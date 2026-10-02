@@ -217,20 +217,22 @@ def project_atom_md(atom: dict, mem_dir: Path,
     if aid is None:
         raise ValueError(f"project_atom_md: 无 atom id ({atom.get('id')!r})")
     text = (atom.get("text") or atom.get("value") or "").strip()
+    gist = (atom.get("gist") or "").strip() or text  # v4: 结论句优先, 句级回退原文
     label = atom.get("label") or "?"
     refs = atom.get("source_refs") or []
-    fname = _atom_filename(aid, text)
+    fname = _atom_filename(aid, text)  # 文件名键=原文 (与索引行同源, gist 不入 slug)
     p = mem_dir / fname
     mem_dir.mkdir(parents=True, exist_ok=True)
     content = f"""---
-description: {_yaml_scalar(text)}
+description: {_yaml_scalar(gist)}
 source: mem-service
 fact_id: atom-{aid}
 recalled_at: {recalled_at or ''}
 ---
-# {text}
+# {gist}
 
 - label: {label}
+- gist: {gist}
 - text: {text}
 - source_refs: {refs}
 - p_dur: {atom.get('p_dur') or 0.0}
@@ -409,7 +411,7 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
     elif atom_ids:
         ph = ",".join("?" * len(atom_ids))
         rows = conn.execute(
-            f"SELECT id, text, label, p_dur, source_refs FROM atom "
+            f"SELECT id, text, gist, label, p_dur, source_refs FROM atom "
             f"WHERE valid_to IS NULL AND id IN ({ph})",
             atom_ids,
         ).fetchall()
@@ -422,7 +424,8 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
                 refs = []
             facts.append({
                 "id": f"atom-{r['id']}", "atom_id": r["id"],
-                "topic": r["text"],   # ADR-C 等价物: 结论句即 topic
+                # v4: 段级 atom 的 topic = gist (结论句); 句级回退原文
+                "topic": (r["gist"] if "gist" in r.keys() else None) or r["text"],
                 "text": r["text"], "label": r["label"],
                 # mem_score 先验 = p_dur (与 recall._row_to_atom 同口径)
                 "LIF": pd_, "confidence": pd_,

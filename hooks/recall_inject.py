@@ -225,20 +225,20 @@ def _det_lanes() -> list[str]:
         conn = db.get_conn()
         lines: list[str] = []
         for r in conn.execute(
-            "SELECT text FROM atom WHERE label='preference' AND valid_to IS NULL "
-            "ORDER BY p_dur DESC LIMIT 3"
+            "SELECT text, gist FROM atom WHERE label='preference' AND "
+            "valid_to IS NULL ORDER BY p_dur DESC LIMIT 3"
         ):
-            t = (r["text"] or "").strip()
+            t = (r["gist"] or r["text"] or "").strip()
             if t:
                 lines.append(f"偏好: {t}")
         now = datetime.now().astimezone()
         lo, hi = now - timedelta(days=7), now + timedelta(days=21)
         evs = []
         for r in conn.execute(
-            "SELECT text, event_at FROM atom WHERE label='event' AND valid_to "
-            "IS NULL AND event_at IS NOT NULL"
+            "SELECT text, gist, event_at FROM atom WHERE label='event' AND "
+            "valid_to IS NULL AND event_at IS NOT NULL"
         ):
-            t = (r["text"] or "").strip()
+            t = (r["gist"] or r["text"] or "").strip()
             raw = (r["event_at"] or "").strip()
             if not t or not raw:
                 continue

@@ -2,11 +2,19 @@
 
 spec: docs/specs/laya-integration-spec-v1.1.md (T0/P0)
 回退: MEM_LAYA_ENABLED=0 → laya_available() 短路 False, 零网络, 全链路=现状.
+
+后端 (2026-10-02): MEM_LAYA_BACKEND = local (缺省, 本地容器 /predict) |
+openrouter (typesafe/jev-1.13 经 OpenRouter chat completions — 本地容器
+故障时的等价替换, 问题/返回契约同形)。openrouter 需 OPENROUTER_API_KEY;
+模型 MEM_JEV_MODEL 覆盖 (缺省 typesafe/jev-1.13); 上下文上限 32k —
+TOKEN_BUDGET=8000 est × 中文 len//4 低估 4 倍 ≈ 32k 真实 token, 分片
+预算恰好自洽, 不另设闸。
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -16,6 +24,67 @@ LAYA_BASE = os.environ.get("MEM_LAYA_URL", "http://127.0.0.1:8190")
 
 TOKEN_BUDGET = 8000  # 实测 7.2k 通过; 留余量(temp/laya-batch-request-design.md §0)
 _SHARD_JOBS = 4      # laya_batch 超预算分片时的并行请求数帽
+
+OPENROUTER_BASE = os.environ.get("OPENROUTER_BASE", "https://openrouter.ai/api/v1")
+JEV_MODEL = os.environ.get("MEM_JEV_MODEL", "typesafe/jev-1.13")
+
+_JEV_SYS = (
+    "You are a batch judge service. The user message is a JSON payload with "
+    "'state' (context) and 'questions' (each has type, instructions, criteria). "
+    "Answer EVERY question id. Reply with ONLY a JSON object: "
+    '{"answers": {<qid>: {"score": <float>, "probabilities": '
+    '{"0": <p0>, "1": <p1>, "2": <p2 or as many criteria as given>}, '
+    '"legend": {<idx>: <criterion>}} }} — for type=score, probabilities must '
+    "cover every criterion index and sum to ~1.0, score = expectation over "
+    "criteria indices. For type=choice, reply {<qid>: {\"choice\": "
+    "<one criterion key>, \"confidence\": <float>}} instead. "
+    "No prose, no markdown fences."
+)
+
+
+def _backend() -> str:
+    return os.environ.get("MEM_LAYA_BACKEND", "local")
+
+
+def _openrouter_post(state: str, questions: dict, timeout: float) -> dict | None:
+    """OpenRouter chat.completions → 归一成 /predict answers 形态。
+
+    jev 是判官模型, 输入渲染成与本地容器同构的 payload (state+questions);
+    输出剥 ``` 围栏后 json 解析, answers 键缺失/解析失败 → None (与
+    _post 失败语义一致, 调用方整批回落/挂起)。"""
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not key:
+        return None
+    req = urllib.request.Request(
+        OPENROUTER_BASE + "/chat/completions",
+        data=json.dumps({
+            "model": JEV_MODEL,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": _JEV_SYS},
+                {"role": "user", "content": json.dumps(
+                    {"state": state, "questions": questions}, ensure_ascii=False)},
+            ],
+        }).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read())
+        text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        if not isinstance(text, str) or not text.strip():
+            return None
+        text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text.strip())
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return None
+        parsed = json.loads(m.group(0))
+        answers = parsed.get("answers") if isinstance(parsed, dict) else None
+        return {"answers": answers} if isinstance(answers, dict) else None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
 
 # 进程级 TTL 缓存: 成功/失败都缓存, 避免交互路径每次探测
 _avail_cache: tuple[float, bool] | None = None
@@ -41,10 +110,15 @@ def _post(path: str, payload: dict, timeout: float) -> dict | None:
 
 
 def laya_available() -> bool:
-    """health 探测, TTL 60s 进程级缓存(成功/失败都缓存). 关 → False 零网络."""
+    """health 探测, TTL 60s 进程级缓存(成功/失败都缓存). 关 → False 零网络.
+
+    openrouter 后端: key 在即视为可用 (无本地 health 面; 真失败走 laya_batch
+    → None 的既有回落链, 不额外探测花钱)。"""
     global _avail_cache
     if not _enabled():
         return False
+    if _backend() == "openrouter":
+        return bool(os.environ.get("OPENROUTER_API_KEY"))
     now = time.monotonic()
     if _avail_cache is not None and now - _avail_cache[0] < _AVAIL_TTL:
         return _avail_cache[1]
@@ -68,10 +142,14 @@ def laya_batch(state: str, questions: dict, timeout: float = 30.0) -> dict | Non
     """
     if not questions:
         return {}
+    # 后端分发: openrouter (jev chat 面) 与 local 共用分片/预算/失败语义
+    _send = ((lambda st, qs: _openrouter_post(st, qs, timeout))
+             if _backend() == "openrouter"
+             else (lambda st, qs: _post("/predict",
+                                        {"state": st, "questions": qs}, timeout)))
     n_shards = max(1, -(-_est_tokens(state, questions) // TOKEN_BUDGET))
     if n_shards <= 1:
-        resp = _post("/predict", {"state": state, "questions": questions},
-                     timeout)
+        resp = _send(state, questions)
         return resp.get("answers") if isinstance(resp, dict) and \
             isinstance(resp.get("answers"), dict) else None
     # 均分 N 片, 并行发 (容器服务端并发处理; ponytail: 线程帽 4 — laya 容器
@@ -82,9 +160,7 @@ def laya_batch(state: str, questions: dict, timeout: float = 30.0) -> dict | Non
               for i in range(0, len(qids), per)]
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=min(_SHARD_JOBS, len(shards))) as ex:
-        results = list(ex.map(
-            lambda ch: _post("/predict", {"state": state, "questions": ch},
-                             timeout), shards))
+        results = list(ex.map(lambda ch: _send(state, ch), shards))
     answers: dict = {}
     for resp in results:
         if not (isinstance(resp, dict) and isinstance(resp.get("answers"), dict)):

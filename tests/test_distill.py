@@ -120,11 +120,9 @@ def test_normal_path_mints_tags_and_is_idempotent(tdb, monkeypatch):
                and a["needs_embed"] == 0 and a["valid_to"] is None
                and a["source_cwd"] == CWD for a in atoms)
     assert json.loads(atoms[0]["source_refs"]) == ["甲句一。"]
-    # 事实tag铸币: session 恒铸 + cwd 白名单 repo: (kind=factual/level=1)
-    tags = {r["name"] for r in tdb.execute("SELECT name FROM tag")}
-    assert tags == {"session:s1", "repo:memory-service"}
-    links = tdb.execute("SELECT COUNT(*) c FROM tag_mount").fetchone()["c"]
-    assert links == 4  # 2 atom × 2 tag
+    # 事实tag已退场: 溯源走 source_refs/source_cwd, tag 面零行
+    assert tdb.execute("SELECT COUNT(*) c FROM tag").fetchone()["c"] == 0
+    assert tdb.execute("SELECT COUNT(*) c FROM tag_mount").fetchone()["c"] == 0
     assert tdb.execute("SELECT status FROM distill_seen").fetchone()["status"] == "ok"
     # sha 幂等: 同文重放 (换 session/cwd 也不重复计费)
     r2 = distill.distill_segment("甲句一。乙句二。", "s2", "/tmp/x", "t2")
@@ -136,8 +134,8 @@ def test_normal_path_mints_tags_and_is_idempotent(tdb, monkeypatch):
 def test_cwd_outside_whitelist_mints_session_only(tdb, monkeypatch):
     _setup(monkeypatch, [_zhipu_arr([{"id": 0, "summary": "结论 #vB", "label": "fact"}])])
     distill.distill_segment("单句。", "s9", "/tmp/scratch", "t")
-    tags = {r["name"] for r in tdb.execute("SELECT name FROM tag")}
-    assert tags == {"session:s9"}  # /tmp 跳过 repo: (spec §六)
+    assert tdb.execute("SELECT COUNT(*) c FROM tag").fetchone()["c"] == 0
+    # 溯源仍在: source_refs 带 session (spec §六, factual 退场后唯一载体)
 
 
 # ── laya 不可用挂起 ─────────────────────────────────────────

@@ -367,9 +367,13 @@ def mount_new_atoms(db_path, use_laya: bool = True) -> int:
         sims = T @ (a / n)
         if with_laya:
             # stable: 并列 cos 时截断确定化 (同 atom 两轮送同一候选集)
-            pairs.extend((r["id"], int(j), r["text"])
-                         for j in np.argsort(-sims, kind="stable")[:3]
-                         if sims[j] >= _MOUNT_COS)
+            top = [int(j) for j in np.argsort(-sims, kind="stable")[:3]
+                   if sims[j] >= _MOUNT_COS]
+            if not top:
+                # 单例兜底 (2026-10-02 全覆盖裁决): cos 不达线也取 top-1
+                # 交 laya 语义裁决 — 闸在 laya 不在机械 cos, 孤儿逐步归树。
+                top = [int(np.argmax(sims))]
+            pairs.extend((r["id"], j, r["text"]) for j in top)
         else:
             j = int(np.argmax(sims))
             if sims[j] >= _MOUNT_COS:
@@ -433,10 +437,13 @@ def grow_tag_tree(db_path) -> dict:
     comms = _louvain(len(ids), _knn_edges(V, 0.60, 8))
     groups = [sorted(c) for c in comms if len(c) >= 2]
     grouped = {i for g in groups for i in g}
-    # 单原子不成候选: 一句一 tag 只会铸出垃圾群 (320 垃圾 L1 实测教训),
-    # 孤单原子留待后续 mount/mint — 攒够同伴再进树。
+    # 单例也是候选 (2026-10-02 用户裁决「laya 判无 tag 可聚合的可新建聚合」):
+    # grow 在 mount 之后跑, 余留孤儿 = mount 单例兜底已被 laya 拒的集合,
+    # 对它们唯一出路就是新建 tag (LLM 命名+定级, laya 子题闸照走)。
     cands = [{"atom_idx": g, "samples": [texts[i][:100] for i in g[:_NAME_SAMPLES]]}
              for g in groups]
+    cands += [{"atom_idx": [i], "samples": [texts[i][:100]]}
+              for i in range(len(ids)) if i not in grouped]
     res["candidates"] = len(cands)
     res["singles_left"] = len(ids) - len(grouped)
     if not cands:

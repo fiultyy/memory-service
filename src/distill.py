@@ -268,8 +268,10 @@ def _prob(answer: dict | None, idx: int) -> float | None:
 
 def _mint_fact_tags(conn, atom_ids: list[int], session_id: str,
                     cwd: str | None, ts: str) -> None:
-    """事实tag铸币 (§六): session 恒铸保底; cwd 白名单归一铸 repo:; 其余跳过。
-    kind=factual / level=1 / w=1.0 确定挂载 (H5 DDL 口径)。"""
+    """事实tag已退场 (2026-10-02 用户裁决「开放的 tag」): 溯源由
+    atom.source_refs (session:...#N) + source_cwd 承载, tag 面只留
+    semantic 语义树。保留空壳防旧调用点 — 新代码不要再挂 factual。"""
+    return
     names = []
     if session_id:
         names.append("session:" + session_id)

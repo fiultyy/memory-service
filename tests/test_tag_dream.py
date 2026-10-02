@@ -392,15 +392,20 @@ def test_mount_laya_off_falls_back_nearest(db_path, monkeypatch):
     assert r[0] == "标签甲" and abs(r[1] - 1.0) < 1e-6
 
 
-def test_mount_laya_no_candidates_zero(db_path, monkeypatch):
+def test_mount_laya_no_candidates_single_fallback(db_path, monkeypatch):
+    """单例兜底 (全覆盖裁决): cos 不达线也取 top-1 交 laya — 低分不挂,
+    高分挂上 (闸在 laya 不在机械 cos)。"""
     conn = _seed_two_tags(db_path, monkeypatch)
     _add_atoms(conn, ["无关句 #zz"])  # 默认向量 _oh(11) 与两 tag cos=0
     monkeypatch.setattr(embedding, "embed_batch",
                         _fake_embed_batch({"#d0": _oh(4), "#d1": _oh(5)}))
-    def _boom(state, questions, timeout=30.0):
-        raise AssertionError("无候选不应发批")
-    _laya(monkeypatch, batch=_boom)
+    _laya(monkeypatch, batch=_laya_batch_by_marker("#zz"))     # 该句低分
     assert td.mount_new_atoms(db_path) == 0
+    _laya(monkeypatch, batch=_laya_batch_by_marker("#nope"))   # 全高分
+    assert td.mount_new_atoms(db_path) == 1
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM tag_mount m JOIN atom a ON a.id=m.atom_id "
+        "WHERE a.text='无关句 #zz'").fetchone()["c"] == 1
 
 
 # ── 空库/簇不足: 零 LLM 零写入 ─────────────────────────────

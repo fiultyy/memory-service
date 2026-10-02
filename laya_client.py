@@ -106,6 +106,16 @@ def _est_tokens(state: str, questions: dict) -> int:
     return len(state) // 4 + sum(len(json.dumps(q)) for q in questions.values()) // 4
 
 
+def _token_budget() -> int:
+    """后端感知分片预算: openrouter jev 上下文 32k → est 帽 8000; 本地容器
+    max_len 8192 **真实** token, 而 len//4 est 对中文低估 ~4 倍 (实测 20 个
+    全长中文 instructions est 2136 真实已撞顶 503) → est 帽 2048 (实测 n=19
+    est≈2025 过, 留裕量)。env MEM_LAYA_LOCAL_BUDGET 覆盖。"""
+    if _backend() == "local":
+        return int(os.environ.get("MEM_LAYA_LOCAL_BUDGET", "2048"))
+    return TOKEN_BUDGET
+
+
 def laya_batch(state: str, questions: dict, timeout: float = 30.0) -> dict | None:
     """单次 POST /predict; 超 token 预算按 question 均分 N 片(state 原样复制).
 
@@ -118,7 +128,7 @@ def laya_batch(state: str, questions: dict, timeout: float = 30.0) -> dict | Non
              if _backend() == "openrouter"
              else (lambda st, qs: _post("/predict",
                                         {"state": st, "questions": qs}, timeout)))
-    n_shards = max(1, -(-_est_tokens(state, questions) // TOKEN_BUDGET))
+    n_shards = max(1, -(-_est_tokens(state, questions) // _token_budget()))
     if n_shards <= 1:
         resp = _send(state, questions)
         return resp.get("answers") if isinstance(resp, dict) and \

@@ -128,7 +128,7 @@ const TYPE_COLOR = {
   technical_term: "#64748b", concept: "#a78bfa", named_entity: "#fbbf24",
   identifier: "#94a3b8", quoted_term: "#f472b6", person: "#34d399",
   project: "#f97316", tool: "#22d3ee", file: "#e879f9", tag: "#f59e0b",
-  cluster: "#818cf8",
+  cluster: "#818cf8", sub: "#c084fc",
 };
 const hashColor = s => `hsl(${[...s].reduce((a,c)=>(a*31+c.charCodeAt(0))>>>0,7)%360} 65% 60%)`;
 
@@ -206,9 +206,11 @@ function computeHidden() {               // 每次过滤条件变化重算 (含�
 }
 renderer.setSetting("nodeReducer", (node, data) => {
   if (hiddenNodes.has(node)) return { ...data, hidden: true };
-  const t = data.entity_type === "cluster" ? COMM_PALETTE[(data.ci ?? 0) % COMM_PALETTE.length]
+  const t = (data.entity_type === "cluster" || data.entity_type === "sub")
+    ? COMM_PALETTE[(data.ci ?? 0) % COMM_PALETTE.length]
     : data.entity_type === "tag" ? TAG_COLOR : nodeColor(data);
   const size = data.entity_type === "cluster" ? 9
+    : data.entity_type === "sub" ? 3.5
     : data.entity_type === "tag" ? 4 + Math.log2(1 + (data.degree ?? 1)) * 2
     : (mode === "tag" ? 1.2 : 2 + Math.sqrt(data.degree ?? 1) * 1.6);
   const base = { ...data, color: t, size,
@@ -332,6 +334,35 @@ function buildGraph() {
       graph.addNode(n.id, { ...n, label: (n.name ?? "").slice(0, 40),
                             ...seedPos(), size: 1.2, color: nodeColor(n) });
     const tname = id => store.tags.get(id)?.name ?? "?";
+    // 第四层预扫描: 每 tag 的 live 原子按 louvain 社区分组, >1 组才有子团
+    const subGroups = new Map();              // tag -> Map(comm -> 子团节点 id)
+    for (const t of store.tags.values()) {
+      const gs = new Map();                   // comm -> [atomId…]
+      for (const m of store.mounts) {
+        if (m.tag !== t.id) continue;
+        const cm = store.comm[m.atom];
+        if (cm == null || !store.nodes.has(m.atom)) continue;
+        (gs.get(cm) ?? gs.set(cm, []).get(cm)).push(m.atom);
+      }
+      for (const [cm, atoms] of gs) if (atoms.length < 2) gs.delete(cm);
+      if (gs.size < 2) continue;             // 单原子组不成团, 直挂 tag
+      const gm = new Map();
+      for (const [cm, atoms] of gs) {
+        const sid = `s:${t.id}:${cm}`;
+        const rep = atoms.map(a => store.nodes.get(a))
+                         .sort((x, y) => (y.degree ?? 0) - (x.degree ?? 0))[0];
+        graph.addNode(sid, { id: sid, name: rep?.name ?? "?",
+                             label: (rep?.name ?? "?").slice(0, 22),
+                             entity_type: "sub", degree: atoms.length,
+                             aliases: atoms.slice(0, 8).map(a => store.nodes.get(a)?.name),
+                             ci: cm, ...seedPos(), size: 3.5, forceLabel: true });
+        graph.addEdgeWithKey(`sk:${t.id}:${cm}`, sid, "t:" + t.id,
+          { label: "组", _topic: "", _ts: NaN, _lif: 1, size: 1,
+            color: TAG_COLOR, type: "arrow" });
+        gm.set(cm, sid);
+      }
+      subGroups.set(t.id, gm);
+    }
     for (const t of store.tags.values()) {
       const id = "t:" + t.id;
       graph.addNode(id, { id, name: "#" + t.name, label: t.name.slice(0, 24),
@@ -358,12 +389,20 @@ function buildGraph() {
     }
     for (const m of store.mounts) {
       const eid = `m:${m.tag}:${m.atom}`, tid = "t:" + m.tag;
-      if (graph.hasNode(m.atom) && graph.hasNode(tid) && !graph.hasEdge(eid)) {
-        const ts = tsOf(m.ts);
-        if (Number.isFinite(ts)) { tMin = Math.min(tMin, ts); tMax = Math.max(tMax, ts); }
-        graph.addEdgeWithKey(eid, m.atom, tid,
-          { label: "挂载", _topic: "", _ts: ts, _lif: m.w, size: .6, color: "#334155" });
-      }
+      if (!graph.hasNode(m.atom) || !graph.hasNode(tid) || graph.hasEdge(eid)) continue;
+      const ts = tsOf(m.ts);
+      if (Number.isFinite(ts)) { tMin = Math.min(tMin, ts); tMax = Math.max(tMax, ts); }
+      // 第四层: tag 内按 louvain 社区分组 — 多社区的 tag 插子团节点,
+      // 原子挂子团、子团挂 tag; 单社区 tag 直挂 (不造只有一个孩子的假层级)
+      const cm = store.comm[m.atom];
+      const groups = subGroups.get(m.tag);
+      const sid = cm != null && groups && groups.size > 1 ? groups.get(cm) : null;
+      const mountAttrs = { label: "挂载", _topic: "", _ts: ts, _lif: m.w,
+                           size: .6, color: "#334155" };
+      if (sid && graph.hasNode(sid))
+        graph.addEdgeWithKey(eid, m.atom, sid, mountAttrs);
+      else
+        graph.addEdgeWithKey(eid, m.atom, tid, mountAttrs);
     }
   }
   $("n-nodes").textContent = graph.order; $("n-edges").textContent = graph.size;

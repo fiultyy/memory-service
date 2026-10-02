@@ -38,6 +38,7 @@ class FakeResp:
 
 
 def test_batch_passthrough(monkeypatch):
+    monkeypatch.setenv('MEM_LAYA_BACKEND', 'local')  # .env 切 openrouter 不影响 local 面测试
     calls = []
 
     def fake_post(path, payload, timeout):
@@ -51,6 +52,7 @@ def test_batch_passthrough(monkeypatch):
 
 
 def test_batch_sharding(monkeypatch):
+    monkeypatch.setenv('MEM_LAYA_BACKEND', 'local')  # .env 切 openrouter 不影响 local 面测试
     calls = []
 
     def fake_post(path, payload, timeout):
@@ -69,6 +71,7 @@ def test_batch_sharding(monkeypatch):
 
 
 def test_batch_failure_matrix(monkeypatch):
+    monkeypatch.setenv('MEM_LAYA_BACKEND', 'local')  # .env 切 openrouter 不影响 local 面测试
     for fail in (lambda p, pl, t: None,                       # HTTP/超时(_post → None)
                  lambda p, pl, t: {"nope": 1}):               # 无 answers 键
         monkeypatch.setattr(lc, "_post", fail)
@@ -78,6 +81,7 @@ def test_batch_failure_matrix(monkeypatch):
 # ── laya_available: TTL 缓存 / 失败缓存 / 开关短路 ──
 
 def test_available_ttl_cache(monkeypatch):
+    monkeypatch.setenv('MEM_LAYA_BACKEND', 'local')  # .env 切 openrouter 不影响 local 面测试
     probes = []
 
     class Resp(FakeResp):
@@ -94,6 +98,7 @@ def test_available_ttl_cache(monkeypatch):
 
 
 def test_available_failure_cached(monkeypatch):
+    monkeypatch.setenv('MEM_LAYA_BACKEND', 'local')  # .env 切 openrouter 不影响 local 面测试
     probes = []
 
     def fake_urlopen(url, timeout=None):
@@ -108,6 +113,7 @@ def test_available_failure_cached(monkeypatch):
 
 
 def test_available_disabled_zero_network(monkeypatch):
+    monkeypatch.setenv('MEM_LAYA_BACKEND', 'local')  # .env 切 openrouter 不影响 local 面测试
     monkeypatch.setenv("MEM_LAYA_ENABLED", "0")
 
     def boom(url, timeout=None):

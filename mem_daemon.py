@@ -679,6 +679,9 @@ def _h7_distill_sweep() -> None:
             import tag_dream
         _log(f"tag audit_mounts → {tag_dream.audit_mounts(_DAEMON_DB)}")
         _log(f"tag mount_new_atoms → {tag_dream.mount_new_atoms(_DAEMON_DB)}")
+        # tag 树增量生长 (2026-10-02): mount 余留孤儿 → LLM 定级插入 + laya 闸。
+        # 放 mount 之后 — 先竞争挂既有叶, 挂不上的才铸新 tag 进树。
+        _log(f"tag grow_tag_tree → {tag_dream.grow_tag_tree(_DAEMON_DB)}")
     except Exception as exc:
         _log(f"ERROR tag 补扫: {exc} (continuing)")
 

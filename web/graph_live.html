@@ -152,6 +152,26 @@ const store = { nodes: new Map(), edges: new Map(), tags: new Map(),
 const nodeColor = n => colorBy === "comm" && store.comm[n.id] != null
   ? COMM_PALETTE[store.comm[n.id] % COMM_PALETTE.length]
   : (TYPE_COLOR[n.entity_type] ?? hashColor(n.id));
+let _treeDegCache = null;             // 真树子树度数 (tag 含子孙 mounts 之和)
+function tagTreeDeg() {
+  if (_treeDegCache) return _treeDegCache;
+  const kids = new Map();
+  for (const t of store.tags.values())
+    if (t.parent_id != null && store.tags.has(t.parent_id))
+      kids.set(t.parent_id, [...(kids.get(t.parent_id) ?? []), t.id]);
+  const deg = new Map();
+  const calc = (id, seen) => {
+    if (deg.has(id)) return deg.get(id);
+    if (seen.has(id)) return 0;        // 环防御 (脏 parent_id)
+    seen.add(id);
+    let d = store.tags.get(id)?.mounts ?? 0;
+    for (const k of kids.get(id) ?? []) d += calc(k, seen);
+    deg.set(id, d);
+    return d;
+  };
+  for (const id of store.tags.keys()) calc(id, new Set());
+  return (_treeDegCache = deg);
+}
 
 const graph = new Graph({ multi: true, type: "directed" });
 const renderer = new Sigma(graph, document.getElementById("graph"),
@@ -357,6 +377,15 @@ function buildGraph() {
       graph.addNode(n.id, { ...n, label: (n.name ?? "").slice(0, 40),
                             ...seedPos(), size: 1.2, color: nodeColor(n) });
     const tname = id => store.tags.get(id)?.name ?? "?";
+    // 真树边: 有 parent_id 的 tag 挂父 tag (优先于计算簇)
+    for (const t of store.tags.values()) {
+      if (t.parent_id == null || !store.tags.has(t.parent_id)) continue;
+      const cid = "t:" + t.id, pid = "t:" + t.parent_id;
+      if (graph.hasNode(cid) && graph.hasNode(pid) && !graph.hasEdge(`p:${t.id}`))
+        graph.addEdgeWithKey(`p:${t.id}`, cid, pid,
+          { label: "父", _topic: "", _ts: NaN, _lif: 1, size: 1.2,
+            color: TAG_COLOR, type: "arrow" });
+    }
     // 第四层预扫描: 每 tag 的 live 原子按 louvain 社区分组, >1 组才有子团
     const subGroups = new Map();              // tag -> Map(comm -> 子团节点 id)
     for (const t of store.tags.values()) {
@@ -389,7 +418,8 @@ function buildGraph() {
     for (const t of store.tags.values()) {
       const id = "t:" + t.id;
       graph.addNode(id, { id, name: "#" + t.name, label: t.name.slice(0, 24),
-                          entity_type: "tag", degree: t.mounts, aliases: [],
+                          entity_type: "tag", degree: tagTreeDeg().get(t.id) ?? t.mounts,
+                          aliases: [],
                           created_at: t.t0 ? `${t.t0?.slice(0, 10)} ~ ${t.t1?.slice(0, 10)}` : null,
                           ...seedPos(), size: 5, color: TAG_COLOR, forceLabel: true });
     }
@@ -404,6 +434,7 @@ function buildGraph() {
                           forceLabel: true });
       for (const t of c.members) {
         const tid = "t:" + t;
+        if (store.tags.get(t)?.parent_id != null) continue;   // 真树边已挂
         if (graph.hasNode(tid) && !graph.hasEdge(`k:${c.id}:${t}`))
           graph.addEdgeWithKey(`k:${c.id}:${t}`, tid, id,
             { label: "簇", _topic: "", _ts: NaN, _lif: 1, size: 1.4,
@@ -598,6 +629,7 @@ for (const n of snap.nodes) { /* 预摆环形坐标避免全 0 重叠 */
 }
 applyDelta(snap, true);
 store.tags = new Map((snap.tags ?? []).map(t => [t.id, t]));
+_treeDegCache = null;                  // 新快照 → 子树度数重算
 store.mounts = snap.mounts ?? [];
 store.comm = snap.comm ?? {};
 store.clusters = snap.clusters ?? [];

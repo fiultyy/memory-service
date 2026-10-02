@@ -175,19 +175,26 @@ def _tag_bipartite(live_ids: set[int],
     (见 _tag_clusters: 原子边连通 louvain)。"""
     import db
     rows = db.get_conn().execute(
-        "SELECT m.atom_id, m.tag_id, m.w, t.name, a.valid_from FROM tag_mount m "
-        "JOIN tag t ON t.id = m.tag_id JOIN atom a ON a.id = m.atom_id "
+        "SELECT m.atom_id, m.tag_id, m.w, t.name, t.parent_id, a.valid_from "
+        "FROM tag_mount m JOIN tag t ON t.id = m.tag_id "
+        "JOIN atom a ON a.id = m.atom_id "
         "WHERE t.kind = 'semantic' ORDER BY m.tag_id, m.atom_id").fetchall()
     mounts = [{"atom": str(r["atom_id"]), "tag": r["tag_id"], "w": r["w"],
                "ts": r["valid_from"]} for r in rows if r["atom_id"] in live_ids]
     by_tag: dict[int, list[dict]] = {}
     for m in mounts:
         by_tag.setdefault(m["tag"], []).append(m)
-    names = {r["tag_id"]: r["name"] for r in rows}
-    tags = [{"id": t, "name": names.get(t, "?"), "mounts": len(ms),
-             "t0": min((m["ts"] for m in ms if m["ts"]), default=None),
-             "t1": max((m["ts"] for m in ms if m["ts"]), default=None)}
-            for t, ms in by_tag.items()]
+    # 全 semantic tag (含无挂载的 L2/L3 树枢纽 — mounts 行里没有它们);
+    # mounts 只记 live 原子侧, 枢纽 mounts=0 由前端子树度数补
+    tags = [{"id": r["id"], "name": r["name"], "parent_id": r["parent_id"],
+             "mounts": len(by_tag.get(r["id"], [])),
+             "t0": min((m["ts"] for m in by_tag.get(r["id"], []) if m["ts"]),
+                       default=None),
+             "t1": max((m["ts"] for m in by_tag.get(r["id"], []) if m["ts"]),
+                       default=None)}
+            for r in db.get_conn().execute(
+                "SELECT id, name, parent_id FROM tag WHERE kind='semantic' "
+                "ORDER BY id")]
     tags.sort(key=lambda t: -t["mounts"])
     clusters = _tag_clusters(by_tag, edges)
     return tags, mounts, clusters

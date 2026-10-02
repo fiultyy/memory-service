@@ -56,6 +56,14 @@ def _rel_q(tag_name: str, tag_desc: str, atom_text: str) -> dict:
                             f"[tag: {tag_name} — {tag_desc}] and [{atom_text[:130]}] in topic?",
             "criteria": CRIT_EDGE}
 
+
+def _sub_q(parent_name: str, parent_desc: str, name: str, desc: str) -> dict:
+    """新 tag 是否为父支点主题的子题 laya score 问 (grow_tag_tree 可插入闸)。"""
+    return {"type": "score",
+            "instructions": f"Is the topic [{name} — {desc}] a specific subtopic "
+                            f"of [{parent_name} — {parent_desc}]?",
+            "criteria": CRIT_EDGE}
+
 SYS_NAME = (
     "你是知识图谱的语义标签铸造器。下面给你若干语义簇, 每簇带编号和成员样本句。"
     "为每簇起一个概括成员共同主题的标签名(中文, 不超过8字, 无标点)和一句描述(≤30字)。\n"
@@ -67,6 +75,16 @@ _LEVEL_CAP = 4        # 层级硬帽 (裁决#1)
 _QUOTIENT_EDGE_GT = 2  # 簇间 kNN 跨边计数 > 2 才连商图边
 _MOUNT_COS = 0.55     # 新 atom 挂载下界
 _EMBED_DIM_MIN = 100  # 短于此视为坏向量 (distill 同判据)
+
+SYS_PLACE = (
+    "你是知识图谱语义标签树的大纲编辑。下面给出既有语义标签树 (id/层级/父节点/"
+    "名称/描述) 和若干新候选标签 (带编号和成员样本句)。像文章大纲一样按具体语义"
+    "为每个候选选插入支点: 它是既有哪个标签的子主题就挂谁下面 (parent 给该标签"
+    "id); 若它是全新顶层主题则 parent 给 null; 若与既有某标签同义 (不该新建) 则"
+    "same 给该标签 id。\n只输出 JSON 数组: "
+    '[{"id":候选编号,"parent":<标签id或null>,"same":<标签id或null>}], 不要其它文字。'
+)
+_PLACE_SHARD = 40  # 候选分片 (320 候选×提示一次调会截断 → 全量解析失败, 实测教训)
 
 _Zhipu: ZhipuAnthropicProvider | None = None
 
@@ -117,7 +135,7 @@ def _knn_edges(Vn: np.ndarray, cos_lo: float, topk: int) -> list[tuple[int, int,
     edges: set[tuple[int, int, float]] = set()
     for i in range(n):
         for j in np.argsort(-S[i])[1:topk + 1]:
-            if S[i, j] >= cos_lo:
+            if j != i and S[i, j] >= cos_lo:   # 重复向量时 top-k 含自身 → 自环防
                 a, b = (i, int(j)) if i < j else (int(j), i)
                 edges.add((a, b, float(S[a, b])))
     return sorted(edges)
@@ -155,7 +173,8 @@ def _load_atoms(conn) -> tuple[list[int], list[str], np.ndarray | None]:
 
 
 def _find_or_mint_tag(conn, name: str, desc: str, level: int,
-                      member_ids: set[int] | None) -> int | None:
+                      member_ids: set[int] | None,
+                      parent_id: int | None = None) -> int | None:
     """撞名判定 (任务卡: 加后缀重试一次): 同名同 level 且 (成员重叠过半 或
     L2+ 无成员) → 同簇重跑复用; 异簇撞名 → 后缀 ·2 一次; 仍撞 → None 跳过。"""
     def _row(nm):
@@ -177,12 +196,13 @@ def _find_or_mint_tag(conn, name: str, desc: str, level: int,
         name2 = name[:7] + "·2"
         if _row(name2) is None:
             return conn.execute(
-                "INSERT INTO tag(name, kind, level, description) "
-                "VALUES(?, 'semantic', ?, ?)", (name2, level, desc)).lastrowid
+                "INSERT INTO tag(name, kind, level, parent_id, description) "
+                "VALUES(?, 'semantic', ?, ?, ?)",
+                (name2, level, parent_id, desc)).lastrowid
         return None
     return conn.execute(
-        "INSERT INTO tag(name, kind, level, description) "
-        "VALUES(?, 'semantic', ?, ?)", (name, level, desc)).lastrowid
+        "INSERT INTO tag(name, kind, level, parent_id, description) "
+        "VALUES(?, 'semantic', ?, ?, ?)", (name, level, parent_id, desc)).lastrowid
 
 
 def mint_semantic_tags(db_path, min_cluster: int = 4, cos_lo: float = 0.60,
@@ -384,6 +404,161 @@ def mount_new_atoms(db_path, use_laya: bool = True) -> int:
     return mounted
 
 
+def grow_tag_tree(db_path) -> dict:
+    """tag 树增量生长 (语义定级插入): mount_new_atoms 余留孤儿 → 聚类命名
+    → zhipu 定支点 (大纲式: 挂哪个既有 tag 下 / 同义复用 / 新根) → laya
+    可插入闸 (子题分 ≥_AUDIT_DROP 放行, 不过/laya 缺席 → 回退无父 L1) →
+    单事务落 tag(level=parent.level+1, parent_id)+mounts。
+
+    纪律与 mint 同: 全部 LLM/embed/laya 调用在任何 DB 写之前。
+    幂等: _find_or_mint_tag 撞名复用 + mounts INSERT OR IGNORE。"""
+    conn = db.init(db_path)
+    res = {"orphans": 0, "candidates": 0, "singles_left": 0, "placed": 0,
+           "reused": 0, "fallback_l1": 0, "mounted": 0, "skipped": 0}
+    rows = conn.execute(
+        "SELECT a.id, a.text FROM atom a WHERE a.valid_to IS NULL AND NOT EXISTS ("
+        "SELECT 1 FROM tag_mount m JOIN tag t ON t.id=m.tag_id "
+        "WHERE m.atom_id=a.id AND t.kind='semantic') ORDER BY a.id").fetchall()
+    res["orphans"] = len(rows)
+    if len(rows) < 2:
+        return res
+    vecs = embedding.embed_batch([r["text"] for r in rows])
+    keep = [(r, v) for r, v in zip(rows, vecs) if len(v) > _EMBED_DIM_MIN]
+    if len(keep) < 2:
+        return res
+    ids = [r["id"] for r, _ in keep]
+    texts = [r["text"] for r, _ in keep]
+    V = np.vstack([np.asarray(v, np.float32) for _, v in keep])
+    V /= np.linalg.norm(V, axis=1, keepdims=True)
+    comms = _louvain(len(ids), _knn_edges(V, 0.60, 8))
+    groups = [sorted(c) for c in comms if len(c) >= 2]
+    grouped = {i for g in groups for i in g}
+    # 单原子不成候选: 一句一 tag 只会铸出垃圾群 (320 垃圾 L1 实测教训),
+    # 孤单原子留待后续 mount/mint — 攒够同伴再进树。
+    cands = [{"atom_idx": g, "samples": [texts[i][:100] for i in g[:_NAME_SAMPLES]]}
+             for g in groups]
+    res["candidates"] = len(cands)
+    res["singles_left"] = len(ids) - len(grouped)
+    if not cands:
+        return res
+
+    named = _name_clusters({k: c["samples"] for k, c in enumerate(cands)})
+    cands = [dict(atom_idx=c["atom_idx"], samples=c["samples"],
+                  name=named[k]["name"], desc=named[k]["description"])
+             for k, c in enumerate(cands) if k in named]
+    if not cands:
+        res["skipped"] = res["candidates"]
+        return res
+
+    # 定级放置: zhipu 分片批调用 (既有树大纲 + 候选, 按候选编号匹配)
+    tree = conn.execute(
+        "SELECT id, name, level, parent_id, description FROM tag "
+        "WHERE kind='semantic' ORDER BY level, id").fetchall()
+    tree_by_id = {r["id"]: r for r in tree}
+    tree_lines = ["既有语义标签树:"]
+    tree_lines += [f"[{r['id']}] L{r['level']} parent={r['parent_id']} "
+                   f"{r['name']} — {(r['description'] or '')[:30]}" for r in tree]
+    placement: dict[int, dict] = {}  # 候选下标 → {"parent":..,"same":..}
+    for s0 in range(0, len(cands), _PLACE_SHARD):
+        shard = range(s0, min(s0 + _PLACE_SHARD, len(cands)))
+        lines = tree_lines + ["候选标签 (带成员样本):"]
+        for k in shard:
+            lines.append(f"候选{k}: {cands[k]['name']} — {cands[k]['desc'][:30]}")
+            lines += [f"  - {s}" for s in cands[k]["samples"][:4]]
+        try:
+            raw = _get_zhipu().chat(
+                SYS_PLACE, [{"role": "user", "content": "\n".join(lines)}],
+                max_tokens=4000)
+            for it in parse_llm_json(raw) or []:
+                if isinstance(it, dict) and isinstance(it.get("id"), int) \
+                        and it["id"] in shard:
+                    placement[it["id"]] = it
+        except Exception:
+            pass  # 本片定级失败 → 该片候选按无父 L1 (下轮 mint 可再收编)
+        time.sleep(1)
+
+    # laya 可插入闸: (新 tag, 选中父) 对一次批评
+    plans: list[dict] = []           # name/desc/level/parent_id/atom_ids
+    gate_pairs: list[tuple[int, dict]] = []   # (plans 下标, parent row)
+    for k, c in enumerate(cands):
+        p = placement.get(k, {})
+        same = _valid_tag(p.get("same"), tree_by_id)
+        if same is not None:         # 同义复用 — 不建新 tag 只挂原子
+            plans.append({"name": c["name"], "desc": c["desc"],
+                          "level": None, "parent_id": None,
+                          "reuse_tag": same["id"],
+                          "atom_ids": {ids[i] for i in c["atom_idx"]}})
+            continue
+        parent = _valid_tag(p.get("parent"), tree_by_id)
+        lvl = parent["level"] + 1 if parent is not None else 1
+        if parent is not None and lvl > _LEVEL_CAP:
+            parent = None
+            lvl = 1
+        pl = {"name": c["name"], "desc": c["desc"], "level": lvl,
+              "parent_id": parent["id"] if parent is not None else None,
+              "atom_ids": {ids[i] for i in c["atom_idx"]}}
+        plans.append(pl)
+        if parent is not None:
+            gate_pairs.append((len(plans) - 1, parent))
+    if gate_pairs and not laya_client.laya_available():
+        for pi, _p in gate_pairs:            # laya 缺席 → 被动回退 L1 (不挂起)
+            plans[pi]["parent_id"] = None
+            plans[pi]["level"] = 1
+    elif gate_pairs:
+        idx_same = CRIT_EDGE.index("same-topic")
+        qs = {f"g{i}": _sub_q(p["name"], p["description"] or "",
+                               plans[pi]["name"], plans[pi]["desc"])
+              for i, (pi, p) in enumerate(gate_pairs)}
+        state = ("tag tree insertions:\n" + "\n".join(
+            f"[{i}] [new: {plans[pi]['name']} — {plans[pi]['desc']}] "
+            f"under [{p['name']} — {p['description'] or ''}]"
+            for i, (pi, p) in enumerate(gate_pairs)))
+        answers = _laya_one(state, qs)
+        if answers is not None:
+            for i, (pi, _p) in enumerate(gate_pairs):
+                w = _prob(answers.get(f"g{i}"), idx_same)
+                if w is not None and w < _AUDIT_DROP:   # 不可插入 → 回退 L1
+                    plans[pi]["parent_id"] = None
+                    plans[pi]["level"] = 1
+
+    # 单事务写 (此前零 DB 写)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for pl in plans:
+            if pl.get("reuse_tag") is not None:
+                tid = pl["reuse_tag"]
+                res["reused"] += 1
+            else:
+                tid = _find_or_mint_tag(conn, pl["name"], pl["desc"],
+                                        pl["level"], pl["atom_ids"],
+                                        pl["parent_id"])
+                if tid is None:
+                    res["skipped"] += 1
+                    continue
+                res["placed"] += 1
+                if pl["parent_id"] is None and pl["level"] == 1:
+                    res["fallback_l1"] += 1
+            for aid in pl["atom_ids"]:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO tag_mount(tag_id, atom_id, w) "
+                    "VALUES(?, ?, 1.0)", (tid, aid))
+                res["mounted"] += cur.rowcount or 0
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return res
+
+
+def _valid_tag(tid, tree_by_id) -> dict | None:
+    """LLM 给的支点 id 防御: 必须是既有 semantic tag 行 (int 或数字串)。"""
+    if isinstance(tid, str) and tid.isdigit():
+        tid = int(tid)
+    if isinstance(tid, bool) or not isinstance(tid, int):
+        return None
+    return tree_by_id.get(tid)
+
+
 def audit_mounts(db_path, limit: int = 0) -> int:
     """laya 挂载审计 refinement pass (挂账#1): 全量 (limit>0 截断) semantic
     tag_mount 送 laya 评 [tag↔atom 主题相关度]; w<_AUDIT_DROP 卸载 DELETE,
@@ -465,13 +640,15 @@ def _print_stats(db_path: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
-        print("usage: python3 src/tag_dream.py <db> [--mint|--mount|--audit]  "
+        print("usage: python3 src/tag_dream.py <db> [--mint|--mount|--grow|--audit]  "
               "(无 flag = dry-run 统计)")
         return 0
     import cli  # 模块导入即 _load_env() (.env: ZHIPU_API_KEY 等)
     db_path, flags = argv[0], set(argv[1:])
     if "--mount" in flags:
         print("mounted:", mount_new_atoms(db_path))
+    elif "--grow" in flags:
+        print(json.dumps(grow_tag_tree(db_path), ensure_ascii=False, indent=1))
     elif "--audit" in flags:
         print("audited:", audit_mounts(db_path))
     elif "--mint" in flags:

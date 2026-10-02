@@ -446,3 +446,115 @@ def test_audit_delete_cap_bounds_blast_radius(db_path, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM tag_mount").fetchone()[0] == 2
     ws = sorted(round(r[0], 2) for r in conn.execute("SELECT w FROM tag_mount"))
     assert ws == [0.6, 1.0]  # 留存 low 行 w 不动, high 行降为 0.6
+
+
+# ── grow_tag_tree: tag 树增量生长 (LLM 定级 + laya 可插入闸) ──
+
+def _seed_tree(conn):
+    """既有树: L2 支点 + 其下 L1 叶。返回 (l2_id, leaf_id)。"""
+    l2 = conn.execute(
+        "INSERT INTO tag(name, kind, level, description) "
+        "VALUES('运维支点', 'semantic', 2, '父域主题')").lastrowid
+    leaf = conn.execute(
+        "INSERT INTO tag(name, kind, level, parent_id, description) "
+        "VALUES('日志排查', 'semantic', 1, ?, '叶主题')", (l2,)).lastrowid
+    return l2, leaf
+
+
+def test_grow_places_under_parent_level3(db_path, monkeypatch):
+    """放置命中 L2 支点 + laya 高分 → 新 tag level=parent+1 挂 parent_id。"""
+    conn = db.get_conn()
+    l2, _leaf = _seed_tree(conn)
+    _add_atoms(conn, ["丙%d #c3" % i for i in range(3)])   # 孤儿 (无 semantic mount)
+    _fake_embed(monkeypatch, {"#c3": _oh(3)})
+    _zhipu(monkeypatch, [
+        _arr([{"id": 0, "name": "新子题", "description": "丙主题"}]),   # 命名
+        _arr([{"id": 0, "parent": l2}]),                       # 放置
+    ])
+    _laya(monkeypatch, batch=_laya_batch_by_marker("#never"))          # 全高分
+    r = td.grow_tag_tree(db_path)
+    assert (r["orphans"], r["placed"], r["mounted"]) == (3, 1, 3)
+    assert tuple(conn.execute(
+        "SELECT level, parent_id FROM tag WHERE name='新子题'").fetchone()) == (3, l2)
+    assert conn.execute("SELECT COUNT(*) FROM tag_mount").fetchone()[0] == 3
+
+
+def test_grow_laya_gate_low_falls_back_l1(db_path, monkeypatch):
+    """laya 子题分 < 0.30 → 回退无父 L1。"""
+    conn = db.get_conn()
+    l2, _leaf = _seed_tree(conn)
+    _add_atoms(conn, ["丙%d #c3" % i for i in range(3)])
+    _fake_embed(monkeypatch, {"#c3": _oh(3)})
+    _zhipu(monkeypatch, [
+        _arr([{"id": 0, "name": "新子题", "description": "丙主题"}]),
+        _arr([{"id": 0, "parent": l2}]),
+    ])
+    _laya(monkeypatch, batch=_laya_batch_by_marker("新子题"))           # 该对低分
+    r = td.grow_tag_tree(db_path)
+    assert r["fallback_l1"] == 1
+    assert tuple(conn.execute(
+        "SELECT level, parent_id FROM tag WHERE name='新子题'").fetchone()) == (1, None)
+
+
+def test_grow_same_synonym_reuses(db_path, monkeypatch):
+    """zhipu 判同义 (same) → 不建新 tag, 原子挂既有叶。"""
+    conn = db.get_conn()
+    _l2, leaf = _seed_tree(conn)
+    _add_atoms(conn, ["丙%d #c3" % i for i in range(3)])
+    _fake_embed(monkeypatch, {"#c3": _oh(3)})
+    _zhipu(monkeypatch, [
+        _arr([{"id": 0, "name": "新子题", "description": "丙主题"}]),
+        _arr([{"id": 0, "same": leaf}]),
+    ])
+    _laya(monkeypatch, batch=_laya_batch_by_marker("#never"))
+    r = td.grow_tag_tree(db_path)
+    assert r["reused"] == 1 and r["placed"] == 0 and r["mounted"] == 3
+    assert conn.execute("SELECT COUNT(*) FROM tag WHERE kind='semantic'"
+                        ).fetchone()[0] == 2   # 树没长新行
+
+
+def test_grow_laya_unavailable_falls_back(db_path, monkeypatch):
+    """laya 缺席 → 被动回退无父 L1 (不挂起)。"""
+    conn = db.get_conn()
+    l2, _leaf = _seed_tree(conn)
+    _add_atoms(conn, ["丙%d #c3" % i for i in range(3)])
+    _fake_embed(monkeypatch, {"#c3": _oh(3)})
+    _zhipu(monkeypatch, [
+        _arr([{"id": 0, "name": "新子题", "description": "丙主题"}]),
+        _arr([{"id": 0, "parent": l2}]),
+    ])
+    _laya(monkeypatch, available=False)
+    r = td.grow_tag_tree(db_path)
+    assert r["fallback_l1"] == 1
+
+
+def test_grow_llm_failure_zero_writes(db_path, monkeypatch):
+    """命名不可解析 → 零 DB 写 (LLM 先行纪律)。"""
+    conn = db.get_conn()
+    _seed_tree(conn)
+    _add_atoms(conn, ["丙%d #c3" % i for i in range(3)])
+    _fake_embed(monkeypatch, {"#c3": _oh(3)})
+    _zhipu(monkeypatch, ["not json at all"])
+    r = td.grow_tag_tree(db_path)
+    assert r["skipped"] == 1 and r["placed"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM tag WHERE kind='semantic'"
+                        ).fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM tag_mount").fetchone()[0] == 0
+
+
+def test_grow_idempotent_rerun(db_path, monkeypatch):
+    """重跑: 挂上的原子不再是孤儿 → 早退零调用。"""
+    conn = db.get_conn()
+    l2, _leaf = _seed_tree(conn)
+    _add_atoms(conn, ["丙%d #c3" % i for i in range(3)])
+    _fake_embed(monkeypatch, {"#c3": _oh(3)})
+    _zhipu(monkeypatch, [
+        _arr([{"id": 0, "name": "新子题", "description": "丙主题"}]),
+        _arr([{"id": 0, "parent": l2}]),
+    ])
+    _laya(monkeypatch, batch=_laya_batch_by_marker("#never"))
+    td.grow_tag_tree(db_path)
+    fake = _zhipu(monkeypatch, [])            # 第二轮不应再调 LLM
+    r = td.grow_tag_tree(db_path)
+    assert r["orphans"] == 0 and r["candidates"] == 0 and r["placed"] == 0
+    assert fake.calls == []

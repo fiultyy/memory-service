@@ -92,6 +92,15 @@
           <input id="search" type="search" placeholder="搜索实体聚焦…"
                  style="flex:1;background:#1f2937;color:var(--fg);border:1px solid #374151;border-radius:6px;padding:3px 8px;font-size:12px">
         </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+          <button id="btn-focus" style="padding:2px 10px">关系聚焦: 关</button>
+          <label style="color:var(--dim);font-size:12px">跳数
+            <select id="hops" style="background:#1f2937;color:var(--fg);border:1px solid #374151;border-radius:6px;padding:2px 6px">
+              <option value="1">1</option><option value="2" selected>2</option>
+              <option value="3">3</option><option value="4">4</option>
+            </select></label>
+          <span id="focus-hint" style="color:var(--acc);font-size:12px;flex:1"></span>
+        </div>
       </div>
       <div class="card" id="node-card">
         <span class="close" data-close="node-card">✕</span>
@@ -182,6 +191,7 @@ const searchMatch = () => {              // 搜索命中集 (大小写不敏感,
   return hit;
 };
 let matchSet = null, focusNode = null;
+let focusOn = false, focusBase = null, focusHops = 2;
 let visNodesCache = new Set();           // 时间窗可见节点集 (裁剪边后的两端)
 function computeHidden() {               // 每次过滤条件变化重算 (含时间窗可见节点集)
   hiddenNodes = new Set();
@@ -189,6 +199,19 @@ function computeHidden() {               // 每次过滤条件变化重算 (含�
     if (filters.types && !filters.types.has(a.entity_type)) hiddenNodes.add(id);
     else if ((a.degree ?? 0) < filters.minDeg) hiddenNodes.add(id);
   });
+  if (focusOn && focusBase && graph.hasNode(focusBase)) {   // 关系聚焦: BFS N 跳邻域
+    const keep = new Set([focusBase]);
+    let frontier = [focusBase];
+    for (let i = 0; i < focusHops; i++) {
+      const nxt = [];
+      for (const n of frontier)
+        graph.forEachNeighbor(n, nb => { if (!keep.has(nb)) { keep.add(nb); nxt.push(nb); } });
+      frontier = nxt;
+    }
+    for (const id of graph.nodes()) if (!keep.has(id)) hiddenNodes.add(id);
+    $("focus-hint").textContent =
+      `${focusHops} 跳 · ${keep.size} 节点`;
+  }
   matchSet = searchMatch();
   visNodesCache = new Set();
   if (cutoff) graph.forEachEdge((eid, a, s, t) => {
@@ -410,6 +433,8 @@ function buildGraph() {
 function switchMode() {
   mode = mode === "atom" ? "tag" : "atom";
   $("btn-mode").textContent = mode === "atom" ? "视图: tag 聚合" : "视图: 原子图";
+  focusBase = null; $("focus-hint").textContent =
+    focusOn ? "点击节点聚焦" : "";   // 图重建, 基点作废
   buildGraph(); buildTypeBoxes(); layout(100); refreshTimeWindow();
 }
 // ringPos 依赖图里有邻居 → 拆两步: 先加点(随便放)再在边加完后重摆新节点
@@ -480,14 +505,26 @@ renderer.on("clickNode", ({ node }) => {
     ul.appendChild(li);
   });
   $("node-card").style.display = "block";
+  if (focusOn) { focusBase = node; refreshTimeWindow(); }
   renderer.refresh();
 });
 document.querySelector('[data-close="node-card"]').onclick = () => {
-  $("node-card").style.display = "none"; highlightNode = null; renderer.refresh();
+  $("node-card").style.display = "none"; highlightNode = null;
+  focusBase = null; $("focus-hint").textContent = ""; refreshTimeWindow();
 };
 renderer.on("clickStage", () => {
-  $("node-card").style.display = "none"; highlightNode = null; renderer.refresh();
+  $("node-card").style.display = "none"; highlightNode = null;
+  focusBase = null; $("focus-hint").textContent = ""; refreshTimeWindow();
 });
+$("btn-focus").onclick = () => {
+  focusOn = !focusOn;
+  $("btn-focus").textContent = focusOn ? "关系聚焦: 开" : "关系聚焦: 关";
+  $("btn-focus").className = focusOn ? "warn" : "";
+  if (!focusOn) { focusBase = null; $("focus-hint").textContent = ""; }
+  else $("focus-hint").textContent = "点击节点聚焦";
+  refreshTimeWindow();
+};
+$("hops").onchange = ev => { focusHops = +ev.target.value; refreshTimeWindow(); };
 $("btn-pause").onclick = () => {
   paused = !paused;
   $("btn-pause").textContent = paused ? "恢复推送" : "暂停推送";

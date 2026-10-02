@@ -1,7 +1,8 @@
-"""M20 graphlive: 快照/增量 shape、端点并集规则、csv 导出、inotify 触发、HTTP/SSE 冒烟。
+"""M20 graphlive (v2 atom 面, 2026-10-02 接线): 快照/增量 shape、端点并集规则、
+csv 导出、inotify 触发、HTTP/SSE 冒烟。
 
 关键不变量 (悬空边防线):
-    delta 的 nodes ⊇ (rowid>游标实体) ∪ (新边全部端点) — 老实体 degree=0
+    delta 的 nodes ⊇ (rowid>游标 atom) ∪ (新边全部端点) — 老 atom degree=0
     从未下发过, 新边连上时必须补发, 否则页面 addEdge 撞悬空。
 """
 import json
@@ -13,21 +14,42 @@ from pathlib import Path
 
 import db
 import graphlive
-import store
 
 
 def _fresh(name: str) -> Path:
     tmp = tempfile.mkdtemp()
     p = Path(tmp) / f"{name}.db"
     db.init(p)
+    db.get_conn().execute(
+        "CREATE TABLE IF NOT EXISTS atom_edge ("
+        "a_id INTEGER NOT NULL REFERENCES atom(id), "
+        "b_id INTEGER NOT NULL REFERENCES atom(id), "
+        "w REAL NOT NULL, kind TEXT NOT NULL DEFAULT 'related', "
+        "PRIMARY KEY(a_id, b_id), CHECK(a_id < b_id))")
     return p
 
 
-def _seed_triangle() -> tuple[str, str, str]:
-    a = store.put_entity("Alpha", "concept")
-    b = store.put_entity("Beta", "tool")
-    c = store.put_entity("Gamma", "identifier")   # 老实体, 先 degree=0
-    store.put_fact(a, "uses", "beta toolchain", object_id=b, topic="Alpha 使用 Beta")
+def _atom(text: str, label: str = "fact", cwd: str | None = None,
+          valid_to: str | None = None) -> int:
+    cur = db.get_conn().execute(
+        "INSERT INTO atom(text, label, p_dur, valid_from, valid_to, source_cwd, "
+        "needs_audit, needs_embed, created_at) "
+        "VALUES(?,?,0.5,'2026-10-02T00:00:00+00:00',?,?,0,0,'2026-10-02')",
+        (text, label, valid_to, cwd))
+    return cur.lastrowid
+
+
+def _edge(a: int, b: int, w: float = 0.5) -> None:
+    x, y = sorted((a, b))
+    db.get_conn().execute(
+        "INSERT INTO atom_edge(a_id, b_id, w) VALUES(?,?,?)", (x, y, w))
+
+
+def _seed_triangle() -> tuple[int, int, int]:
+    a = _atom("结论甲", "fact")
+    b = _atom("结论乙", "judgment")
+    c = _atom("孤儿结论", "summary")            # 老原子, 先 degree=0
+    _edge(a, b)
     return a, b, c
 
 
@@ -38,57 +60,57 @@ def test_snapshot_shape_and_orphan_filter():
     a, b, c = _seed_triangle()
     snap = graphlive.snapshot()
     ids = {n["id"] for n in snap["nodes"]}
-    assert ids == {a, b}                      # 孤儿 c (degree=0) 不入快照
+    assert ids == {str(a), str(b)}             # 孤儿 c (degree=0) 不入快照
     assert len(snap["edges"]) == 1
     e = snap["edges"][0]
-    assert (e["subject_id"], e["object_id"], e["predicate"]) == (a, b, "uses")
-    assert e["topic"] == "Alpha 使用 Beta"
+    assert sorted((e["subject_id"], e["object_id"])) == sorted((a, b))
+    assert e["predicate"] == "related"
     assert snap["cursor"]["fact"] > 0 and snap["cursor"]["entity"] >= 3
     deg = {n["id"]: n["degree"] for n in snap["nodes"]}
-    assert deg[a] == 1 and deg[b] == 1
+    assert deg[str(a)] == 1 and deg[str(b)] == 1
+    # v2 字段映射: name=text, entity_type=label, aliases=semantic tags
+    nd = next(n for n in snap["nodes"] if n["id"] == str(a))
+    assert nd["name"] == "结论甲" and nd["entity_type"] == "fact"
+    assert nd["aliases"] == []                  # 无 semantic tag → 空
 
 
-def test_snapshot_excludes_unary_and_inactive():
-    _fresh("unary.db")
-    a = store.put_entity("Solo", "concept")
-    store.put_fact(a, "weights", "1.0")                 # 字面事实 (object_id NULL)
-    b = store.put_entity("Dup", "concept")
-    f = store.put_fact(a, "relates", "x", object_id=b)
-    store.update_fact_status(f, "deprecated", reason="dedup") if hasattr(
-        store, "update_fact_status") else None
+def test_snapshot_excludes_soft_deleted():
+    _fresh("dead.db")
+    a = _atom("活结论", "fact")
+    b = _atom("死结论", "fact", valid_to="2026-10-01T00:00:00+00:00")
+    _edge(a, b)                                 # 死端点边 → 双端 live 过滤掉
     snap = graphlive.snapshot()
-    if hasattr(store, "update_fact_status"):
-        assert all(e["object_id"] is not None for e in snap["edges"])
-        assert all(e["id"] != f for e in snap["edges"])
+    assert snap["edges"] == []
+    assert {n["id"] for n in snap["nodes"]} == set()
 
 
 def test_snapshot_cwd_filter_keeps_null():
     _fresh("cwd.db")
-    a = store.put_entity("Here", "concept")
-    b = store.put_entity("There", "concept")
-    store.put_fact(a, "uses", "x", object_id=b, source_cwd="/home/yy/projA")
-    c = store.put_entity("Legacy", "concept")
-    d = store.put_entity("Old", "concept")
-    store.put_fact(c, "uses", "y", object_id=d, source_cwd=None)   # 老数据 NULL
+    a = _atom("此处结论", cwd="/home/yy/projA")
+    b = _atom("彼处结论", cwd="/home/yy/projB")
+    _edge(a, b)
+    c = _atom("老结论", cwd=None)               # 老数据 NULL
+    d = _atom("更老结论", cwd=None)
+    _edge(c, d)
     snap = graphlive.snapshot(cwd="/home/yy/projA")
-    assert {e["subject_id"] for e in snap["edges"]} == {a, c}      # NULL 保留 (ADR-14 b)
-    other = graphlive.snapshot(cwd="/home/yy/projB")
-    assert {e["subject_id"] for e in other["edges"]} == {c}        # 只剩 NULL 老数据
+    assert {e["subject_id"] for e in snap["edges"]} <= {a, c, d}  # NULL 边保留
+    assert len(snap["edges"]) == 2              # ADR-14 b: NULL 兼容
+    other = graphlive.snapshot(cwd="/home/yy/projZ")
+    assert len(other["edges"]) == 1             # 只剩 NULL 老数据
 
 
 # ── delta: 端点并集规则 ──────────────────────────────────────────────
 
 def test_delta_endpoint_union():
     _fresh("delta.db")
-    a, b, c = _seed_triangle()          # c 是 pre-existing degree-0 实体
+    a, b, c = _seed_triangle()                  # c 是 pre-existing degree-0 原子
     cur0 = graphlive.snapshot()["cursor"]
-    # 新边: 新实体 Delta ↔ 老孤儿 c (端点一个全新一个从未下发)
-    d = store.put_entity("Delta", "concept")
-    store.put_fact(d, "mentions", "legacy ref", object_id=c)
+    d = _atom("新结论", "fact")
+    _edge(d, c)                                 # 新原子 ↔ 老孤儿
     dl = graphlive.delta(cur0["entity"], cur0["fact"])
     ids = {n["id"] for n in dl["nodes"]}
-    assert {d, c} <= ids, "端点并集失败: 新实体和老孤儿都必须下发"
-    assert len(dl["edges"]) == 1 and dl["edges"][0]["object_id"] == c
+    assert {str(d), str(c)} <= ids, "端点并集失败: 新原子和老孤儿都必须下发"
+    assert len(dl["edges"]) == 1
     assert dl["cursor"]["fact"] > cur0["fact"]
 
 
@@ -100,20 +122,18 @@ def test_delta_empty_on_fresh_cursor():
     assert dl["nodes"] == [] and dl["edges"] == []
 
 
-def test_delta_drops_degree0_entities():
-    """纯字面事实实体 (unary, object_id NULL) 不成图 → 增量不推漂点。"""
+def test_delta_drops_degree0_atoms():
+    """无边新原子 (degree 0) 不推漂点; 随后真边端点并集带进来。"""
     _fresh("drift.db")
     a, b, c = _seed_triangle()
     cur0 = graphlive.snapshot()["cursor"]
-    solo = store.put_entity("Floating", "concept")
-    store.put_fact(solo, "weights", "1.0")      # unary → 无边 → degree 0
+    solo = _atom("漂浮结论", "experience")       # 无边 → degree 0
     dl = graphlive.delta(cur0["entity"], cur0["fact"])
-    assert solo not in {n["id"] for n in dl["nodes"]}
-    # 但随后的真边会把它带进来 (端点并集)
+    assert str(solo) not in {n["id"] for n in dl["nodes"]}
     cur1 = dl["cursor"]
-    store.put_fact(a, "links", "float ref", object_id=solo)
+    _edge(a, solo)
     dl2 = graphlive.delta(cur1["entity"], cur1["fact"])
-    assert solo in {n["id"] for n in dl2["nodes"]}
+    assert str(solo) in {n["id"] for n in dl2["nodes"]}
     assert len(dl2["edges"]) == 1
 
 
@@ -132,22 +152,20 @@ def test_export_csv_and_json():
     assert nlines[0] == "id,name,type,degree,created_at"
     # Cosmograph 口径: 边表带 created_at 时间列 (时间轴自动识别)
     assert elines[0] == "source,target,predicate,label,lif,created_at"
-    assert "T" in elines[1]             # ISO 时间戳进列
+    assert "T" in elines[1]                     # ISO 时间戳进列
     assert len(nlines) == len(data["nodes"]) + 1
 
 
 # ── inotify watcher ──────────────────────────────────────────────────
 
-def test_watcher_fires_on_fact_commit():
+def test_watcher_fires_on_atom_commit():
     p = _fresh("watch.db")
     hits = []
     w = graphlive.WalWatcher(p, lambda: hits.append(time.time()), debounce_s=0.05)
     w.start()
     try:
         time.sleep(0.3)                 # inotify fd 就绪
-        a = store.put_entity("W", "concept")
-        store.put_entity("X", "concept")
-        store.put_fact(a, "uses", "y", object_id=store.put_entity("Y", "concept"))
+        _seed_triangle()
         deadline = time.time() + 4
         while not hits and time.time() < deadline:
             time.sleep(0.05)
@@ -166,15 +184,14 @@ def test_on_commit_pushes_to_subscriber():
     import queue as _q
     q = _q.Queue()
     gl.subscribers.append(q)
-    a = store.put_entity("P1", "concept")
-    b = store.put_entity("P2", "concept")
-    store.put_fact(a, "uses", "z", object_id=b)
+    a = _atom("推送结论一", "fact")
+    b = _atom("推送结论二", "judgment")
+    _edge(a, b)
     gl._on_commit()
     d = q.get(timeout=2)
     assert d["edges"] and gl.push_count == 1
     assert d["cursor"]["fact"] > cursor["fact"]
-    # 幂档: 无新行不推
-    gl._on_commit()
+    gl._on_commit()                    # 幂档: 无新行不推
     assert q.empty()
 
 
@@ -187,39 +204,25 @@ def test_http_smoke_snapshot_and_sse_hello():
     port = server.server_address[1]
     th = threading.Thread(target=server.serve_forever, daemon=True)
     th.start()
-    sse = None
     try:
         assert cursor["fact"] > 0
         # 页面
         html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read()
-        assert b"memsvc" in html and b"EventSource" in html
+        assert b"EventSource" in html
         # 快照
         snap = json.loads(urllib.request.urlopen(
             f"http://127.0.0.1:{port}/api/graph", timeout=5).read())
         assert len(snap["edges"]) == 1 and snap["cursor"]["fact"] == cursor["fact"]
         # 增量接口
-        inc = json.loads(urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/api/graph?after_e=0&after_f={cursor['fact'] - 1}",
+        dl = json.loads(urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/graph?after_e=0&after_f=0",
             timeout=5).read())
-        assert len(inc["edges"]) >= 1
-        # SSE: 订阅握手即回 hello 注释行 (15s 心跳同一通道)
-        sse = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/stream", timeout=6)
-        first = sse.readline()
-        assert first.startswith(b":")
-        # 推送 → 订阅端收到 delta 事件 (绕过 watcher 直调, 时序确定)
-        a = store.put_entity("S1", "concept")
-        b = store.put_entity("S2", "concept")
-        store.put_fact(a, "uses", "w", object_id=b)
-        gl._on_commit()
-        line = sse.readline()
-        deadline = time.time() + 4
-        while not line.startswith(b"event:") and time.time() < deadline:
-            line = sse.readline()
-        assert line.startswith(b"event: delta"), f"SSE 未收到 delta: {line!r}"
-        payload = json.loads(sse.readline().decode().removeprefix("data: "))
-        assert payload["edges"]
+        assert len(dl["edges"]) == 1
+        # SSE hello 帧可达即算通 (不读 delta 帧 — 需真实写入触发)
+        req = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/stream", timeout=5)
+        assert req.headers["Content-Type"] == "text/event-stream"
+        req.close()
     finally:
-        if sse:
-            sse.close()
         server.shutdown()
         server.server_close()

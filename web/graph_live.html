@@ -121,7 +121,9 @@ const forceAtlas2 = FA2NS.default ?? FA2NS;
 const Sigma = SigmaNS.Sigma ?? SigmaNS.default;
 
 const TYPE_COLOR = {
-  technical_term: "#38bdf8", concept: "#a78bfa", named_entity: "#fbbf24",
+  // v2 atom label 四类主色 + legacy entity_type 兜底
+  fact: "#38bdf8", judgment: "#fbbf24", experience: "#34d399", summary: "#a78bfa",
+  technical_term: "#64748b", concept: "#a78bfa", named_entity: "#fbbf24",
   identifier: "#94a3b8", quoted_term: "#f472b6", person: "#34d399",
   project: "#f97316", tool: "#22d3ee", file: "#e879f9",
 };

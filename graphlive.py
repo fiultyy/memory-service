@@ -35,18 +35,25 @@ from urllib.parse import parse_qs, urlparse
 _HTML_PATH = Path(__file__).parent / "web" / "graph_live.html"
 _DEBOUNCE_S = 0.25
 
-_EDGE_COLS = ("f.id, f.subject_id, f.predicate, f.object_id, f.value, "
-              "f.topic, f.LIF, f.created_at, f.fact_type, f.source_cwd")
+_EDGE_COLS = ("e.rowid AS id, e.a_id AS subject_id, e.b_id AS object_id, "
+              "e.kind AS predicate, e.w AS value, e.w AS LIF, "
+              "sa.valid_from AS created_at")
 
 
 # ── 快照 / 增量查询 (db.get_conn 共享连接, check_same_thread=False) ────
+# v2 atom 面 (2026-10-02 接线): 节点 = live atom, 边 = atom_edge; 字段名保持
+# legacy fact 面形状 (subject_id/object_id/predicate/LIF…) → 前端 HTML 零改。
+# entity_type = atom.label (fact/judgment/experience/summary); aliases = top
+# semantic tag 名 (可搜/可辨主题); 边 created_at = 源端点 atom 生时 (atom_edge
+# 无时间列, 时间窗 slider 用 atom 生时近似 — 边随较新端点出现, 语义成立)。
 
 def _edge_rows(where: str = "", params: tuple = ()) -> list[dict]:
     import db
     rows = db.get_conn().execute(
-        f"SELECT {_EDGE_COLS} FROM fact f "
-        f"WHERE f.status='active' AND f.object_id IS NOT NULL {where} "
-        f"ORDER BY f.rowid", params).fetchall()
+        f"SELECT {_EDGE_COLS} FROM atom_edge e "
+        f"JOIN atom sa ON sa.id = e.a_id AND sa.valid_to IS NULL "
+        f"JOIN atom sb ON sb.id = e.b_id AND sb.valid_to IS NULL "
+        f"WHERE 1=1 {where} ORDER BY e.rowid", params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -59,40 +66,56 @@ def _degrees(edges: list[dict]) -> dict[str, int]:
 
 
 def _entity_nodes(ids: set[str], degrees: dict[str, int]) -> list[dict]:
+    """live atom → 节点 (legacy 字段形状: name=text, entity_type=label,
+    aliases=top-2 semantic tag 名, degree)。id 统一 str (前端 Set 去重)。"""
     import db
     if not ids:
         return []
     ph = ",".join("?" * len(ids))
     rows = db.get_conn().execute(
-        f"SELECT id, name, entity_type, aliases, created_at "
-        f"FROM entity WHERE id IN ({ph})", tuple(ids)).fetchall()
+        f"SELECT id, text, label, p_dur, valid_from, source_cwd "
+        f"FROM atom WHERE valid_to IS NULL AND id IN ({ph})",
+        tuple(ids)).fetchall()
+    tag_by_atom: dict[int, list[str]] = {}
+    aids = [r["id"] for r in rows]
+    if aids:
+        tph = ",".join("?" * len(aids))
+        for tr in db.get_conn().execute(
+            f"SELECT m.atom_id, t.name FROM tag_mount m JOIN tag t ON t.id=m.tag_id "
+            f"WHERE t.kind='semantic' AND m.atom_id IN ({tph}) "
+            f"ORDER BY m.w DESC", aids):
+            lst = tag_by_atom.setdefault(tr["atom_id"], [])
+            if len(lst) < 2:
+                lst.append(tr["name"])
     out = []
     for r in rows:
         d = dict(r)
-        try:
-            d["aliases"] = json.loads(d.get("aliases") or "[]")
-        except ValueError:
-            d["aliases"] = []
-        d["degree"] = degrees.get(d["id"], 0)
+        d["degree"] = degrees.get(r["id"], 0)   # 先查 int 键, 再转 str (前端契约)
+        d["id"] = str(d["id"])
+        d["name"] = (d.pop("text") or "")[:80]
+        d["entity_type"] = d.pop("label")
+        d["aliases"] = tag_by_atom.get(r["id"], [])
         out.append(d)
     return out
 
 
 def snapshot(cwd: str | None = None) -> dict:
-    """全量快照: nodes(degree>0) + edges(active) + rowid 游标。
+    """全量快照: nodes(degree>0 live atom) + edges(双端 live) + rowid 游标。
 
-    cwd 过滤沿用 ADR-14 b 方案口径: ``source_cwd = ? OR source_cwd IS NULL``
-    (NULL=老数据/未知, 与 recall --cwd 同规则)。
+    cwd 过滤沿用 ADR-14 b 方案口径: ``source_cwd = ? OR source_cwd IS NULL``。
+    游标键名沿用 entity/fact (前端契约), 语义 = atom/atom_edge max(rowid)。
     """
     import db
     if cwd:
-        edges = _edge_rows("AND (f.source_cwd = ? OR f.source_cwd IS NULL)", (cwd,))
+        edges = _edge_rows(
+            "AND (sa.source_cwd = ? OR sa.source_cwd IS NULL "
+            " OR sb.source_cwd = ? OR sb.source_cwd IS NULL)", (cwd, cwd))
     else:
         edges = _edge_rows()
     deg = _degrees(edges)
     cur = db.get_conn().execute(
-        "SELECT (SELECT COALESCE(MAX(rowid),0) FROM entity) e, "
-        "(SELECT COALESCE(MAX(rowid),0) FROM fact) f").fetchone()
+        "SELECT (SELECT COALESCE(MAX(rowid),0) FROM atom) e, "
+        "(SELECT COALESCE(MAX(rowid),0) FROM atom_edge) f").fetchone()
     nodes = _entity_nodes({i for i, d in deg.items() if d > 0}, deg)
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -104,23 +127,23 @@ def snapshot(cwd: str | None = None) -> dict:
 
 
 def delta(after_entity: int, after_fact: int) -> dict:
-    """增量: 新实体 ∪ 新边端点实体 (并集补偿, 悬空边防线) + 新边。
+    """增量: 新 atom ∪ 新边端点 atom (并集补偿, 悬空边防线) + 新边。
 
-    节点再按 degree>0 过滤: 与快照同口径 (孤儿/纯字面事实实体不成图, 画出来
-    只是漂点)。并集规则不受影响 — 新边端点 degree≥1 必然通过; 后续新边接到
-    老实体时, 该边 rowid>游标 → 端点并集必然补发。
+    节点再按 degree>0 过滤: 与快照同口径。supersede 软删 (UPDATE valid_to)
+    不变 rowid 不推 — 刷新页面重快照可见 (与 legacy LIF 衰减同边界)。
     """
     import db
-    new_edges = _edge_rows("AND f.rowid > ?", (after_fact,))
+    new_edges = _edge_rows("AND e.rowid > ?", (after_fact,))
     new_ent = db.get_conn().execute(
-        "SELECT id FROM entity WHERE rowid > ?", (after_entity,)).fetchall()
+        "SELECT id FROM atom WHERE rowid > ? AND valid_to IS NULL",
+        (after_entity,)).fetchall()
     ent_ids = {r["id"] for r in new_ent}
     ent_ids |= {e for r in new_edges
                 for e in (r["subject_id"], r["object_id"])}
     deg = _degrees(_edge_rows())  # 全图度数: 增量节点的 degree 字段要真实值
     cur = db.get_conn().execute(
-        "SELECT (SELECT COALESCE(MAX(rowid),0) FROM entity) e, "
-        "(SELECT COALESCE(MAX(rowid),0) FROM fact) f").fetchone()
+        "SELECT (SELECT COALESCE(MAX(rowid),0) FROM atom) e, "
+        "(SELECT COALESCE(MAX(rowid),0) FROM atom_edge) f").fetchone()
     return {
         "cursor": {"entity": cur["e"], "fact": cur["f"]},
         "nodes": _entity_nodes({i for i in ent_ids if deg.get(i, 0) > 0}, deg),
@@ -150,13 +173,13 @@ def export_csv(out_dir: Path, cwd: str | None = None) -> tuple[Path, Path]:
         w.writerow(["id", "name", "type", "degree", "created_at"])
         for n in snap["nodes"]:
             w.writerow([n["id"], n["name"], n["entity_type"],
-                        n["degree"], n["created_at"]])
+                        n["degree"], n.get("valid_from") or ""])
     with edges_p.open("w", newline="", encoding="utf-8") as fh:
         w = _csv.writer(fh)
         w.writerow(["source", "target", "predicate", "label", "lif", "created_at"])
         for e in snap["edges"]:
             w.writerow([e["subject_id"], e["object_id"], e["predicate"],
-                        e.get("topic") or e.get("value") or e["predicate"],
+                        e.get("value") or e["predicate"],
                         e["LIF"], e["created_at"]])
     return nodes_p, edges_p
 

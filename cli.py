@@ -936,7 +936,12 @@ def _main(argv: list[str] | None = None) -> int:
     elif args.cmd == "embed-backfill":
         print(json.dumps(embed_backfill(), ensure_ascii=False))
     elif args.cmd == "vec-backfill":
+        # vec_index 是唯一需显式 init_conn 的模块 (db.get_conn 惰性自初始化
+        # 不管它) — 不前置 db.init 则 _loaded=False, backfill_all 必炸
+        # VecIndexError (F2 收尾实测踩坑)。
+        import db
         import vec_index
+        db.init(Path(args.db) if getattr(args, "db", None) else None)
         print(json.dumps(vec_index.backfill_all(), ensure_ascii=False))
     elif args.cmd in ("stats", "stats-json"):
         print(json.dumps(stats(), ensure_ascii=False))

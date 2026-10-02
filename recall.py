@@ -606,7 +606,7 @@ def _recall_atoms(
               if s["score"] >= floor or s["fact"]["atom_id"] in tag_wing
               or s["fact"]["atom_id"] in subj_wing]
 
-    # ── v3 laya rerank (MEM_LAYA_RERANK=1, 缺省关): 仅经向量腿入场 (无任何
+    # ── v3 laya rerank (MEM_LAYA_RERANK=0 关, 缺省开): 仅经向量腿入场 (无任何
     #    文本/符号直命中) 的候选 — embedding 召回的语义泛化面 (跨语言/同义,
     #    如 霍顿↔Holden) 交 laya 单批批判: keep=False 剔除, keep 的 score 乘
     #    (0.5+0.5·match_score) 重排 (语义相关度上探/下压)。文本直命中不参与
@@ -617,7 +617,7 @@ def _recall_atoms(
                 and not any(
                     tok and tok in (cand[aid].get("text") or "").lower()
                     for tok in tokens)}
-    if (os.environ.get("MEM_LAYA_RERANK") == "1" and vec_only
+    if (os.environ.get("MEM_LAYA_RERANK", "1") != "0" and vec_only
             and laya_client.laya_available()):
         anchors = {t for t in tokens if len(t) >= 2}
         if anchors:

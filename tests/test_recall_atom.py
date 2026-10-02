@@ -433,7 +433,7 @@ def test_tag_parent_climb(tmp_path, monkeypatch):
 # ── v3 laya rerank: 仅向量腿入场的语义泛化候选交 laya 批判 ──────────
 
 def test_laya_rerank_vec_only(tmp_path, monkeypatch):
-    """MEM_LAYA_RERANK=1: 仅向量腿入场 (无 token/subjects/翼 命中) 的候选
+    """MEM_LAYA_RERANK (缺省开, =0 关): 仅向量腿入场 (无 token/subjects/翼 命中) 的候选
     交 laya — keep=False 剔除, keep 的 score 乘 (0.5+0.5·match_score) 重排;
     文本直命中不参与; env 缺省关 (零回归)。"""
     import os
@@ -472,8 +472,8 @@ def test_laya_rerank_vec_only(tmp_path, monkeypatch):
                                        min_score=0.0))) == \
         {f"atom:{hit}", f"atom:{vec_only}"}
 
-    # env 缺省关 → laya 不被调用, vec-only 照常返回
-    monkeypatch.delenv("MEM_LAYA_RERANK")
+    # env 显式关 (MEM_LAYA_RERANK=0) → laya 不被调用, vec-only 照常返回
+    monkeypatch.setenv("MEM_LAYA_RERANK", "0")
     assert set(_ids(recall_mod.recall("sqlite 部署", use_vec=True,
                                        min_score=0.0))) == \
         {f"atom:{hit}", f"atom:{vec_only}"}

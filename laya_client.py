@@ -15,6 +15,7 @@ import urllib.request
 LAYA_BASE = os.environ.get("MEM_LAYA_URL", "http://127.0.0.1:8190")
 
 TOKEN_BUDGET = 8000  # 实测 7.2k 通过; 留余量(temp/laya-batch-request-design.md §0)
+_SHARD_JOBS = 4      # laya_batch 超预算分片时的并行请求数帽
 
 # 进程级 TTL 缓存: 成功/失败都缓存, 避免交互路径每次探测
 _avail_cache: tuple[float, bool] | None = None
@@ -73,13 +74,19 @@ def laya_batch(state: str, questions: dict, timeout: float = 30.0) -> dict | Non
                      timeout)
         return resp.get("answers") if isinstance(resp, dict) and \
             isinstance(resp.get("answers"), dict) else None
-    # 均分 N 片
+    # 均分 N 片, 并行发 (容器服务端并发处理; ponytail: 线程帽 4 — laya 容器
+    # 满载时超时放弃会级联排队, 并发过深反拖慢单片最坏延迟。要调改 _SHARD_JOBS)
     qids = list(questions)
     per = -(-len(qids) // n_shards)
+    shards = [{qid: questions[qid] for qid in qids[i:i + per]}
+              for i in range(0, len(qids), per)]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(_SHARD_JOBS, len(shards))) as ex:
+        results = list(ex.map(
+            lambda ch: _post("/predict", {"state": state, "questions": ch},
+                             timeout), shards))
     answers: dict = {}
-    for i in range(0, len(qids), per):
-        chunk = {qid: questions[qid] for qid in qids[i:i + per]}
-        resp = _post("/predict", {"state": state, "questions": chunk}, timeout)
+    for resp in results:
         if not (isinstance(resp, dict) and isinstance(resp.get("answers"), dict)):
             return None
         answers.update(resp["answers"])

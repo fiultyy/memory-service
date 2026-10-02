@@ -683,3 +683,185 @@ def reembed_needing() -> int:
             fixed += 1
     _sync_atom_vecs(done)
     return fixed
+
+
+# ── v4 语义颗粒段车道 (2026-10-03): atom=语义段 (非句级), 一段一 atom ────
+# 配套 src/semantic_chunk.py (缝扫描切分)。本函数是 chunk 车道的
+# distill_segment 等价物: 输入已是语义完整段 → zhipu 一段一判 (标签/
+# entities/when, SYS_JUDGE_CHUNK) + laya p_dur/边审计 + 余弦 merge/候选边 +
+# 单事务入图。与句级车道 (distill_segment) 并存, 由调用面选择
+# (bootstrap md 面: MEM_SEMANTIC_CHUNK=1 缺省走本车道)。
+
+SYS_JUDGE_CHUNK = (
+    "你是记忆分拣器。输入是一段语义完整的记忆段与其结论句。"
+    "判断这段记忆的价值类型并输出精炼结论句。\n"
+    "价值类型 (与既有七类判据同口径):\n"
+    "- fact: 环境与资产现在的样子——架构/契约/端口/不变量/迁移后状态/配置终态\n"
+    "- judgment: 裁决/根因/行为观察(为什么/机制表现如何)\n"
+    "- experience: 坑/故障案例(含已修复的)/解法模式\n"
+    "- summary: 被实测验证确立的能力终态; 票/工作线的当前终态\n"
+    "- preference: 用户显式表达的长期偏好/约定/禁令/常驻指令 (主语是用户本人)\n"
+    "- event: 已定时间点的事件/计划/期限 (带明确时间语义)\n"
+    "- process: 时点快照/进行时/待办/动作回执/git 可查记录 — 记忆库不收\n"
+    "结论句要求: 保留给定结论句原样, 或在不丢关键裁决/实体/数字的前提下精炼到 ≤80 字。\n"
+    "另输出: entities=段中精确符号/实体名数组(文件路径/服务名/版本号/命令/仓库名, ≤4个, 无则省); "
+    "when=事件发生时刻(仅 event 类, ISO 或原文短语)。\n"
+    '只输出 JSON 对象: {"summary":"结论句","label":"fact|judgment|experience|summary|preference|event|process"'
+    ',"entities":[..](可选),"when":".."(可选)}, 不要其它文字。'
+)
+
+# 段级余弦阈值: 句级 0.90/0.80 对长段文本整体偏低 (语义被稀释, 面板批次0
+# 判读预期 0.82-0.88)。未校准前的保守初值 — 批次0 标定后改。[设]
+_MERGE_COS_CHUNK = float(os.environ.get("MEM_CHUNK_MERGE_COS", "0.88"))
+_CAND_COS_CHUNK = float(os.environ.get("MEM_CHUNK_CAND_COS", "0.78"))
+
+
+def _judge_chunk(chunk_text: str, gist: str) -> dict | None:
+    """zhipu 一段一判 (毒输出重试 3 次; 全网络败 → ConfigIncomplete 挂起)。"""
+    content = (f"结论句: {gist}\n记忆段:\n{chunk_text[:6000]}")
+    for attempt in range(3):
+        try:
+            raw = _get_zhipu().chat(SYS_JUDGE_CHUNK,
+                                    [{"role": "user", "content": content}],
+                                    max_tokens=2000)
+        except Exception:
+            time.sleep(2 * (attempt + 1))
+            continue
+        # 单对象输出: 直解优先 — parse_llm_json 的数组优先启发式会把
+        # "entities":[...] 误当顶层数组 (字符串表), dict 校验全败 (e2e 实录)
+        cands = []
+        try:
+            j = json.loads(raw.strip())
+            if isinstance(j, dict):
+                cands.append(j)
+        except json.JSONDecodeError:
+            pass
+        cands += [it for it in (parse_llm_json(raw) or []) if isinstance(it, dict)]
+        for it in cands:
+            if it.get("label") in _LABELS \
+                    and isinstance(it.get("summary"), str) \
+                    and it["summary"].strip():
+                ents = it.get("entities")
+                return {
+                    "summary": it["summary"].strip(), "label": it["label"],
+                    "entities": [str(e)[:80] for e in ents][:4]
+                    if isinstance(ents, list) and ents else None,
+                    "when": it.get("when") if isinstance(it.get("when"), str)
+                    and it.get("when").strip() else None}
+        time.sleep(1)
+    raise ConfigIncomplete("zhipu chunk 判据 3 轮失败; 挂起等恢复, 不判毒段")
+
+
+def distill_chunk(chunk_text: str, gist: str, session_id: str, cwd: str,
+                  ts: str) -> dict:
+    """蒸馏一个语义段 → 单个段级 atom 入图 (v4 车道)。
+
+    与 distill_segment 同契约: 幂等 (段文本 sha 去重), laya 不可用 → raise
+    LayaUnavailable (DB 零写入), embed 失败 → needs_embed=1 不挂起。
+    atom.text = 段原文 (语义颗粒), atom.gist = 结论句 (zhipu 精炼)。"""
+    sha = hashlib.sha256(("chunk:" + chunk_text).encode("utf-8")).hexdigest()
+    conn = db.get_conn()
+    _ensure_tables(conn)
+    if conn.execute("SELECT 1 FROM distill_seen WHERE sha=?", (sha,)).fetchone():
+        return {"atoms": 0, "edges": 0, "merged": 0,
+                "supersede_proposals": [], "skipped": "seen"}
+    if not laya_client.laya_available():
+        raise LayaUnavailable("laya unavailable; 段保留, 图零写入")
+    if not os.environ.get("ZHIPU_API_KEY"):
+        raise ConfigIncomplete("ZHIPU_API_KEY 缺失; 挂起等配置")
+
+    judged = _judge_chunk(chunk_text, gist)
+    if judged["label"] == "process":
+        conn.execute("INSERT OR IGNORE INTO distill_seen(sha, status, created_at) "
+                     "VALUES(?, 'ok', ?)", (sha, ts))
+        conn.commit()
+        return {"atoms": 0, "edges": 0, "merged": 0,
+                "supersede_proposals": [], "skipped": "process"}
+
+    # 余弦配对 (段文本 embed; 句级 _load_existing 复用 — 向量与粒度无关)
+    vec = None
+    vecs = _embed_summaries([chunk_text])
+    if vecs is not None:
+        v = np.asarray(vecs[0], dtype=np.float32)
+        n = float(np.linalg.norm(v))
+        if n > 0:
+            vec = v / n
+    best_id, best_cos = None, -1.0
+    if vec is not None:
+        for aid, ev in _load_existing():
+            c = float(vec @ ev)
+            if c > best_cos:
+                best_id, best_cos = aid, c
+
+    merged = 0
+    cand_edge = None
+    if best_id is not None and best_cos >= _MERGE_COS_CHUNK:
+        merged = 1  # 并成员: 不插新 atom, source_refs 追加 + last_seen_at 续期
+    elif best_id is not None and best_cos >= _CAND_COS_CHUNK:
+        cand_edge = (best_id, best_cos)
+
+    # laya 单调用: p_dur (+ 候选边验证)
+    qs: dict[str, dict] = {
+        "dur": {"type": "score",
+                "instructions": f"Is [{judged['summary'][:130]}] durable knowledge "
+                                "worth keeping in long-term memory, or transient "
+                                "process detail?",
+                "criteria": CRIT_DUR}}
+    if cand_edge is not None:
+        qs["edg"] = {"type": "score",
+                     "instructions": f"How related are the memory items "
+                                     f"[{judged['summary'][:90]}] and "
+                                     f"[atom {cand_edge[0]}] in topic?",
+                     "criteria": CRIT_EDGE}
+    state = ("new memory item:\n" + judged["summary"][:130]
+             + ("\nexisting neighbor:\n" if cand_edge is not None else "")
+             + (f"[atom {cand_edge[0]}]" if cand_edge is not None else ""))
+    answers = _laya_one(state, qs)
+    if answers is None:
+        raise LayaUnavailable("laya batch None x2; 段保留, 图零写入")
+    p_dur = _prob(answers.get("dur"), CRIT_DUR.index("durable-knowledge"))
+    edge_w = _prob(answers.get("edg"), CRIT_EDGE.index("same-topic"))
+
+    n_atoms = n_edges = 0
+    aid_out = None
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if merged:
+            row = conn.execute("SELECT source_refs FROM atom WHERE id=?",
+                               (best_id,)).fetchone()
+            refs = json.loads(row[0] or "[]") if row else []
+            refs.append(chunk_text)
+            conn.execute("UPDATE atom SET source_refs=?, last_seen_at=? "
+                         "WHERE id=?", (json.dumps(refs, ensure_ascii=False),
+                                        ts, best_id))
+        else:
+            cur = conn.execute(
+                "INSERT INTO atom(text, gist, label, p_dur, valid_from, "
+                "source_refs, source_cwd, subjects, event_at, last_seen_at, "
+                "needs_audit, needs_embed, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (chunk_text, judged["summary"], judged["label"],
+                 p_dur or 0.0, ts,
+                 json.dumps([], ensure_ascii=False), cwd,
+                 json.dumps(judged.get("entities") or [], ensure_ascii=False)
+                 if judged.get("entities") else None,
+                 judged.get("when") if judged["label"] == "event" else None,
+                 ts, 1 if p_dur is None else 0, 1 if vec is None else 0, ts))
+            aid_out = cur.lastrowid
+            n_atoms = 1
+            if cand_edge is not None and edge_w is not None:
+                pair = sorted((cand_edge[0], aid_out))
+                conn.execute(
+                    "INSERT OR IGNORE INTO atom_edge(a_id, b_id, w, kind) "
+                    "VALUES(?, ?, ?, 'related')", (pair[0], pair[1], edge_w))
+                n_edges = 1
+        conn.execute("INSERT OR IGNORE INTO distill_seen(sha, status, created_at) "
+                     "VALUES(?, 'ok', ?)", (sha, ts))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    if aid_out is not None and vec is not None:
+        _sync_atom_vecs([(aid_out, vec)])
+    return {"atoms": n_atoms, "edges": n_edges, "merged": merged,
+            "supersede_proposals": []}

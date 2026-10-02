@@ -28,6 +28,10 @@ class _StubDistill:
         self._seen.add(sha)
         return {"atoms": 1, "edges": 0, "merged": 0, "supersede_proposals": []}
 
+    def distill_chunk(self, text, gist, session_id, cwd, ts):
+        # v4 语义段车道 (sha 加 chunk: 前缀与段车道互不撞)
+        return self.distill_segment("chunk:" + text, session_id, cwd, ts)
+
 
 # db.init(tmp) 隔离
 tmpdir = tempfile.mkdtemp()

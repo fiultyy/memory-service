@@ -24,6 +24,7 @@ Returns ``{"files": n, "segments": .., "atoms": .., "edges": .., "merged": ..}``
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -117,6 +118,19 @@ def re_ingest_file(
     ts = _mtime_iso(file_path)
 
     totals = {"segments": 0, "atoms": 0, "edges": 0, "merged": 0, "skipped_segs": 0}
+    if os.environ.get("MEM_SEMANTIC_CHUNK", "1") != "0":
+        # v4 车道 (2026-10-03): 缝扫描语义切分 → 一段一 atom (distill_chunk)。
+        # 挂起语义同旧径 (ChunkerUnavailable/LayaUnavailable 族上抛, 段 sha 幂等)。
+        from src import semantic_chunk as _sc
+        for ch in _sc.semantic_chunks(text):
+            r = distill_mod.distill_chunk(ch["text"], ch["gist"],
+                                          session_id=session_id, cwd=cwd, ts=ts)
+            totals["segments"] += 1
+            if r.get("skipped"):
+                totals["skipped_segs"] += 1
+            for k in ("atoms", "edges", "merged"):
+                totals[k] += r.get(k, 0)
+        return totals
     for seg in _segments(text):
         r = distill_mod.distill_segment(seg, session_id=session_id, cwd=cwd, ts=ts)
         totals["segments"] += 1
@@ -290,7 +304,9 @@ def _demo() -> None:  # ponytail self-check (stub distill, no network/db)
     stub = SimpleNamespace(
         distill_segment=lambda text, session_id, cwd, ts:
         (calls.append((session_id, cwd)), {"atoms": 1, "edges": 0, "merged": 0,
-                                           "supersede_proposals": []})[1])
+                                           "supersede_proposals": []})[1],
+        distill_chunk=lambda text, gist, session_id, cwd, ts:
+        {"atoms": 1, "edges": 0, "merged": 0, "supersede_proposals": []})
     global distill_mod
     real = distill_mod
     distill_mod = stub

@@ -51,5 +51,9 @@ def _pin_laya_off(monkeypatch):
     逐测试 pin 关 + 清 laya_client TTL 可用性缓存 (防上轮探测 True 跨测试
     泄漏); laya 专项测试在测试体内自设 env=1, 后设者胜不受影响。"""
     monkeypatch.setenv("MEM_LAYA_ENABLED", "0")
+    # v4 语义段车道 (2026-10-03): 旧面测试 (re-ingest/bootstrap stub 等) 钉回
+    # 句级车道 — semantic_chunks 会真调 laya, 破 hermetic; 新车道测试
+    # (test_semantic_chunk) 直调模块/mock laya_batch, 不经此 env。
+    monkeypatch.setenv("MEM_SEMANTIC_CHUNK", "0")
     laya_client._avail_cache = None
     yield

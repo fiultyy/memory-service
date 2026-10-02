@@ -207,7 +207,7 @@ def init(db_path: str | Path | None = None,
     # 无条件读三列, pre-migration 库直接召回会 IndexError)。
     acols = {r[1] for r in conn.execute("PRAGMA table_info(atom)")}
     for col, decl in (("subjects", "TEXT"), ("event_at", "TEXT"),
-                      ("last_seen_at", "TEXT")):
+                      ("last_seen_at", "TEXT"), ("gist", "TEXT")):
         if col not in acols:
             conn.execute(f"ALTER TABLE atom ADD COLUMN {col} {decl}")
     # perf/vec-index: sqlite-vec **硬依赖** (用户裁决 2026-08-26: 无降级 —

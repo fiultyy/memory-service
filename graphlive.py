@@ -117,13 +117,72 @@ def snapshot(cwd: str | None = None) -> dict:
         "SELECT (SELECT COALESCE(MAX(rowid),0) FROM atom) e, "
         "(SELECT COALESCE(MAX(rowid),0) FROM atom_edge) f").fetchone()
     nodes = _entity_nodes({i for i, d in deg.items() if d > 0}, deg)
+    comm = _communities(edges)
+    tags, mounts = _tag_bipartite({int(n["id"]) for n in nodes})
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "cwd": cwd,
         "cursor": {"entity": cur["e"], "fact": cur["f"]},
         "nodes": nodes,
         "edges": edges,
+        "comm": comm,
+        "tags": tags,
+        "mounts": mounts,
     }
+
+
+def _communities(edges: list[dict]) -> dict[str, int]:
+    """louvain 社区 (live 边, w 权重): {atom_id_str: 社区序号}。
+
+    ponytail: 每次 snapshot 全量重算 (4556 节点 ~百 ms 级); 增量节点不带 comm
+    → 前端回退 hashColor, 下次刷新归位。networkx 缺 louvain (老版本) → {}。"""
+    try:
+        import networkx as nx
+        from networkx.algorithms import community as nx_comm
+    except ImportError:
+        return {}
+    g = nx.Graph()
+    g.add_nodes_from(int(e["subject_id"]) for e in edges)
+    g.add_nodes_from(int(e["object_id"]) for e in edges)
+    for e in edges:
+        a, b = int(e["subject_id"]), int(e["object_id"])
+        if g.has_edge(a, b):
+            if e["value"] > g[a][b]["weight"]:
+                g[a][b]["weight"] = e["value"]
+        else:
+            g.add_edge(a, b, weight=e["value"])
+    if not g.number_of_edges():
+        return {}
+    try:
+        parts = nx_comm.louvain_communities(g, weight="weight", seed=42)
+    except Exception:  # noqa: BLE001 — 老 nx 无 louvain / 收敛异常 → 无社区面
+        return {}
+    out: dict[str, int] = {}
+    for i, part in enumerate(parts):
+        for aid in part:
+            out[str(aid)] = i
+    return out
+
+
+def _tag_bipartite(live_ids: set[int]) -> tuple[list[dict], list[dict]]:
+    """semantic tag 旁挂面: tags=[{id,name,mounts}] + mounts=[{atom,tag,w}]。
+
+    只收 semantic (factual session:/repo: 是来源标记非主题聚合, 画进来只会
+    炸成几千个 session 枢纽); atom 侧只收快照内 live 原子。"""
+    import db
+    rows = db.get_conn().execute(
+        "SELECT m.atom_id, m.tag_id, m.w, t.name FROM tag_mount m "
+        "JOIN tag t ON t.id = m.tag_id WHERE t.kind = 'semantic' "
+        "ORDER BY m.tag_id, m.atom_id").fetchall()
+    mounts = [{"atom": str(r["atom_id"]), "tag": r["tag_id"],
+               "w": r["w"]} for r in rows if r["atom_id"] in live_ids]
+    cnt: dict[int, int] = {}
+    for m in mounts:
+        cnt[m["tag"]] = cnt.get(m["tag"], 0) + 1
+    names = {r["tag_id"]: r["name"] for r in rows}
+    tags = [{"id": t, "name": names.get(t, "?"), "mounts": c}
+            for t, c in sorted(cnt.items(), key=lambda x: -x[1])]
+    return tags, mounts
 
 
 def delta(after_entity: int, after_fact: int) -> dict:

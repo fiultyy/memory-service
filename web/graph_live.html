@@ -71,6 +71,8 @@
     <span class="stat">推送 <b id="n-push">0</b></span>
     <span id="conn">连接中…</span>
     <span class="grow"></span>
+    <button id="btn-mode">视图: tag 聚合</button>
+    <button id="btn-color">着色: 社区色</button>
     <button id="btn-relayout">重新布局</button>
     <button id="btn-fit">重置视图</button>
     <button id="btn-pause">暂停推送</button>
@@ -125,9 +127,21 @@ const TYPE_COLOR = {
   fact: "#38bdf8", judgment: "#fbbf24", experience: "#34d399", summary: "#a78bfa",
   technical_term: "#64748b", concept: "#a78bfa", named_entity: "#fbbf24",
   identifier: "#94a3b8", quoted_term: "#f472b6", person: "#34d399",
-  project: "#f97316", tool: "#22d3ee", file: "#e879f9",
+  project: "#f97316", tool: "#22d3ee", file: "#e879f9", tag: "#f59e0b",
 };
 const hashColor = s => `hsl(${[...s].reduce((a,c)=>(a*31+c.charCodeAt(0))>>>0,7)%360} 65% 60%)`;
+
+/* 双视图状态: mode = atom(原子图) | tag(tag 聚合枢纽图); colorBy = type | comm */
+const TAG_COLOR = "#f59e0b";
+const COMM_PALETTE = ["#38bdf8","#f472b6","#34d399","#fbbf24","#a78bfa",
+                      "#22d3ee","#fb923c","#4ade80","#e879f9","#facc15",
+                      "#60a5fa","#f87171"];
+let mode = "atom", colorBy = "type";
+const store = { nodes: new Map(), edges: new Map(),
+                tags: new Map(), mounts: [], comm: {} };
+const nodeColor = n => colorBy === "comm" && store.comm[n.id] != null
+  ? COMM_PALETTE[store.comm[n.id] % COMM_PALETTE.length]
+  : (TYPE_COLOR[n.entity_type] ?? hashColor(n.id));
 
 const graph = new Graph({ multi: true, type: "directed" });
 const renderer = new Sigma(graph, document.getElementById("graph"),
@@ -191,9 +205,11 @@ function computeHidden() {               // 每次过滤条件变化重算 (含�
 }
 renderer.setSetting("nodeReducer", (node, data) => {
   if (hiddenNodes.has(node)) return { ...data, hidden: true };
-  const t = TYPE_COLOR[data.entity_type] ?? hashColor(data.id);
-  const base = { ...data, color: t,
-                 size: 2 + Math.sqrt(data.degree ?? 1) * 1.6,
+  const t = data.entity_type === "tag" ? TAG_COLOR : nodeColor(data);
+  const size = data.entity_type === "tag"
+    ? 4 + Math.log2(1 + (data.degree ?? 1)) * 2
+    : (mode === "tag" ? 1.2 : 2 + Math.sqrt(data.degree ?? 1) * 1.6);
+  const base = { ...data, color: t, size,
                  highlighted: node === highlightNode || undefined };
   if (matchSet) {                        // 搜索: 命中高亮放大, 其余压暗去标签
     const hit = matchSet.has(node);
@@ -259,12 +275,27 @@ function fitView() {
 /* ── 快照 + 增量应用 ── */
 let cursor = { entity: 0, fact: 0 }, pushes = 0, paused = false, es = null;
 function applyDelta(d, isSnapshot = false) {
+  for (const n of d.nodes) {
+    const old = store.nodes.get(n.id);
+    store.nodes.set(n.id, old ? { ...old, ...n } : n);
+  }
+  for (const e of d.edges) store.edges.set(e.id, e);
+  cursor = d.cursor;
+  if (mode === "tag") {          // tag 视图: 增量原子以小点入图 (挂载边需刷新快照)
+    const nn = d.nodes.filter(n => !graph.hasNode(n.id));
+    for (const n of nn) if (store.comm[n.id] == null)
+      graph.addNode(n.id, { ...n, label: (n.name ?? "").slice(0, 40),
+                            x: (Math.random() - .5) * 100, y: (Math.random() - .5) * 100,
+                            size: 1, color: nodeColor(n) });
+    $("n-nodes").textContent = graph.order; $("n-edges").textContent = graph.size;
+    return { nn, ne: [] };
+  }
   const nn = [], ne = [];
   for (const n of d.nodes) {
     if (graph.hasNode(n.id)) { graph.mergeNodeAttributes(n.id, { degree: n.degree }); continue; }
     const pos = isSnapshot ? { x: (Math.random() - .5) * 100, y: (Math.random() - .5) * 100 } : ringPosPre(n);
     graph.addNode(n.id, { ...n, label: (n.name ?? "").slice(0, 40), ...pos,
-                           size: 2, color: TYPE_COLOR[n.entity_type] ?? hashColor(n.id) });
+                           size: 2, color: nodeColor(n) });
     nn.push(n);
   }
   for (const e of d.edges) {
@@ -274,9 +305,49 @@ function applyDelta(d, isSnapshot = false) {
     graph.addEdgeWithKey(e.id, e.subject_id, e.object_id, edgeAttrs(noteAttrs(e)));
     ne.push(e);
   }
-  cursor = d.cursor;
   $("n-nodes").textContent = graph.order; $("n-edges").textContent = graph.size;
   return { nn, ne };
+}
+
+/* 视图切换: 从 store 全量重建 (坐标丢弃 → layout 重排) */
+const seedPos = (r = 60) => { const a = Math.random() * 2 * Math.PI;
+  return { x: Math.cos(a) * r * Math.sqrt(Math.random() + .2),
+           y: Math.sin(a) * r * Math.sqrt(Math.random() + .2) }; };
+function buildGraph() {
+  graph.clear();
+  tMin = Infinity; tMax = -Infinity;
+  if (mode === "atom") {
+    for (const n of store.nodes.values())
+      graph.addNode(n.id, { ...n, label: (n.name ?? "").slice(0, 40),
+                            ...seedPos(), size: 2, color: nodeColor(n) });
+    for (const e of store.edges.values()) {
+      if (!graph.hasNode(e.subject_id) || !graph.hasNode(e.object_id)) continue;
+      if (!graph.hasEdge(e.id))
+        graph.addEdgeWithKey(e.id, e.subject_id, e.object_id, edgeAttrs(noteAttrs(e)));
+    }
+  } else {                        // tag 聚合: tag 枢纽大点 + atom 小点 + 挂载细边
+    for (const n of store.nodes.values())
+      graph.addNode(n.id, { ...n, label: (n.name ?? "").slice(0, 40),
+                            ...seedPos(), size: 1.2, color: nodeColor(n) });
+    for (const t of store.tags.values()) {
+      const id = "t:" + t.id;
+      graph.addNode(id, { id, name: "#" + t.name, label: t.name.slice(0, 24),
+                          entity_type: "tag", degree: t.mounts, aliases: [],
+                          ...seedPos(), size: 5, color: TAG_COLOR, forceLabel: true });
+    }
+    for (const m of store.mounts) {
+      const eid = `m:${m.tag}:${m.atom}`, tid = "t:" + m.tag;
+      if (graph.hasNode(m.atom) && graph.hasNode(tid) && !graph.hasEdge(eid))
+        graph.addEdgeWithKey(eid, m.atom, tid,
+          { label: "挂载", _topic: "", _ts: NaN, _lif: m.w, size: .6, color: "#334155" });
+    }
+  }
+  $("n-nodes").textContent = graph.order; $("n-edges").textContent = graph.size;
+}
+function switchMode() {
+  mode = mode === "atom" ? "tag" : "atom";
+  $("btn-mode").textContent = mode === "atom" ? "视图: tag 聚合" : "视图: 原子图";
+  buildGraph(); buildTypeBoxes(); layout(100); refreshTimeWindow();
 }
 // ringPos 依赖图里有邻居 → 拆两步: 先加点(随便放)再在边加完后重摆新节点
 const pendingPos = new Set();
@@ -362,6 +433,12 @@ $("btn-pause").onclick = () => {
   else { catchUp().then(connect); }
 };
 $("btn-relayout").onclick = () => layout(120);
+$("btn-mode").onclick = switchMode;
+$("btn-color").onclick = () => {
+  colorBy = colorBy === "type" ? "comm" : "type";
+  $("btn-color").textContent = colorBy === "type" ? "着色: 社区色" : "着色: 类型色";
+  renderer.refresh();   // 颜色在 nodeReducer 现算 → 直接重渲染即可
+};
 $("btn-fit").onclick = fitView;
 $("slider").oninput = ev => {
   const v = +ev.target.value;
@@ -420,9 +497,9 @@ for (const n of snap.nodes) { /* 预摆环形坐标避免全 0 重叠 */
   n.x = Math.cos(ang) * r; n.y = Math.sin(ang) * r;
 }
 applyDelta(snap, true);
-for (const [id, a] of graph.nodes().map(id => [id, graph.getNodeAttributes(id)])) {
-  a.color = TYPE_COLOR[a.entity_type] ?? hashColor(id);
-}
+store.tags = new Map((snap.tags ?? []).map(t => [t.id, t]));
+store.mounts = snap.mounts ?? [];
+store.comm = snap.comm ?? {};
 layout(100);
 const initSlider = () => {
   if (!Number.isFinite(tMin)) return;

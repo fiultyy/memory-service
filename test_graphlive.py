@@ -137,6 +137,43 @@ def test_delta_drops_degree0_atoms():
     assert len(dl2["edges"]) == 1
 
 
+# ── 聚合面: tag 旁挂 + louvain 社区 ─────────────────────────────────
+
+def _tag(name: str, kind: str = "semantic") -> int:
+    cur = db.get_conn().execute(
+        "INSERT INTO tag(name, kind) VALUES(?,?)", (name, kind))
+    return cur.lastrowid
+
+
+def _mount(tid: int, aid: int, w: float = 0.5) -> None:
+    db.get_conn().execute(
+        "INSERT INTO tag_mount(tag_id, atom_id, w) VALUES(?,?,?)", (tid, aid, w))
+
+
+def test_snapshot_tag_bipartite_semantic_only_and_comm():
+    _fresh("agg.db")
+    a, b, c = _seed_triangle()
+    t = _tag("聚合主题")
+    _tag("session:xyz", kind="factual")           # factual 是来源标记, 不入聚合面
+    _mount(t, a)
+    _mount(t, b)
+    _mount(t, c)                                  # c 孤儿 (degree=0) 不在快照
+    snap = graphlive.snapshot()
+    assert [tg["name"] for tg in snap["tags"]] == ["聚合主题"]
+    assert snap["tags"][0]["mounts"] == 2
+    assert {(m["atom"], m["tag"]) for m in snap["mounts"]} == {(str(a), t), (str(b), t)}
+    # louvain: a-b 连通 → 都有社区号且同社区
+    assert set(snap["comm"]) == {str(a), str(b)}
+    assert snap["comm"][str(a)] == snap["comm"][str(b)]
+
+
+def test_snapshot_comm_empty_on_isolated():
+    _fresh("nocomm.db")
+    a, b = _atom("孤A"), _atom("孤B")              # 无边 → louvain 无边不跑
+    snap = graphlive.snapshot()
+    assert snap["comm"] == {} and snap["tags"] == []
+
+
 # ── 导出 ─────────────────────────────────────────────────────────────
 
 def test_export_csv_and_json():

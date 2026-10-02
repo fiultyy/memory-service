@@ -67,14 +67,21 @@ SYS_JUDGE = (
     "- judgment: 裁决/根因/行为观察(为什么/机制表现如何)\n"
     "- experience: 坑/故障案例(含已修复的)/解法模式\n"
     "- summary: 被实测验证确立的能力终态(什么回路/机制已走通); 票/工作线的当前终态(TK-X已收口/已滚出/已移交)\n"
+    "- preference: 用户显式表达的长期偏好/约定/禁令/常驻指令——主语是用户本人"
+    "(「以后都…」「别再…」「记住我喜欢…」「回复用中文」); 用户工作方式约束同判此类\n"
+    "- event: 已定时间点的事件/计划/期限——「下周要review」「9月完成了迁移」「8月改用了X」"
+    "(带明确时间语义的陈述; 未来待办若时间未定仍判 process)\n"
     "- process: 时点快照/进行时/待办/动作回执/git可查记录/编排轨迹统计\n"
-    "默认怀疑: 拿不准判 process; 但资产终态、故障案例、行为观察宁留勿杀。\n"
+    "默认怀疑: 拿不准判 process; 但资产终态、故障案例、行为观察、用户偏好宁留勿杀。\n"
     "带[Cx]标记的句子同属一个语义簇, 上下相邻句语义相近。\n"
     "若某句陈述的状态已被列表中更新的句子取代, 标 superseded_by=<新句编号>。\n"
-    '只输出 JSON 数组: [{"id":编号,"summary":"结论句","label":"fact|judgment|experience|summary|process",'
-    '"superseded_by":编号(可选)}], 不要其它文字。'
+    "每条顺带输出: entities=句中精确符号/实体名数组(文件路径/服务名/版本号/命令/仓库名/产品名, ≤4个, 无则省); "
+    "when=事件发生时刻(仅 event 类, ISO 或原文短语)。\n"
+    '只输出 JSON 数组: [{"id":编号,"summary":"结论句","label":"fact|judgment|experience|summary|preference|event|process",'
+    '"superseded_by":编号(可选),"entities":[..](可选),"when":".."(可选)}], 不要其它文字。'
 )
-_LABELS = ("fact", "judgment", "experience", "summary", "process")
+_LABELS = ("fact", "judgment", "experience", "summary", "preference", "event",
+           "process")
 CRIT_DUR = ["transient-process", "context-bound", "durable-knowledge"]  # full_distill CRIT_D 原样
 CRIT_EDGE = ["unrelated", "related", "same-topic"]                      # full_distill CRIT_F 原样
 
@@ -193,8 +200,15 @@ def _judge_units(units: list[str]) -> list[dict] | None:
             if isinstance(it, dict) and it.get("id") in todo \
                     and it.get("label") in _LABELS \
                     and isinstance(it.get("summary"), str) and it["summary"].strip():
-                done[it["id"]] = {"summary": it["summary"].strip(),
-                                  "label": it["label"], "sup": it.get("superseded_by")}
+                ents = it.get("entities")
+                done[it["id"]] = {
+                    "summary": it["summary"].strip(), "label": it["label"],
+                    "sup": it.get("superseded_by"),
+                    # v3 泛化: 精确符号位 + 事件时刻 (判据同调用顺带产出, 零增调用)
+                    "entities": [str(e)[:80] for e in ents][:4]
+                    if isinstance(ents, list) and ents else None,
+                    "when": it.get("when") if isinstance(it.get("when"), str)
+                    and it.get("when").strip() else None}
         time.sleep(1)
     out = []
     for i in sorted(done):
@@ -444,20 +458,26 @@ def distill_segment(segment_text: str, session_id: str, cwd: str,
         for j, d in enumerate(new_atoms):
             cur.execute(
                 "INSERT INTO atom(text, label, p_dur, valid_from, source_refs, "
-                "source_cwd, needs_audit, needs_embed, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "source_cwd, subjects, event_at, last_seen_at, "
+                "needs_audit, needs_embed, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (d["summary"], d["label"], p_dur.get(j) or 0.0, ts,
                  json.dumps([d["unit"]] + d.get("merge_units", []),
                             ensure_ascii=False),
                  cwd,
+                 json.dumps(d.get("entities") or [], ensure_ascii=False)
+                 if d.get("entities") else None,
+                 d.get("when") if d["label"] == "event" else None,
+                 ts,
                  1 if p_dur.get(j) is None else 0,
                  1 if d["vec"] is None else 0,
                  ts))
             d["aid"] = cur.lastrowid
             n_atoms += 1
         for aid, refs_json in merged_ref_vals.items():
-            conn.execute("UPDATE atom SET source_refs=? WHERE id=?",
-                         (refs_json, aid))
+            # merge 续期: 复现即 touch last_seen_at (TTL 判据 COALESCE 口径)
+            conn.execute("UPDATE atom SET source_refs=?, last_seen_at=? "
+                         "WHERE id=?", (refs_json, ts, aid))
         for k, (aid, d) in enumerate(cand_edges):
             if k not in edge_w:
                 continue
@@ -556,15 +576,72 @@ def settle_supersedes() -> int:
         new_atom = conn.execute(
             "SELECT id FROM atom WHERE text=? AND valid_to IS NULL "
             "LIMIT 1", (r["new_text"],)).fetchone()
+        # v3 语义化结算: 精确文本 miss 时向量兜底 — 措辞漂移的跨段认知
+        # 更新也能退场 (embed ANN top-1 cos≥0.90, laya 单问确认)。
+        if old_atom is None:
+            old_atom = _vec_match_live(conn, r["old_text"], exclude_text=None)
+        if new_atom is None:
+            new_atom = _vec_match_live(conn, r["new_text"],
+                                       exclude_text=r["old_text"])
         if old_atom is None or new_atom is None or old_atom["id"] == new_atom["id"]:
             continue  # 未命中/自指 → 留待下轮
         conn.execute("UPDATE atom SET valid_to=? WHERE id=? AND valid_to IS NULL",
                      (now, old_atom["id"]))
+        # 死 atom 不留向量候选位 (向量腿的时态同步)
+        try:
+            import vec_index
+            if vec_index.available():
+                vec_index.delete_atom(old_atom["id"])
+        except Exception:  # noqa: BLE001 — passive
+            pass
+        a, b = sorted((old_atom["id"], new_atom["id"]))
+        conn.execute("INSERT OR IGNORE INTO atom_edge(a_id, b_id, w, kind) "
+                     "VALUES(?, ?, 1.0, 'supersedes')", (a, b))
         conn.execute("UPDATE supersede_proposal SET settled_at=? WHERE id=?",
                      (now, r["id"]))
         settled += 1
     conn.commit()
     return settled
+
+
+def _vec_match_live(conn, text: str, exclude_text: str | None):
+    """settle 向量兜底: text → live atom ANN top-1 cos≥0.90 + laya 单问确认。
+
+    laya 缺席/embed 失败 → None (保守跳过, 维持原"留待下轮"语义);
+    ponytail: 全量 MATCH 扫 (settle 是夜间小量, 不上 ANN 索引)。"""
+    try:
+        import vec_index
+        if not vec_index.available():
+            return None
+        vec = embedding.embed_batch([text])[0]
+        if not _valid_vec(vec):
+            return None
+        hits = vec_index.atom_topk([float(x) for x in vec], 3)
+        if not hits:
+            return None
+        aid, cos = hits[0]
+        if cos < 0.90:
+            return None
+        row = conn.execute(
+            "SELECT id, text FROM atom WHERE id=? AND valid_to IS NULL",
+            (aid,)).fetchone()
+        if row is None or (exclude_text and row["text"] == exclude_text):
+            return None
+        if laya_client.laya_available():
+            q = {"p0": {"type": "score",
+                        "instructions": f"Does the statement [{text[:130]}] "
+                                        f"describe the same thing as [{row['text'][:130]}]?",
+                        "criteria": CRIT_EDGE}}
+            answers = _laya_one(f"[{text[:130]}] vs [{row['text'][:130]}]", q)
+            if answers is None:
+                return None
+            idx_same = CRIT_EDGE.index("same-topic")
+            w = _prob(answers.get("p0"), idx_same)
+            if w is None or w < 0.50:
+                return None
+        return row
+    except Exception:  # noqa: BLE001 — 兜底路径 passive, 不炸清算
+        return None
 
 
 def _sync_atom_vecs(pairs: list[tuple[int, Any]]) -> None:

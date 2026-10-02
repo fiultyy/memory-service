@@ -152,12 +152,16 @@ def init(db_path: str | Path | None = None,
             id          INTEGER PRIMARY KEY,
             text        TEXT NOT NULL,
             label       TEXT NOT NULL
-                        CHECK(label IN ('fact','judgment','experience','summary')),
+                        CHECK(label IN ('fact','judgment','experience','summary',
+                                        'preference','event')),
             p_dur       REAL DEFAULT 0.0,
             valid_from  TEXT,
             valid_to    TEXT,
             source_refs TEXT,
             source_cwd  TEXT,
+            subjects    TEXT,          -- JSON 数组: 精确符号/实体名 (路径/服务/版本/命令)
+            event_at    TEXT,          -- 事件发生时刻 (与 valid_from 记录时刻分离)
+            last_seen_at TEXT,         -- 复现续期 (merge/supersede 兜底 TTL 用; NULL=valid_from)
             needs_embed INTEGER DEFAULT 0,
             needs_audit INTEGER DEFAULT 0,
             created_at  TEXT DEFAULT (datetime('now'))

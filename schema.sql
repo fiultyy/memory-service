@@ -106,12 +106,16 @@ CREATE TABLE IF NOT EXISTS atom (
     id          INTEGER PRIMARY KEY,
     text        TEXT NOT NULL,                          -- 知识原子结论句 (canonical)
     label       TEXT NOT NULL
-                CHECK(label IN ('fact','judgment','experience','summary')),
+                CHECK(label IN ('fact','judgment','experience','summary',
+                                'preference','event')),
     p_dur       REAL DEFAULT 0.0,                       -- laya 审计 durable 概率 (组内 max)
     valid_from  TEXT,                                   -- D4 双时态: 成员 fact 最早 created_at
     valid_to    TEXT,                                   -- supersede/证伪清算写 (夜间)
     source_refs TEXT,                                   -- JSON array: 成员原 fact 的 source_refs 并集
     source_cwd TEXT,                                    -- 成员原 fact 溯源 cwd (多数决)
+    subjects    TEXT,                                   -- JSON 数组: 精确符号/实体名 (路径/服务/版本/命令)
+    event_at    TEXT,                                   -- 事件发生时刻 (与 valid_from 记录时刻分离)
+    last_seen_at TEXT,                                  -- 复现续期 (TTL 用; NULL=取 valid_from)
     needs_embed INTEGER DEFAULT 0,                      -- H2: embed 失败夜间补扫标记
     needs_audit INTEGER DEFAULT 0,                      -- H2: laya 审计欠账标记
     created_at  TEXT DEFAULT (datetime('now'))

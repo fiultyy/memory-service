@@ -263,7 +263,8 @@ function applyDelta(d, isSnapshot = false) {
   for (const n of d.nodes) {
     if (graph.hasNode(n.id)) { graph.mergeNodeAttributes(n.id, { degree: n.degree }); continue; }
     const pos = isSnapshot ? { x: (Math.random() - .5) * 100, y: (Math.random() - .5) * 100 } : ringPosPre(n);
-    graph.addNode(n.id, { ...n, ...pos, size: 2, color: TYPE_COLOR[n.entity_type] ?? hashColor(n.id) });
+    graph.addNode(n.id, { ...n, label: (n.name ?? "").slice(0, 40), ...pos,
+                           size: 2, color: TYPE_COLOR[n.entity_type] ?? hashColor(n.id) });
     nn.push(n);
   }
   for (const e of d.edges) {

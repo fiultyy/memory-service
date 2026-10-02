@@ -606,6 +606,42 @@ def _recall_atoms(
               if s["score"] >= floor or s["fact"]["atom_id"] in tag_wing
               or s["fact"]["atom_id"] in subj_wing]
 
+    # ── v3 laya rerank (MEM_LAYA_RERANK=1, 缺省关): 仅经向量腿入场 (无任何
+    #    文本/符号直命中) 的候选 — embedding 召回的语义泛化面 (跨语言/同义,
+    #    如 霍顿↔Holden) 交 laya 单批批判: keep=False 剔除, keep 的 score 乘
+    #    (0.5+0.5·match_score) 重排 (语义相关度上探/下压)。文本直命中不参与
+    #    (自带 token 证据, 与 A 路不经 gate 同语义); laya 不可用/整批失败 →
+    #    原 score 原样返回 (rerank 是增强, 失败不降级不挡路)。
+    vec_only = {aid for aid in cand
+                if aid not in subj_wing and aid not in tag_wing
+                and not any(
+                    tok and tok in (cand[aid].get("text") or "").lower()
+                    for tok in tokens)}
+    if (os.environ.get("MEM_LAYA_RERANK") == "1" and vec_only
+            and laya_client.laya_available()):
+        anchors = {t for t in tokens if len(t) >= 2}
+        if anchors:
+            cand_texts = {s["fact"]["id"]: s["fact"]["text"] for s in scored
+                          if s["fact"]["atom_id"] in vec_only}
+            try:
+                verdicts = gate.run_gate_laya(
+                    cand_texts, query, anchors, p_keep=GATE_P_HIGH_KEEP)
+            except Exception:  # noqa: BLE001 — rerank 失败 ≡ 不可用
+                verdicts = None
+            if verdicts is not None:
+                kept_r: list[dict[str, Any]] = []
+                for s in scored:
+                    fid = s["fact"]["atom_id"]
+                    if fid not in vec_only:
+                        kept_r.append(s)
+                        continue
+                    v = verdicts.get(s["fact"]["id"])
+                    if v is None or not v.get("keep"):
+                        continue  # 语义泛化候选 laya 判不相关 → 剔除
+                    s["score"] *= 0.5 + 0.5 * float(v["match_score"])
+                    kept_r.append(s)
+                scored = kept_r
+
     # ── gate (use_gate): 只判 tag 翼 (B 翼)。laya 批判 lane 优先 (锚 =
     #    query token, ≥2 字), 不可用/锚空 → 回落 gate.run_gate; 两者都败 →
     #    tag 翼全部不入返回 (A 路永不经 gate, 与 fact 面同语义)。

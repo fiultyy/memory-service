@@ -428,3 +428,52 @@ def test_tag_parent_climb(tmp_path, monkeypatch):
     monkeypatch.setenv("MEM_TAG_WING_PARENT", "1")
     ids = set(_ids(recall_mod.recall("sqlite 部署", use_vec=True)))
     assert ids == {f"atom:{hit}", f"atom:{sib}"}, ids
+
+
+# ── v3 laya rerank: 仅向量腿入场的语义泛化候选交 laya 批判 ──────────
+
+def test_laya_rerank_vec_only(tmp_path, monkeypatch):
+    """MEM_LAYA_RERANK=1: 仅向量腿入场 (无 token/subjects/翼 命中) 的候选
+    交 laya — keep=False 剔除, keep 的 score 乘 (0.5+0.5·match_score) 重排;
+    文本直命中不参与; env 缺省关 (零回归)。"""
+    import os
+    conn = _init(tmp_path, monkeypatch)
+    hit = _atom(conn, "sqlite-vec 部署需要 pip install sqlite-vec==0.1.9")
+    vec_only = _atom(conn, "霍顿旅行车 stealth camp 选型结论")  # 无 query token 命中
+    qv = _pad(1.0, 0.0)
+    _mock_vecs(monkeypatch, qv, {hit: _pad(1.0, 0.0),
+                                 vec_only: _pad(0.8, 0.6)})
+
+    calls = {}
+
+    def fake_laya(cand_texts, query, anchors, p_keep=0.35):
+        calls["ids"] = set(cand_texts)
+        return {fid: {"keep": True, "match_score": 0.8}
+                for fid in cand_texts}
+
+    monkeypatch.setattr(laya_client, "laya_available", lambda: True)
+    monkeypatch.setattr(gate, "run_gate_laya", fake_laya)
+    monkeypatch.setenv("MEM_LAYA_RERANK", "1")
+    res = recall_mod.recall("sqlite 部署", use_vec=True, min_score=0.0)
+    ids = _ids(res)
+    assert ids == [f"atom:{hit}", f"atom:{vec_only}"], ids
+    assert calls["ids"] == {f"atom:{vec_only}"}  # 只审 vec-only, 不审文本命中
+
+    # laya 判不相关 (keep=False) → vec-only 剔除, 文本命中保留
+    monkeypatch.setattr(gate, "run_gate_laya",
+                        lambda *a, **k: {f"atom:{vec_only}":
+                                         {"keep": False, "match_score": 0.1}})
+    assert _ids(recall_mod.recall("sqlite 部署", use_vec=True,
+                                  min_score=0.0)) == [f"atom:{hit}"]
+
+    # laya 整批失败 → 原 score 原样 (rerank 失败不降级)
+    monkeypatch.setattr(gate, "run_gate_laya", lambda *a, **k: None)
+    assert set(_ids(recall_mod.recall("sqlite 部署", use_vec=True,
+                                       min_score=0.0))) == \
+        {f"atom:{hit}", f"atom:{vec_only}"}
+
+    # env 缺省关 → laya 不被调用, vec-only 照常返回
+    monkeypatch.delenv("MEM_LAYA_RERANK")
+    assert set(_ids(recall_mod.recall("sqlite 部署", use_vec=True,
+                                       min_score=0.0))) == \
+        {f"atom:{hit}", f"atom:{vec_only}"}

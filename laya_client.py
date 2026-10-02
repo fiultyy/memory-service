@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 import urllib.error
 import urllib.request
@@ -25,47 +24,27 @@ LAYA_BASE = os.environ.get("MEM_LAYA_URL", "http://127.0.0.1:8190")
 TOKEN_BUDGET = 8000  # 实测 7.2k 通过; 留余量(temp/laya-batch-request-design.md §0)
 _SHARD_JOBS = 4      # laya_batch 超预算分片时的并行请求数帽
 
-OPENROUTER_BASE = os.environ.get("OPENROUTER_BASE", "https://openrouter.ai/api/v1")
+JEV_DECISIONS_URL = os.environ.get(
+    "MEM_JEV_DECISIONS_URL", "https://openrouter.ai/api/alpha/decisions")
 JEV_MODEL = os.environ.get("MEM_JEV_MODEL", "typesafe/jev-1.13")
-
-_JEV_SYS = (
-    "You are a batch judge service. The user message is a JSON payload with "
-    "'state' (context) and 'questions' (each has type, instructions, criteria). "
-    "Answer EVERY question id. Reply with ONLY a JSON object: "
-    '{"answers": {<qid>: {"score": <float>, "probabilities": '
-    '{"0": <p0>, "1": <p1>, "2": <p2 or as many criteria as given>}, '
-    '"legend": {<idx>: <criterion>}} }} — for type=score, probabilities must '
-    "cover every criterion index and sum to ~1.0, score = expectation over "
-    "criteria indices. For type=choice, reply {<qid>: {\"choice\": "
-    "<one criterion key>, \"confidence\": <float>}} instead. "
-    "No prose, no markdown fences."
-)
-
 
 def _backend() -> str:
     return os.environ.get("MEM_LAYA_BACKEND", "local")
 
 
 def _openrouter_post(state: str, questions: dict, timeout: float) -> dict | None:
-    """OpenRouter chat.completions → 归一成 /predict answers 形态。
+    """OpenRouter /alpha/decisions (jev 原生判官面) → /predict 同形返回。
 
-    jev 是判官模型, 输入渲染成与本地容器同构的 payload (state+questions);
-    输出剥 ``` 围栏后 json 解析, answers 键缺失/解析失败 → None (与
-    _post 失败语义一致, 调用方整批回落/挂起)。"""
+    实测 (2026-10-02): 扁平 body {model, state, questions} → {answers: {...}}
+    与本地容器 /predict 逐位同形 (score 型含 probabilities/legend; noul 型
+    返回 noul 概率)。失败/answers 缺失 → None, 与 _post 失败语义一致。"""
     key = os.environ.get("OPENROUTER_API_KEY", "")
     if not key:
         return None
     req = urllib.request.Request(
-        OPENROUTER_BASE + "/chat/completions",
-        data=json.dumps({
-            "model": JEV_MODEL,
-            "temperature": 0,
-            "messages": [
-                {"role": "system", "content": _JEV_SYS},
-                {"role": "user", "content": json.dumps(
-                    {"state": state, "questions": questions}, ensure_ascii=False)},
-            ],
-        }).encode(),
+        JEV_DECISIONS_URL,
+        data=json.dumps({"model": JEV_MODEL, "state": state,
+                         "questions": questions}, ensure_ascii=False).encode(),
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {key}"},
         method="POST",
@@ -73,15 +52,7 @@ def _openrouter_post(state: str, questions: dict, timeout: float) -> dict | None
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read())
-        text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        if not isinstance(text, str) or not text.strip():
-            return None
-        text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text.strip())
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if not m:
-            return None
-        parsed = json.loads(m.group(0))
-        answers = parsed.get("answers") if isinstance(parsed, dict) else None
+        answers = body.get("answers") if isinstance(body, dict) else None
         return {"answers": answers} if isinstance(answers, dict) else None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return None

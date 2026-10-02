@@ -47,9 +47,9 @@ def test_openrouter_batch_normalize(monkeypatch):
     assert calls["state"] == "ctx"
 
 
-def test_openrouter_post_parses_fenced(monkeypatch):
-    """_openrouter_post: chat content 带 ```json 围栏 → 剥出 answers;
-    非法 JSON / answers 缺失 → None。"""
+def test_openrouter_post_parses_decisions(monkeypatch):
+    """_openrouter_post: /alpha/decisions 原生面 — 同形 answers 透传;
+    answers 非 dict → None。"""
     class _Resp:
         def __init__(self, body):
             self._b = json.dumps(body).encode()
@@ -64,12 +64,11 @@ def test_openrouter_post_parses_fenced(monkeypatch):
             return self._b
 
     def fake_urlopen(req, timeout=None):
+        assert "alpha/decisions" in req.full_url
         payload = json.loads(req.data.decode())
         assert payload["model"] == laya_client.JEV_MODEL
-        assert payload["temperature"] == 0
-        content = "```json\n" + json.dumps(
-            {"answers": {"safe": _score_answer(0.5)}}) + "\n```"
-        return _Resp({"choices": [{"message": {"content": content}}]})
+        assert payload["state"] == "s" and set(payload["questions"]) == {"safe"}
+        return _Resp({"model": "x", "answers": {"safe": _score_answer(0.5)}})
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.setattr(laya_client.urllib.request, "urlopen", fake_urlopen)
@@ -77,7 +76,7 @@ def test_openrouter_post_parses_fenced(monkeypatch):
     assert got["answers"]["safe"]["probabilities"]["2"] == 0.5
 
     def bad_urlopen(req, timeout=None):
-        return _Resp({"choices": [{"message": {"content": "no json here"}}]})
+        return _Resp({"answers": "not a dict"})
 
     monkeypatch.setattr(laya_client.urllib.request, "urlopen", bad_urlopen)
     assert laya_client._openrouter_post("s", {"safe": {}}, 5.0) is None

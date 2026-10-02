@@ -85,3 +85,53 @@ def test_openrouter_post_parses_decisions(monkeypatch):
 def test_openrouter_no_key(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     assert laya_client._openrouter_post("s", {"q": {}}, 5.0) is None
+
+
+# ── jevstyle 后端 (2026-10-03): path/base/health/budget 四处分发 ─────────
+
+def test_jevstyle_path_and_budget(monkeypatch):
+    """jevstyle: _send 打到 /v1/systemone + base 8191; budget 缺省 6000;
+    health 探 /healthz。零网络 (monkeypatch _post / urlopen)。"""
+    calls = {}
+
+    def fake_post(path, payload, timeout):
+        calls["path"] = path
+        return {"answers": {qid: _score_answer(0.5) for qid in payload["questions"]}}
+
+    monkeypatch.setattr(laya_client, "_post", fake_post)
+    monkeypatch.setenv("MEM_LAYA_BACKEND", "jevstyle")
+    got = laya_client.laya_batch("s", {"q1": {"type": "score",
+                                              "criteria": ["a", "b", "c"]}})
+    assert got == {"q1": _score_answer(0.5)}
+    assert calls["path"] == "/v1/systemone"
+    assert laya_client._token_budget() == 6000
+    monkeypatch.setenv("MEM_JEV_STYLE_BUDGET", "1234")
+    assert laya_client._token_budget() == 1234
+    assert laya_client._base() == laya_client.JEV_STYLE_URL
+    monkeypatch.setattr(laya_client, "JEV_STYLE_URL", "http://127.0.0.1:9999")
+    assert laya_client._base() == "http://127.0.0.1:9999"
+
+
+def test_jevstyle_health_healthz(monkeypatch):
+    """jevstyle available: GET /healthz (与 local /health 不同名)。"""
+    monkeypatch.setenv("MEM_LAYA_ENABLED", "1")
+    monkeypatch.setattr(laya_client, "_avail_cache", None)
+    monkeypatch.setenv("MEM_LAYA_BACKEND", "jevstyle")
+    hit = {}
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(url, timeout=0, **k):
+        hit["url"] = url
+        return _Resp()
+
+    monkeypatch.setattr(laya_client.urllib.request, "urlopen", fake_urlopen)
+    assert laya_client.laya_available() is True
+    assert hit["url"].endswith("/healthz")

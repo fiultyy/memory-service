@@ -377,11 +377,19 @@ function buildGraph() {
       graph.addNode(n.id, { ...n, label: (n.name ?? "").slice(0, 40),
                             ...seedPos(), size: 1.2, color: nodeColor(n) });
     const tname = id => store.tags.get(id)?.name ?? "?";
+    for (const t of store.tags.values()) {
+      const id = "t:" + t.id;
+      graph.addNode(id, { id, name: "#" + t.name, label: t.name.slice(0, 24),
+                          entity_type: "tag", degree: tagTreeDeg().get(t.id) ?? t.mounts,
+                          aliases: [],
+                          created_at: t.t0 ? `${t.t0?.slice(0, 10)} ~ ${t.t1?.slice(0, 10)}` : null,
+                          ...seedPos(), size: 5, color: TAG_COLOR, forceLabel: true });
+    }
     // 真树边: 有 parent_id 的 tag 挂父 tag (优先于计算簇)
     for (const t of store.tags.values()) {
       if (t.parent_id == null || !store.tags.has(t.parent_id)) continue;
       const cid = "t:" + t.id, pid = "t:" + t.parent_id;
-      if (graph.hasNode(cid) && graph.hasNode(pid) && !graph.hasEdge(`p:${t.id}`))
+      if (!graph.hasEdge(`p:${t.id}`))
         graph.addEdgeWithKey(`p:${t.id}`, cid, pid,
           { label: "父", _topic: "", _ts: NaN, _lif: 1, size: 1.2,
             color: TAG_COLOR, type: "arrow" });
@@ -414,14 +422,6 @@ function buildGraph() {
         gm.set(cm, sid);
       }
       subGroups.set(t.id, gm);
-    }
-    for (const t of store.tags.values()) {
-      const id = "t:" + t.id;
-      graph.addNode(id, { id, name: "#" + t.name, label: t.name.slice(0, 24),
-                          entity_type: "tag", degree: tagTreeDeg().get(t.id) ?? t.mounts,
-                          aliases: [],
-                          created_at: t.t0 ? `${t.t0?.slice(0, 10)} ~ ${t.t1?.slice(0, 10)}` : null,
-                          ...seedPos(), size: 5, color: TAG_COLOR, forceLabel: true });
     }
     for (const c of store.clusters) {
       const id = "c:" + c.id;
@@ -644,6 +644,7 @@ buildTypeBoxes();
 refreshTimeWindow();
 logLine(`快照载入: ${snap.nodes.length} 节点 / ${snap.edges.length} 边`, "");
 connect();  // headless 冒烟可加 ?nosse=1 跳过 (SSE 长连接会挂住 virtual-time dump)
+if (new URLSearchParams(location.search).get("mode") === "tag") switchMode();
 </script>
 </body>
 </html>

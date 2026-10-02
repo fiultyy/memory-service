@@ -657,6 +657,13 @@ def _h7_distill_sweep() -> None:
     passive — 模块未落位/异常均记日志不杀轮 (仓内惯例)。"""
     try:
         d = _distill()
+        # supersede 清算 (2026-10-02 接线): 入图时落 supersede_proposal 队列,
+        # 此处隔夜结算 valid_to。零 laya/embed 依赖 — 排最前且独立兜错,
+        # 不被下行 audit_pending 的 LayaUnavailable 挡住。
+        try:
+            _log(f"distill settle_supersedes → {d.settle_supersedes()}")
+        except Exception as exc:
+            _log(f"ERROR supersede 清算: {exc} (continuing)")
         _log(f"distill audit_pending → {d.audit_pending()}")
         _log(f"distill reembed_needing → {d.reembed_needing()}")
     except Exception as exc:

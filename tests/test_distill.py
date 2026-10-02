@@ -173,6 +173,50 @@ def test_intra_segment_supersede(tdb, monkeypatch):
     assert r["supersede_proposals"] == [
         {"old_id": 0, "new_id": 1, "old": "旧状态句 #vA", "new": "新状态句 #vB"}]
     assert tdb.execute("SELECT text FROM atom").fetchone()[0] == "新状态句 #vB"
+    # 清算队列同事务落行 (2026-10-02 接线): 未命中 old → 留待下轮
+    rows = tdb.execute("SELECT old_text, new_text, settled_at "
+                       "FROM supersede_proposal").fetchall()
+    assert [(x["old_text"], x["new_text"], x["settled_at"]) == (
+        "旧状态句 #vA", "新状态句 #vB", None) for x in rows] and len(rows) == 1
+    assert distill.settle_supersedes() == 0  # old atom 不存在 (段内未入图) → no-op
+    assert tdb.execute("SELECT settled_at IS NULL FROM "
+                       "supersede_proposal").fetchone()[0] == 1
+
+
+# ── supersede 夜间清算 (settle_supersedes) ──────────────────
+def test_settle_supersedes_soft_deletes_old(tdb, monkeypatch):
+    """old atom 先行入图 (上一段), 后段提 sup → 夜间结算 valid_to 置位。"""
+    _setup(monkeypatch, [_zhipu_arr([
+        {"id": 0, "summary": "旧部署句 #vA", "label": "fact"}])])
+    distill.distill_segment("旧句。", "s1", CWD, "t1")
+    _setup(monkeypatch, [_zhipu_arr([
+        {"id": 0, "summary": "旧部署句 #vA", "label": "fact", "superseded_by": 1},
+        {"id": 1, "summary": "新部署句 #vB", "label": "fact"}])])
+    distill.distill_segment("旧句改。新句来。", "s1", CWD, "t2")
+    old_id = tdb.execute("SELECT id FROM atom WHERE text='旧部署句 #vA'").fetchone()[0]
+    assert distill.settle_supersedes() == 1
+    vt = tdb.execute("SELECT valid_to FROM atom WHERE id=?", (old_id,)).fetchone()[0]
+    assert vt is not None and vt.startswith("20")  # 软删 (ADR-17d)
+    assert tdb.execute("SELECT settled_at IS NOT NULL FROM "
+                       "supersede_proposal").fetchone()[0] == 1
+    assert distill.settle_supersedes() == 0  # 幂等: 已结行跳过
+    # 软删后段内配对不再以旧句为"既有" (下一句 cos 检查 live 集)
+    _setup(monkeypatch, [_zhipu_arr([
+        {"id": 0, "summary": "旧部署句 #vA", "label": "fact"}])])
+    r = distill.distill_segment("旧句再来。", "s1", CWD, "t3")
+    assert r["atoms"] == 1  # 旧句已死 → 重新入图为新 atom (口径: 软删只挡召回)
+
+
+def test_settle_supersedes_selftext_closes_row(tdb):
+    """old==new 噪声行直接闭行, 不动任何 atom。"""
+    tdb.execute("INSERT INTO atom(text, label, p_dur, valid_from, created_at) "
+                "VALUES('同文句', 'fact', 0.5, 't', 't')")
+    tdb.execute("INSERT INTO supersede_proposal(old_text, new_text, created_at) "
+                "VALUES('同文句', '同文句', 't')")
+    assert distill.settle_supersedes() == 0
+    assert tdb.execute("SELECT valid_to FROM atom").fetchone()[0] is None
+    assert tdb.execute("SELECT settled_at IS NOT NULL FROM "
+                       "supersede_proposal").fetchone()[0] == 1
 
 
 # ── cos 合并 + 候选边 ───────────────────────────────────────

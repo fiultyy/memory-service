@@ -161,6 +161,12 @@ def _ensure_tables(conn) -> None:
     if cols and "status" not in cols:
         conn.execute(
             "ALTER TABLE distill_seen ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'")
+    # supersede 清算队列 (夜间结算, 见 settle_supersedes): 与段入图同事务落行,
+    # 不即时软删 — 段内判据可能误伤, 隔夜冷静期由 daemon _h7_distill_sweep 结算。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS supersede_proposal ("
+        "id INTEGER PRIMARY KEY, old_text TEXT NOT NULL, new_text TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, settled_at TEXT)")
 
 
 def _judge_units(units: list[str]) -> list[dict] | None:
@@ -465,6 +471,10 @@ def distill_segment(segment_text: str, session_id: str, cwd: str,
         # ≥0.90 并入既有 atom 的源也挂本段事实 tag (prune 反查可见性, 验收 minor)
         if merged_refs:
             _mint_fact_tags(conn, sorted(merged_refs), session_id, cwd, ts)
+        for sp in supersede_proposals:
+            conn.execute(
+                "INSERT INTO supersede_proposal(old_text, new_text, created_at) "
+                "VALUES(?, ?, ?)", (sp["old"], sp["new"], ts))
         conn.execute("INSERT OR IGNORE INTO distill_seen(sha, status, created_at) "
                      "VALUES(?, 'ok', ?)", (sha, ts))
         conn.commit()
@@ -513,6 +523,46 @@ def audit_pending() -> int:
                 fixed += 1
         time.sleep(1.0)
     return fixed
+
+
+def settle_supersedes() -> int:
+    """夜间清算 supersede_proposal: old/new 文本均精确命中 live atom → 旧者
+    valid_to 置位 (软删, ADR-17d 同款; 召回/投影/配对自此跳过), 行标 settled_at。
+
+    纯文本精确匹配, 零 laya/embed 依赖 — 判据 (zhipu sup) 已在入图时给出,
+    这里只做冷静期结算。miss (old 无命中 atom, 如被合并改写) → 行留待下轮;
+    ponytail: 无 TTL, 未命中行由下轮幂等重试, 量级 = 段内判据数 (极小)。
+    幂等: settled_at 非空的行跳过; valid_to 已置位的 atom 跳过。"""
+    from datetime import datetime, timezone
+    conn = db.get_conn()
+    _ensure_tables(conn)
+    rows = conn.execute(
+        "SELECT id, old_text, new_text FROM supersede_proposal "
+        "WHERE settled_at IS NULL").fetchall()
+    if not rows:
+        return 0
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    settled = 0
+    for r in rows:
+        if r["old_text"] == r["new_text"]:
+            conn.execute("UPDATE supersede_proposal SET settled_at=? WHERE id=?",
+                         (now, r["id"]))  # 同文本自 sup 噪声 → 直接闭行
+            continue
+        old_atom = conn.execute(
+            "SELECT id FROM atom WHERE text=? AND valid_to IS NULL "
+            "LIMIT 1", (r["old_text"],)).fetchone()
+        new_atom = conn.execute(
+            "SELECT id FROM atom WHERE text=? AND valid_to IS NULL "
+            "LIMIT 1", (r["new_text"],)).fetchone()
+        if old_atom is None or new_atom is None or old_atom["id"] == new_atom["id"]:
+            continue  # 未命中/自指 → 留待下轮
+        conn.execute("UPDATE atom SET valid_to=? WHERE id=? AND valid_to IS NULL",
+                     (now, old_atom["id"]))
+        conn.execute("UPDATE supersede_proposal SET settled_at=? WHERE id=?",
+                     (now, r["id"]))
+        settled += 1
+    conn.commit()
+    return settled
 
 
 def _sync_atom_vecs(pairs: list[tuple[int, Any]]) -> None:

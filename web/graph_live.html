@@ -343,7 +343,8 @@ function buildGraph() {
       const id = "c:" + c.id;
       const label = c.members.slice(0, 2).map(tname).join(" · ");
       graph.addNode(id, { id, name: label, label: label.slice(0, 26),
-                          entity_type: "cluster", degree: c.atoms, aliases: [],
+                          entity_type: "cluster", degree: c.atoms,
+                          aliases: c.members.map(tname),
                           ci: c.id, ...seedPos(), size: 9,
                           color: COMM_PALETTE[c.id % COMM_PALETTE.length],
                           forceLabel: true });

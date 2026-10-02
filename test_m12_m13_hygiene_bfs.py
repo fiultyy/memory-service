@@ -191,8 +191,10 @@ def test_hygiene_zero_llm():
 
 # ── 验收 3: M12 daemon 时序 ──────────────────────────────────────────
 
-def test_daemon_dream_due_hygiene_same_round():
-    """dream 到期 → 卫生同轮紧随 (时序铁律: KG 维护后才跑)。"""
+def test_daemon_dream_due_hygiene_same_round(monkeypatch):
+    """dream 到期 → 卫生同轮紧随 (时序铁律: KG 维护后才跑)。
+    v3: MEM_LEGACY_DREAM 缺省 0 — 本测钉 =1 走 legacy 后门。"""
+    monkeypatch.setenv("MEM_LEGACY_DREAM", "1")
     import dream
     order = []
     orig_dream, orig_hyg = dream.run_cycle, hygiene.run

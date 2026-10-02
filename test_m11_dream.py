@@ -419,8 +419,10 @@ def test_empty_cycle_all_zero_no_error():
         restore()
 
 
-def test_daemon_dream_gate_interval():
-    """门控: 未到期不跑 (stats 空); 到期跑且异常不杀 daemon (继续返回 state)。"""
+def test_daemon_dream_gate_interval(monkeypatch):
+    """门控: 未到期不跑 (stats 空); 到期跑且异常不杀 daemon (继续返回 state)。
+    v3: MEM_LEGACY_DREAM 缺省 0 跳过 v1 dream — 本测钉 =1 走 legacy 后门。"""
+    monkeypatch.setenv("MEM_LEGACY_DREAM", "1")
     state = {}
     calls = []
 

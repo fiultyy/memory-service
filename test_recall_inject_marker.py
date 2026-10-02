@@ -80,8 +80,10 @@ def test_additional_context_wrapped_in_memsvc_recall_marker(monkeypatch):
         assert clean(ctx, h) == "", h
 
 
-def test_no_anchor_entities_zero_output(monkeypatch):
+def test_no_anchor_entities_zero_output(monkeypatch, tmp_path):
+    import db
     import recall as recall_mod
+    db.init(tmp_path / "m.db")  # v3: _det_lanes 读库 — tmp 空库隔离, lane 为空
     monkeypatch.setattr(sys, "stdin",
                         io.StringIO(_payload("完全无关的提问内容")))
     monkeypatch.setattr(recall_mod, "search_entities",

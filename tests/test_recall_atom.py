@@ -5,6 +5,7 @@ tmp db 隔离 (db.init(tmp_path) 切连接); 零网络 (embedding/gate/laya 全 
 不触生产 data/memory.db。conftest autouse 已 pin MEM_LAYA_ENABLED=0。
 """
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -28,12 +29,20 @@ def _init(tmp_path, monkeypatch):
     return db.get_conn()
 
 
-def _atom(conn, text, *, p_dur=0.6, valid_from="2026-01-01T00:00:00+00:00",
-          valid_to=None, source_cwd=None):
+def _atom(conn, text, *, p_dur=0.6, valid_from=None, valid_to=None,
+          source_cwd=None, label="fact", subjects=None):
+    if valid_from is None:  # 缺省=now: freshness 默认开下既有用例分数零漂移
+        valid_from = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     cur = conn.execute(
-        "INSERT INTO atom(text, label, p_dur, valid_from, valid_to, source_cwd) "
-        "VALUES(?, 'fact', ?, ?, ?, ?)", (text, p_dur, valid_from, valid_to, source_cwd))
+        "INSERT INTO atom(text, label, p_dur, valid_from, valid_to, source_cwd, subjects) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?)",
+        (text, label, p_dur, valid_from, valid_to, source_cwd, subjects))
     return cur.lastrowid
+
+
+def _edge(conn, a, b, w=0.9, kind="related"):
+    conn.execute("INSERT INTO atom_edge(a_id,b_id,w,kind) VALUES(?,?,?,?)",
+                 (min(a, b), max(a, b), w, kind))  # CHECK(a_id < b_id)
 
 
 def _sem_tag(conn, name, members, w=0.9):
@@ -299,3 +308,123 @@ def test_recall_scored_with_cwd_filter(tmp_path, monkeypatch):
     _atom(conn, "sqlite-vec 无cwd 老数据", source_cwd=None)
     ids = _ids(recall_mod.recall("sqlite", cwd="/home/yy/projects/x"))
     assert set(ids) == {"atom:1", "atom:3"}, ids  # 异 cwd 排除, NULL 兼容
+
+
+# ── 10. v3: subjects 锚定 / related 第四腿 / freshness / parent 爬层 ──
+
+def test_subjects_anchor(tmp_path, monkeypatch):
+    """subjects 锚定: 精确符号是 query 子串 → text 无 token 命中亦入候选;
+    裸串 subjects 容错; 无关符号/无 subjects 不入场; v3 三列透传。"""
+    conn = _init(tmp_path, monkeypatch)
+    a1 = _atom(conn, "命令行工具的用法速查", subjects='["memsvc-cli"]')
+    _atom(conn, "另一条命令行工具说明", subjects='["other-tool"]')
+    a3 = _atom(conn, "裸串 subjects 容错条目", subjects="memsvc-cli")  # 非 JSON
+    _atom(conn, "无 subjects 条目")
+    ids = set(_ids(recall_mod.recall("memsvc-cli 安装在哪", min_score=0.0)))
+    assert ids == {f"atom:{a1}", f"atom:{a3}"}, ids
+    by_id = {f["id"]: f for f in recall_mod.recall(
+        "memsvc-cli 安装在哪", min_score=0.0)}
+    assert by_id[f"atom:{a1}"]["subjects"] == '["memsvc-cli"]'  # 行透传
+    assert by_id[f"atom:{a1}"]["event_at"] is None
+    assert by_id[f"atom:{a1}"]["last_seen_at"] is None
+
+
+def _qv(monkeypatch):
+    """边/tag 翼惰性门 (v3 对抗审查 major): 无 query 向量不扩张 — 测试给 qv。"""
+    import embedding as _emb
+    v = [1.0] + [0.0] * (DIM - 1)
+    monkeypatch.setattr(_emb, "embed", lambda q: list(v))
+
+
+def test_related_edge_wing(tmp_path, monkeypatch):
+    """related 第四腿: 边邻居经 tag_wing 通道入场 (bypass 地板; 需 query
+    向量 — 惰性门与 tag 腿同先例); w<0.5 / 对端已清算 (valid_to 非空) 不入场。"""
+    conn = _init(tmp_path, monkeypatch)
+    _qv(monkeypatch)
+    hit = _atom(conn, "sqlite-vec 部署需要 pip install sqlite-vec==0.1.9")
+    nb = _atom(conn, "数据库选型时的权衡笔记")  # 无 query token 命中, 仅经边入场
+    weak = _atom(conn, "低权重边邻居不该出现")
+    dead = _atom(conn, "已清算边邻居不该出现",
+                 valid_from="2026-01-01T00:00:00+00:00",
+                 valid_to="2026-06-01T00:00:00+00:00")
+    _edge(conn, hit, nb, w=0.9, kind="related")
+    _edge(conn, hit, weak, w=0.3)  # w < 0.5 → 不入场
+    _edge(conn, hit, dead, w=0.9, kind="supersedes")  # 对端非 live → 不入场
+    ids = set(_ids(recall_mod.recall("sqlite 部署", use_vec=True)))
+    assert ids == {f"atom:{hit}", f"atom:{nb}"}, ids
+
+
+def test_related_edge_caps(tmp_path, monkeypatch):
+    """related 第四腿受帽: 每 hit 帽 EDGE_WING_PER_HIT / 总帽 EDGE_WING_CAP,
+    w 高者优先 (i=0 最低 w 的邻居全被 per-hit 帽挡掉)。"""
+    conn = _init(tmp_path, monkeypatch)
+    _qv(monkeypatch)
+    hits = [_atom(conn, f"sqlite-vec 部署第{c}条") for c in "一二三"]
+    nb_ids: dict[tuple[int, int], int] = {}
+    for h in hits:
+        for i in range(5):
+            n = _atom(conn, f"边邻居文本{h}-{i}号")
+            _edge(conn, h, n, w=0.6 + 0.01 * i)
+            nb_ids[(h, i)] = n
+    ids = set(_ids(recall_mod.recall("sqlite 部署", use_vec=True)))
+    assert len(ids) == len(hits) + recall_mod.EDGE_WING_CAP, ids
+    per = {h: sum(1 for (hh, _), n in nb_ids.items()
+                  if hh == h and f"atom:{n}" in ids) for h in hits}
+    assert all(c <= recall_mod.EDGE_WING_PER_HIT for c in per.values()), per
+    assert sum(per.values()) == recall_mod.EDGE_WING_CAP
+    assert all(f"atom:{nb_ids[(h, 0)]}" not in ids for h in hits)  # w 最低挡掉
+
+
+def test_freshness_fact_only(tmp_path, monkeypatch):
+    """freshness: 只衰减 fact (0.5**(age/90) 乘进 LIF/confidence 先验);
+    judgment 不衰减; valid_from 解析失败不衰减; env MEM_RECALL_FRESH_OFF=1 关。"""
+    monkeypatch.delenv("MEM_RECALL_FRESH_OFF", raising=False)
+    conn = _init(tmp_path, monkeypatch)
+    old = _atom(conn, "sqlite-vec 部署旧记", valid_from="2026-01-01T00:00:00+00:00")
+    recent_vf = (datetime.now(timezone.utc).replace(microsecond=0)
+                 - timedelta(hours=1)).isoformat()
+    new = _atom(conn, "sqlite-vec 部署新记", valid_from=recent_vf)
+    jd = _atom(conn, "sqlite-vec 部署经验判断", label="judgment",
+               valid_from="2026-01-01T00:00:00+00:00")
+    bad = _atom(conn, "sqlite-vec 部署坏日期", valid_from="not-a-date")
+    by_id = {f["id"]: f for f in
+             recall_mod.recall("sqlite 部署", min_score=0.0)}
+    assert by_id[f"atom:{old}"]["LIF"] < 0.3  # ~0.6·0.5^(274/90)≈0.07
+    assert by_id[f"atom:{new}"]["LIF"] > 0.55  # 1h 龄 ≈ 无衰减
+    assert by_id[f"atom:{jd}"]["LIF"] == pytest.approx(0.6)  # 非 fact 不衰减
+    assert by_id[f"atom:{bad}"]["LIF"] == pytest.approx(0.6)  # 解析失败跳过
+    monkeypatch.setenv("MEM_RECALL_FRESH_OFF", "1")
+    by_id = {f["id"]: f for f in
+             recall_mod.recall("sqlite 部署", min_score=0.0)}
+    assert by_id[f"atom:{old}"]["LIF"] == pytest.approx(0.6)  # env 关 → 全不衰减
+
+
+def test_tag_parent_climb(tmp_path, monkeypatch):
+    """tag parent 爬层: 直系兄弟不足帽时, MEM_TAG_WING_PARENT=1 才上爬一层
+    拉父的其他子 tag 下原子补足; 缺省关 (零行为变化)。"""
+    conn = _init(tmp_path, monkeypatch)
+    hit = _atom(conn, "sqlite-vec 部署需要 pip install sqlite-vec==0.1.9")
+    sib = _atom(conn, "数据库向量索引选型与降级路径")  # 父层兄弟, 无 token 命中
+
+    def _tag(name, level, parent=None):
+        conn.execute(
+            "INSERT INTO tag(name, kind, level, description, parent_id) "
+            "VALUES(?, 'semantic', ?, '', ?)", (name, level, parent))
+        return conn.execute("SELECT id FROM tag WHERE name=? AND level=?",
+                            (name, level)).fetchone()[0]
+
+    p = _tag("检索父域", 1)
+    c1 = _tag("向量检索直系", 2, parent=p)  # 只挂 hit → 直系兄弟为空
+    c2 = _tag("向量检索旁支", 2, parent=p)  # 只挂 sib → 仅爬层可达
+    conn.execute("INSERT INTO tag_mount(tag_id, atom_id, w) VALUES(?,?,0.9)", (c1, hit))
+    conn.execute("INSERT INTO tag_mount(tag_id, atom_id, w) VALUES(?,?,0.9)", (c2, sib))
+    qv = _pad(1.0, 0.0)
+    # sib cos=0.25 < VEC_MIN(0.3) → 向量腿不带入场, 只能经爬层 tag_wing 进
+    _mock_vecs(monkeypatch, qv, {hit: _pad(1.0, 0.0),
+                                 sib: _pad(0.25, 0.968245836552)})
+    # 缺省关: 直系无兄弟 → 只有文本腿命中
+    assert _ids(recall_mod.recall("sqlite 部署", use_vec=True)) == [f"atom:{hit}"]
+    # env 开: 爬 parent → c2 下 sib 补足入场 (tag_wing 通道)
+    monkeypatch.setenv("MEM_TAG_WING_PARENT", "1")
+    ids = set(_ids(recall_mod.recall("sqlite 部署", use_vec=True)))
+    assert ids == {f"atom:{hit}", f"atom:{sib}"}, ids

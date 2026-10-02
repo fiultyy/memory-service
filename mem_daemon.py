@@ -624,21 +624,26 @@ def _maybe_dream(state: dict, cwd: str) -> dict:
     """Dreaming 阶段门控: 到期才跑, 单轮异常不杀 daemon (try/except 记日志继续)。
     水位存 state["_dreaming"]["last_run"] (epoch s) — 与 transcript offset 同文件。
     M12: dream 已跑 → 卫生同轮紧随 (KG 维护完成后才跑, 防复活); dream 未到期 →
-    卫生按 _HYGIENE_INTERVAL 独立门控。"""
-    import dream  # 惰性 import (dream 拉起 adapter/embedding 全链)
+    卫生按 _HYGIENE_INTERVAL 独立门控。
+    v3 (2026-10-02): dream.run_cycle 是 v1 fact 面遗留 (与 atom 图零交集),
+    MEM_LEGACY_DREAM=1 才跑; 补扫/卫生不受开关影响照跑。"""
     last = (state.get("_dreaming") or {}).get("last_run", 0)
     if time.time() - last < _DREAM_INTERVAL:
         h_last = (state.get("_hygiene") or {}).get("last_run", 0)
         if time.time() - h_last >= _HYGIENE_INTERVAL:
             state = _run_hygiene(state, cwd)
         return state
-    try:
-        # source_cwd=None: 全局单体 KG (ADR-14), 接管已停用 memory-dream.timer
-        # 的全局信号消费口径 (2026-10-01 挂账收口)。
-        stats = dream.run_cycle(source_cwd=None)
-        _log(f"dream cycle → {stats}")
-    except Exception as exc:
-        _log(f"ERROR dream cycle: {exc} (continuing)")
+    if os.environ.get("MEM_LEGACY_DREAM", "0") == "1":
+        try:
+            import dream  # 惰性 import (dream 拉起 adapter/embedding 全链)
+            # source_cwd=None: 全局单体 KG (ADR-14), 接管已停用 memory-dream.timer
+            # 的全局信号消费口径 (2026-10-01 挂账收口)。
+            stats = dream.run_cycle(source_cwd=None)
+            _log(f"dream cycle → {stats}")
+        except Exception as exc:
+            _log(f"ERROR dream cycle: {exc} (continuing)")
+    else:
+        _log("MEM_LEGACY_DREAM!=1 → 跳过 dream.run_cycle (v1 fact 面遗留)")
     _h7_distill_sweep()   # H7 补扫: needs_audit 补审 + needs_embed 补向量
     state["_dreaming"] = {"last_run": time.time()}
     return _run_hygiene(state, cwd)  # M12 时序铁律: KG 维护后紧随同轮
@@ -664,6 +669,34 @@ def _h7_distill_sweep() -> None:
             _log(f"distill settle_supersedes → {d.settle_supersedes()}")
         except Exception as exc:
             _log(f"ERROR supersede 清算: {exc} (continuing)")
+        # v3 TTL 退场 (2026-10-02): 低耐久 (p_dur<阈) 且 TTL 时钟早于阈天数前 →
+        # valid_to 置位软删。对抗审查修三处: ①needs_audit=1 的 p_dur=0.0 是
+        # 「未裁决」不是低耐久 → 不退 (审计落地出真实 p_dur 再按裁决);
+        # ②event 豁免 — TTL 时钟全是记录时刻, 远期日程会在发生前被杀 (与注入
+        # 面 event lane 自相矛盾), 过期日程由 lane 窗口自然淘汰; ③TTL 时钟锚
+        # COALESCE(last_seen_at, created_at) — valid_from 可能是回填 mtime,
+        # 入图时刻宽限防积压 spool 入图首轮即退。偏好仅显式 supersede 退场
+        # (p_dur 只作 lane 排序); judgment/experience 按定义耐久豁免。
+        try:
+            from datetime import datetime, timedelta, timezone
+            ttl_pdur = float(os.environ.get("MEM_ATOM_TTL_PDUR", "0.35"))
+            ttl_days = float(os.environ.get("MEM_ATOM_TTL_DAYS", "21"))
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            cutoff = (now - timedelta(days=ttl_days)).isoformat()
+            cond = ("valid_to IS NULL AND p_dur < ? AND needs_audit=0 "
+                    "AND COALESCE(last_seen_at, created_at) < ? "
+                    "AND label NOT IN ('judgment','experience','preference',"
+                    "'event','summary')")
+            conn = db.get_conn()
+            n = conn.execute("SELECT count(*) FROM atom WHERE " + cond,
+                             (ttl_pdur, cutoff)).fetchone()[0]
+            cur = conn.execute("UPDATE atom SET valid_to=? WHERE " + cond,
+                               (now.isoformat(), ttl_pdur, cutoff))
+            conn.commit()
+            _log(f"atom TTL 退场: 候选 {n} → 置 valid_to {cur.rowcount} 行 "
+                 f"(p_dur<{ttl_pdur}, >{ttl_days:.0f}d 未见)")
+        except Exception as exc:
+            _log(f"ERROR atom TTL 退场: {exc} (continuing)")
         _log(f"distill audit_pending → {d.audit_pending()}")
         _log(f"distill reembed_needing → {d.reembed_needing()}")
     except Exception as exc:

@@ -68,6 +68,10 @@ SUGGEST_BFS_THRESHOLD = 3
 # 主候选源 = atom 表 (spec §五-H6); fact 面降级 legacy (env 回切见 recall 头)。
 TAG_TOP_PER_ATOM = 2   # tag 遍历腿: 每 hit atom 取 top-N semantic tag (by w)
 TAG_SIBLING_CAP = 8    # tag 遍历腿: 并入兄弟 atom 总帽 (去重/排除已命中)
+# v3 (atom 泛化地基) 召回扩展常量:
+EDGE_WING_PER_HIT = 4        # related 第四腿: 每 hit atom 的边邻居帽
+EDGE_WING_CAP = 8            # related 第四腿: 边翼总帽
+FRESH_HALF_LIFE_DAYS = 90.0  # freshness: fact 类半衰 (freshness=0.5**(age/90))
 # gate P(high) keep 阈值 (atom 面)。来源: temp/gate_calib_v2.json
 # (scripts/gate_calibration_v2.py 2026-10-01 实测, seed=42): 60 对 (簇名 query,
 # 30 真相关/30 跨簇不相关) — relevant median 0.231 / irrelevant median 0.139,
@@ -307,7 +311,33 @@ def _row_to_atom(r: Any) -> dict[str, Any]:
         "source_cwd": r["source_cwd"],
         "valid_from": r["valid_from"],
         "valid_to": r["valid_to"],
+        # v3 三列透传 (行 dict 原样; subjects 是 JSON 字符串, 调用面按需 loads)
+        "subjects": r["subjects"],
+        "event_at": r["event_at"],
+        "last_seen_at": r["last_seen_at"],
     }
+
+
+def _subjects_hit(raw: Any, q_lower: str, tokens: list[str]) -> bool:
+    """v3 subjects 锚定: 任一精确符号小写后是 query 子串或含 query token。
+
+    subjects 列是 JSON 数组字符串; 容错裸串 (非 JSON 直接当单符号), 解析
+    异常/非列表跳过。"""
+    if not raw:
+        return False
+    try:
+        vals = json.loads(raw)
+    except (ValueError, TypeError):
+        vals = [raw]  # 容错裸串
+    if not isinstance(vals, list):
+        return False
+    for v in vals:
+        if not isinstance(v, str) or not v:
+            continue
+        s = v.lower()
+        if s in q_lower or any(tok and tok in s for tok in tokens):
+            return True
+    return False
 
 
 def _recall_atoms(
@@ -349,11 +379,19 @@ def _recall_atoms(
     else:
         rows = conn.execute(f"SELECT * FROM atom WHERE {tc}", tp).fetchall()
 
-    # ── 文本腿 (关键词腿的 atom 形态): query token 字面子串命中 atom.text
+    # ── 文本腿 (关键词腿的 atom 形态): query token 字面子串命中 atom.text;
+    #    v3 subjects 锚定 — 精确符号 (路径/服务/版本/命令) 是 query 子串或
+    #    包含 query token 亦入候选 (text 无 token 命中的符号型 atom 可达)。
+    q_lower = query.lower()
     cand: dict[int, dict[str, Any]] = {}
+    subj_wing: set[int] = set()   # subjects 锚定命中集: 绕噪音地板 (见 floor 段)
     for r in rows:
         text = (r["text"] or "").lower()
-        if any(tok and tok in text for tok in tokens):
+        tok_hit = any(tok and tok in text for tok in tokens)
+        sub_hit = not tok_hit and _subjects_hit(r["subjects"], q_lower, tokens)
+        if tok_hit or sub_hit:
+            if sub_hit:
+                subj_wing.add(r["id"])
             cand[r["id"]] = _row_to_atom(r)
 
     # ── 向量腿: vec_atom ANN (H6 命名空间)。embed 失败 passive ([] → 跳过,
@@ -418,19 +456,20 @@ def _recall_atoms(
                 w = float(r["w"] or 0.0)
                 if w > sib_w.get(aid, 0.0):  # 多 tag 命中取 max
                     sib_w[aid] = w
-            # 相关度 = cos (qv 在场保证; sim_by_id 为 vec_atom 全量 sim 映射)
-            ranked = sorted(
-                ((aid, w) for aid, w in sib_w.items() if w > 0.0),
-                key=lambda x: -x[1])[: TAG_SIBLING_CAP * 4]
-            if ranked:
-                rph = ",".join("?" * len(ranked))
+            def _fill(pairs: list[tuple[int, float]]) -> None:
+                """兄弟入场 (直系/父层共用): 查行 + 帽/cwd/cos 过滤后并入 tag_wing。"""
+                if not pairs:
+                    return
+                rph = ",".join("?" * len(pairs))
                 srows = {r["id"]: r for r in conn.execute(
                     f"SELECT * FROM atom WHERE id IN ({rph}) AND {tc}",
-                    (*[a for a, _ in ranked], *tp)).fetchall()}
-                for aid, w in ranked:
+                    (*[a for a, _ in pairs], *tp)).fetchall()}
+                for aid, w in pairs:
                     r = srows.get(aid)
                     if r is None or len(tag_wing) >= TAG_SIBLING_CAP:
                         continue
+                    if aid in cand:
+                        continue  # 排除已命中
                     if cwd and r["source_cwd"] and r["source_cwd"] != cwd:
                         continue  # ADR-14
                     rel = sim_by_id.get(aid, 0.0)
@@ -438,6 +477,115 @@ def _recall_atoms(
                         continue
                     tag_wing[aid] = w * rel
                     cand[aid] = _row_to_atom(r)
+
+            # 相关度 = cos (qv 在场保证; sim_by_id 为 vec_atom 全量 sim 映射)
+            ranked = sorted(
+                ((aid, w) for aid, w in sib_w.items() if w > 0.0),
+                key=lambda x: -x[1])[: TAG_SIBLING_CAP * 4]
+            _fill(ranked)
+            # ── v3 parent 爬层 (MEM_TAG_WING_PARENT=1, 缺省关 — 零行为变化):
+            #    直系兄弟不足帽 → 取命中 tag 的 parent, 拉父的其他子 tag 下
+            #    原子补足 (仍受总帽, 同款 w×cos 通道)。
+            if (os.environ.get("MEM_TAG_WING_PARENT") == "1"
+                    and len(tag_wing) < TAG_SIBLING_CAP):
+                tlist = tuple(tag_ids)
+                pph = ",".join("?" * len(tlist))
+                parent_ids = [p for (p,) in conn.execute(
+                    f"SELECT DISTINCT parent_id FROM tag "
+                    f"WHERE id IN ({pph}) AND parent_id IS NOT NULL", tlist)]
+                if parent_ids:
+                    kph = ",".join("?" * len(parent_ids))
+                    eph = ",".join("?" * len(tlist))
+                    sib2: dict[int, float] = {}
+                    for r in conn.execute(
+                        f"SELECT m.atom_id, m.w FROM tag_mount m "
+                        f"JOIN tag t ON t.id = m.tag_id "
+                        f"WHERE t.parent_id IN ({kph}) AND t.id NOT IN ({eph})",
+                        (*parent_ids, *tlist)):
+                        w = float(r["w"] or 0.0)
+                        if w > sib2.get(r["atom_id"], 0.0):  # 多 tag 取 max
+                            sib2[r["atom_id"]] = w
+                    ranked2 = sorted(
+                        ((aid, w) for aid, w in sib2.items()
+                         if w > 0.0 and aid not in cand),
+                        key=lambda x: -x[1])[: TAG_SIBLING_CAP * 4]
+                    _fill(ranked2)
+
+    # ── v3 related 第四腿: 命中集 (A 路 + tag 翼) 经 atom_edge 扩张 —
+    #    kind ∈ related/supersedes/contradicts, w≥0.5, a_id/b_id 双向, 对端
+    #    过 {tc} 时态子句 (as_of 点时语义与文本/向量/tag 腿同口径 — 对抗审查
+    #    major: 硬编码 valid_to IS NULL 会漏入 as_of 后才创建的原子)。
+    #    权重 min(1,w) 并入 tag_wing — 同款 bypass-SCORE_FLOOR + gate B 翼
+    #    通道 (use_gate 时并入同批裁决, gate 败整翼丢弃语义保持)。每 hit 帽
+    #    EDGE_WING_PER_HIT / 总帽 EDGE_WING_CAP。惰性门 if cand and qv —
+    #    与 tag 腿同先例: 无 query 向量 (use_vec 关/embed 败) 不做无相关性
+    #    信号的扩张。
+    if cand and qv:
+        hit_ids = set(cand)
+        eph = ",".join("?" * len(hit_ids))
+        per_hit: dict[int, dict[int, float]] = {}
+        for r in conn.execute(
+            "SELECT a_id, b_id, w FROM atom_edge "
+            "WHERE kind IN ('related','supersedes','contradicts') AND w >= 0.5 "
+            f"AND (a_id IN ({eph}) OR b_id IN ({eph}))",
+            (*hit_ids, *hit_ids)):
+            a, b, w = r["a_id"], r["b_id"], float(r["w"] or 0.0)
+            if a in hit_ids and b in hit_ids:
+                continue  # 双端都已命中, 无增量
+            hit, other = (a, b) if a in hit_ids else (b, a)
+            d = per_hit.setdefault(hit, {})
+            if w > d.get(other, 0.0):  # 多边命中取 max
+                d[other] = w
+        flat = sorted(((h, o, w) for h, d in per_hit.items()
+                       for o, w in d.items()), key=lambda x: -x[2])
+        picked: list[tuple[int, float]] = []
+        seen_o: set[int] = set()
+        n_per_hit: dict[int, int] = {}
+        for h, o, w in flat:
+            if len(picked) >= EDGE_WING_CAP:
+                break
+            if o in seen_o:
+                continue  # 多 hit 共享邻居只占一个帽位 (对抗审查 minor)
+            if n_per_hit.get(h, 0) >= EDGE_WING_PER_HIT:
+                continue
+            picked.append((o, w))
+            seen_o.add(o)
+            n_per_hit[h] = n_per_hit.get(h, 0) + 1
+        if picked:
+            prph = ",".join("?" * len(picked))
+            erows = {r["id"]: r for r in conn.execute(
+                f"SELECT * FROM atom WHERE id IN ({prph}) AND {tc}",
+                (*[o for o, _ in picked], *tp)).fetchall()}
+            for o, w in picked:
+                if o in cand:
+                    continue  # 排除已命中
+                r = erows.get(o)
+                if r is None:
+                    continue  # 对端非 live (supersede 结算等)
+                if cwd and r["source_cwd"] and r["source_cwd"] != cwd:
+                    continue  # ADR-14
+                tag_wing[o] = min(1.0, w)
+                cand[o] = _row_to_atom(r)
+
+    # ── v3 freshness: fact 类按 TTL 时钟年龄半衰 (FRESH_HALF_LIFE_DAYS,
+    #    freshness=0.5**(age/90), 下限 0.25 防 γ 项把 match 命中者拖下噪音地板
+    #    — 对抗审查 major 相关性倒挂), 乘进该 atom 的 LIF/confidence 先验;
+    #    时钟优先 last_seen_at (复现续期, 与 daemon TTL 同口径); judgment/
+    #    experience/summary/preference/event 不衰减; 解析失败跳过。
+    #    MEM_RECALL_FRESH_OFF=1 关。
+    if os.environ.get("MEM_RECALL_FRESH_OFF") != "1":
+        _now = datetime.now(timezone.utc)
+        for atom in cand.values():
+            if atom.get("label") != "fact":
+                continue
+            vf = scoring._parse_iso(atom.get("last_seen_at")) \
+                or scoring._parse_iso(atom.get("valid_from"))
+            if vf is None:
+                continue
+            age_days = max(0.0, (_now - vf).total_seconds() / 86400.0)
+            fresh = max(0.25, 0.5 ** (age_days / FRESH_HALF_LIFE_DAYS))
+            atom["LIF"] = float(atom.get("LIF") or 0.0) * fresh
+            atom["confidence"] = float(atom.get("confidence") or 0.0) * fresh
 
     # ── 打分: 复用 score_fact (centrality=0 — atom 无实体图); tag 翼权重走
     #    bfs_proximity 槽 (BFS_WEIGHT·w×cos 小项, 与 fact 面 BFS 邻近同型)。
@@ -450,10 +598,13 @@ def _recall_atoms(
             bfs_proximity=min(1.0, tag_wing.get(aid, 0.0)),
         ))
 
-    # 噪音地板: tag 翼绕过 (图遍历入场, 与 fact 面 BFS 裁决位同型 — 由 gate 收口)
+    # 噪音地板: tag 翼/边翼/subjects 锚定翼绕过 (图遍历与精确符号命中入场,
+    # 与 fact 面 BFS 裁决位同型 — 由 gate 收口; subjects 无文本命中时 match=0,
+    # 不绕地板则符号型 atom 在缺省地板下永不可达 — 对抗审查 minor)
     floor = SCORE_FLOOR if min_score is None else min_score
     scored = [s for s in scored
-              if s["score"] >= floor or s["fact"]["atom_id"] in tag_wing]
+              if s["score"] >= floor or s["fact"]["atom_id"] in tag_wing
+              or s["fact"]["atom_id"] in subj_wing]
 
     # ── gate (use_gate): 只判 tag 翼 (B 翼)。laya 批判 lane 优先 (锚 =
     #    query token, ≥2 字), 不可用/锚空 → 回落 gate.run_gate; 两者都败 →

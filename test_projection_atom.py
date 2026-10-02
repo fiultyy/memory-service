@@ -16,13 +16,26 @@ import recall as recall_mod
 import store
 
 
-def _atom(conn, text, *, p_dur=0.6, valid_to=None, source_refs=None):
+def _atom(conn, text, *, p_dur=0.6, valid_to=None, source_refs=None,
+          label="fact"):
     cur = conn.execute(
         "INSERT INTO atom(text, label, p_dur, valid_from, valid_to, source_refs) "
-        "VALUES(?, 'fact', ?, '2026-01-01T00:00:00+00:00', ?, ?)",
-        (text, p_dur, valid_to,
+        "VALUES(?, ?, ?, '2026-01-01T00:00:00+00:00', ?, ?)",
+        (text, label, p_dur, valid_to,
          __import__("json").dumps(source_refs) if source_refs else None))
     return cur.lastrowid
+
+
+def _sem_tag(conn, name, atom_ids, w=1.0):
+    """建 semantic tag 并挂载 (v3 聚类键测试速记)。"""
+    cur = conn.execute(
+        "INSERT INTO tag(name, kind, level) VALUES(?, 'semantic', 2)", (name,))
+    tid = cur.lastrowid
+    for aid in atom_ids:
+        conn.execute(
+            "INSERT INTO tag_mount(tag_id, atom_id, w) VALUES(?, ?, ?)",
+            (tid, aid, w))
+    return tid
 
 
 def test_atom_filename_contract():
@@ -136,3 +149,63 @@ def test_synthesis_empty_text_atom_link_resolves(tmp_path):
     assert r["projected"] == 1, r
     text = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
     assert f"]({p.name})" in text, text  # 链接目标 = 实际文件名
+
+
+def test_preference_pinned_section_head(tmp_path, monkeypatch):
+    """v3 常驻口径: preference 原子绕过 MIN_SCORE 地板与全局排序, 钉投影段首
+    「## 常驻口径」小节; 行格式仍原生 (ADR-A, _is_mem_index_line 兼容)。"""
+    db.init(tmp_path / "db.sqlite")
+    conn = db.get_conn()
+    a_pref = _atom(conn, "回复一律用中文", label="preference", p_dur=0.1)  # 低于地板
+    a_fact = _atom(conn, "sqlite-vec 部署用 0.1.9", p_dur=0.9)
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    pf = projection.project_atom_md(
+        {"id": f"atom-{a_pref}", "text": "回复一律用中文"}, mem_dir)
+    ff = projection.project_atom_md(
+        {"id": f"atom-{a_fact}", "text": "sqlite-vec 部署用 0.1.9"}, mem_dir)
+    (mem_dir / "MEMORY.md").write_text("", encoding="utf-8")
+    monkeypatch.setenv("MEM_SYNTH_MIN_SCORE", "0.5")  # 0.1 地板下必被滤 — 偏好豁免
+    r = projection.synthesis_index("/t", mem_dir)
+    assert r["projected"] == 2 and r["deduped"] == 0, r
+    text = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    i_head = lines.index(projection._PIN_SECTION)
+    i_pref = next(i for i, ln in enumerate(lines) if f"]({pf.name})" in ln)
+    i_fact = next(i for i, ln in enumerate(lines) if f"]({ff.name})" in ln)
+    assert i_head < i_pref < i_fact, lines  # 段首小节 → 偏好行 → 普通行
+    assert lines[i_pref] == "- [回复一律用中文](" + pf.name + ") — 回复一律用中文"
+    # 偏好退场后小节标题不残留 (重写清 _PIN_SECTION)
+    conn.execute("UPDATE atom SET valid_to='2026-10-01T00:00:00+00:00' "
+                 f"WHERE id={a_pref}")
+    r2 = projection.synthesis_index("/t", mem_dir)
+    assert r2["projected"] == 1 and r2["orphans"] == 1, r2
+    text2 = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+    assert projection._PIN_SECTION not in text2 and pf.name not in text2
+
+
+def test_tag_clustering_dedup(tmp_path):
+    """v3 聚类键升级: top-1 semantic tag (tag_mount JOIN tag) — 同 tag 不同
+    text 只留 mem_score 最高代表; 无 mount 回退现行为 (各成 solo 不误吞)。"""
+    db.init(tmp_path / "db.sqlite")
+    conn = db.get_conn()
+    a_hi = _atom(conn, "部署结论甲: 用 pip 装 sqlite-vec", p_dur=0.9)
+    a_lo = _atom(conn, "部署结论乙: sqlite-vec 走 pip 渠道", p_dur=0.5)
+    a_solo = _atom(conn, "无关结论: 回归测试走 pytest", p_dur=0.7)
+    _sem_tag(conn, "sqlite-vec 部署", [a_hi, a_lo])  # 近义双原子同挂一 tag
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    names = {}
+    for aid, t in ((a_hi, "部署结论甲: 用 pip 装 sqlite-vec"),
+                   (a_lo, "部署结论乙: sqlite-vec 走 pip 渠道"),
+                   (a_solo, "无关结论: 回归测试走 pytest")):
+        names[aid] = projection.project_atom_md(
+            {"id": f"atom-{aid}", "text": t}, mem_dir).name
+    (mem_dir / "MEMORY.md").write_text("", encoding="utf-8")
+    r = projection.synthesis_index("/t", mem_dir)
+    # 同 tag 双子 → 只留高分 a_hi; a_solo 无 mount 回退 solo 不被吞
+    assert r["projected"] == 2 and r["deduped"] == 1, r
+    text = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+    assert names[a_hi] in text and names[a_lo] not in text, text
+    assert names[a_solo] in text
+    assert (mem_dir / names[a_lo]).exists()  # 非代表文件留存 (prune 语义不变)

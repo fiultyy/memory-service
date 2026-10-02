@@ -252,6 +252,8 @@ recalled_at: {recalled_at or ''}
 # MEMORY 重写时永远删(orphan 行永远删), 保 index 干净。
 _MEM_LINE_NEW_RE = re.compile(r"\]\(mem-[0-9a-f]{4}-.+?\.md\)")
 _MEM_LINE_OLD_MARKER = "(memory/mem-"   # 迁移期旧格式残留, 保留清理
+# v3 常驻口径: preference 原子钉首的小节标题 (重写时一并清, 防空壳累积)
+_PIN_SECTION = "## 常驻口径"
 
 
 def _is_mem_index_line(ln: str) -> bool:
@@ -274,19 +276,39 @@ def _synth_min_score() -> float:
 
 
 def _topic_representatives(facts: list[dict]) -> tuple[list[dict], int]:
-    """主题聚合 (09-01 终裁A方案): topic **精确等值**聚类 — 同 topic 只留
-    ``scoring.mem_score`` 最高代表; 空/空白 topic 各成一组(不互聚)。
+    """主题聚合 (09-01 终裁A方案 + v3 语义键升级): 聚类键 = 原子 **top-1
+    semantic tag_id** (tag_mount JOIN tag, w desc 首个) — 同 tag 只留
+    ``scoring.mem_score`` 最高代表; 无 mount (legacy fact / 未挂 tag 原子)
+    回退现行为: topic 精确等值, 空/空白 topic 各成一组(``solo:{id}`` 不互聚)。
 
-    精确等值: topic 是 LLM 自由文本, 近义/变体不聚(embedding 聚类属后续项,
-    本实现不建 DB 索引不做向量聚类)。入参约定已按 mem_score desc 排序
-    (synthesis_index 步骤 5), 同分 tie 保守取先见者(排序稳定 → 幂等)。
-    返回 ``(代表列表[mem_score desc], 被聚合丢弃数)``; 被聚合掉的 fact 只影响
-    索引行, 其 mem-*.md 文件照旧留存(orphan 判定仍按 KG presence, 不产生假
-    orphan, ``MEM_SYNTH_PRUNE_ORPHANS`` 默认 off 语义不变)。"""
+    语义键: text 是 LLM 自由结论, 精确等值聚不住近义/变体; semantic tag
+    (351 棵生产树) 是现成语义簇。legacy fact 面无 atom_id → 永远走回退键
+    (完整旧行为)。入参约定已按 mem_score desc 排序(synthesis_index 步骤 5),
+    同分 tie 保守取先见者(排序稳定 → 幂等)。返回 ``(代表列表[mem_score
+    desc], 被聚合丢弃数)``; 被聚合掉的 fact 只影响索引行, 其 mem-*.md 文件
+    照旧留存(orphan 判定仍按 KG presence, 不产生假 orphan,
+    ``MEM_SYNTH_PRUNE_ORPHANS`` 默认 off 语义不变)。"""
+    import db
     import scoring
+    # 批量取每原子 top-1 semantic tag (w desc 首见; 与 recall tag 遍历腿同 JOIN 口径)
+    tag_top: dict[int, int] = {}
+    aids = [f["atom_id"] for f in facts if f.get("atom_id") is not None]
+    if aids:
+        ph = ",".join("?" * len(aids))
+        for r in db.get_conn().execute(
+            "SELECT m.atom_id, m.tag_id FROM tag_mount m "
+            "JOIN tag t ON t.id = m.tag_id "
+            f"WHERE t.kind = 'semantic' AND m.atom_id IN ({ph}) "
+            "ORDER BY m.w DESC, m.tag_id", aids,  # tag_id tiebreaker: 等w跨轮翻转防 (幂等)
+        ):
+            tag_top.setdefault(r["atom_id"], r["tag_id"])
     best: dict[str, dict] = {}
     for f in facts:
-        key = (f.get("topic") or "").strip() or f"\x00solo:{f.get('id')}"
+        tid = tag_top.get(f.get("atom_id"))
+        if tid is not None:
+            key = f"tag:{tid}"
+        else:  # 无 mount 回退现行为: text 精确等值 / solo
+            key = (f.get("topic") or "").strip() or f"\x00solo:{f.get('id')}"
         cur = best.get(key)
         if cur is None or scoring.mem_score(f) > scoring.mem_score(cur):
             best[key] = f
@@ -426,26 +448,35 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
     facts.sort(key=lambda f: scoring.mem_score(f), reverse=True)
 
     # 5.5 主题聚合投影 (09-01 终裁A方案: 08-27 红线取消, SessionStart 单点恢复
-    # 投影): MEM_SYNTH_MIN_SCORE 地板先滤「无用/无关」(缺省 0 = 不过滤), 再同
-    # topic 精确等值聚类只留 mem_score 最高代表。deduped = 地板滤 + 聚合丢弃
-    # 合计(不投影的 present fact 数)。非代表的 mem-*.md 文件留存(下次扫描重聚,
-    # 幂等); orphan 判定按 KG presence 不变, 聚合不产生假 orphan。
+    # 投影): MEM_SYNTH_MIN_SCORE 地板先滤「无用/无关」(缺省 0 = 不过滤), 再
+    # _topic_representatives 语义 tag 聚类只留 mem_score 最高代表。deduped =
+    # 地板滤 + 聚合丢弃合计(不投影的 present fact 数)。非代表的 mem-*.md 文件
+    # 留存(下次扫描重聚, 幂等); orphan 判定按 KG presence 不变, 聚合不产生假
+    # orphan。
+    # v3 常驻口径: label='preference' 原子绕过 MIN_SCORE 地板与全局排序, 固定
+    # 钉投影段首「## 常驻口径」小节(行格式仍原生, _is_mem_index_line 口径兼容)。
+    # prefs 跳过 _topic_representatives — 偏好是互补条目不是同结论的近义变体,
+    # 语义聚类会互相吞并 (对抗审查 major: 「回复用中文」吞「代码注释也用中文」),
+    # 且偏好量小逐条常驻, 无聚合收益。
     deduped = 0
+    prefs = [f for f in facts if f.get("label") == "preference"]
+    rest = [f for f in facts if f.get("label") != "preference"]
     floor = _synth_min_score()
     if floor > 0.0:
-        kept = [f for f in facts if scoring.mem_score(f) >= floor]
-        deduped += len(facts) - len(kept)
-        facts = kept
-    facts, agg_dropped = _topic_representatives(facts)
-    deduped += agg_dropped
+        kept = [f for f in rest if scoring.mem_score(f) >= floor]
+        deduped += len(rest) - len(kept)
+        rest = kept
+    rest, agg_r = _topic_representatives(rest)
+    deduped += agg_r
 
     # 6. 对账写 MEMORY.md: 删 orphan/旧投影行(永远删), append 本次 present(原生格式, 已排序)。
-    new_lines = [
+    new_lines = ["## 常驻口径"] if prefs else []
+    new_lines += [
         _format_mem_line(
             f,
             ent_names.get(f["subject_id"], "?"),
         )
-        for f in facts
+        for f in [*prefs, *rest]
     ]
     _rewrite_mem_lines(memory_md, new_lines)
 
@@ -464,7 +495,7 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
             pruned += 1
 
     return {
-        "projected": len(facts),
+        "projected": len(prefs) + len(rest),
         "deduped": deduped,
         "orphans": len(orphan_ids),
         "pruned": pruned,
@@ -494,9 +525,23 @@ def _format_mem_line(fact: dict, subj_name: str) -> str:
 
 def _rewrite_mem_lines(memory_md: Path, new_lines: list[str]) -> None:
     """删 MEMORY.md 中所有投影索引行(新 ``](mem-`` / 旧 ``(memory/mem-``, orphan/旧格式永远删),
-    保 CC 原生行(非投影), append new_lines。幂等(每次重写 = 本次精确集合)。"""
+    保 CC 原生行(非投影), append new_lines。幂等(每次重写 = 本次精确集合)。
+    v3: 「## 常驻口径」小节标题仅在 prefs 非空的同轮删 (它是本轮刚写的,
+    由下方 append 重建); 空轮不按标题内容删任意行 — 用户手写同名小节
+    不误删 (对抗审查 minor)。"""
     existing = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
-    out = [ln for ln in existing.splitlines() if not _is_mem_index_line(ln)]
+    # 标题删除判定: _PIN_SECTION 行的下一个非空行是投影索引行 → 是我们写的
+    # 小节 (本轮索引行已删空) → 删标题; 否则是用户手写同名小节 → 保
+    # (对抗审查 minor: 不按标题内容删任意行)。
+    lns = existing.splitlines()
+    drop: set[int] = set()
+    for i, ln in enumerate(lns):
+        if ln == _PIN_SECTION:
+            nxt = next((x for x in lns[i + 1:] if x.strip()), "")
+            if _is_mem_index_line(nxt):
+                drop.add(i)
+    out = [ln for i, ln in enumerate(lns)
+           if not _is_mem_index_line(ln) and i not in drop]
     out.extend(new_lines)
     memory_md.write_text("\n".join(out) + "\n", encoding="utf-8")
 

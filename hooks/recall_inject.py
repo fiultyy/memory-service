@@ -207,6 +207,66 @@ def _count_user_turns(path: str | None, limit: int) -> int | None:
         return None
 
 
+_LANE_MAX_BYTES = 400  # 两确定性 lane 合计帽 (~400B, 超则截行)
+
+
+def _det_lanes() -> list[str]:
+    """确定性 lane (v3, 纯 SQL 零 LLM): 偏好 + 近期日程 — 先于锚定门注入。
+
+    - preference lane: 存活 preference 原子按 p_dur 取 top3。
+    - event lane: 存活 event 原子的 event_at 落 now-7d ~ now+21d 窗内才留
+      (event_at 是 ISO 或原文短语 — 解析失败/非 ISO 的行跳过, 不猜),
+      按距 now 最近取 top3。
+    行前缀「偏好:」/「日程:」, 两 lane 合计 ~400B 帽 (超则截行); 任何异常 →
+    [] (lane 失败不挡锚定召回, 与注入器整体 fail-open 契约一致)。"""
+    try:
+        from datetime import datetime, timedelta
+        import db
+        conn = db.get_conn()
+        lines: list[str] = []
+        for r in conn.execute(
+            "SELECT text FROM atom WHERE label='preference' AND valid_to IS NULL "
+            "ORDER BY p_dur DESC LIMIT 3"
+        ):
+            t = (r["text"] or "").strip()
+            if t:
+                lines.append(f"偏好: {t}")
+        now = datetime.now().astimezone()
+        lo, hi = now - timedelta(days=7), now + timedelta(days=21)
+        evs = []
+        for r in conn.execute(
+            "SELECT text, event_at FROM atom WHERE label='event' AND valid_to "
+            "IS NULL AND event_at IS NOT NULL"
+        ):
+            t = (r["text"] or "").strip()
+            raw = (r["event_at"] or "").strip()
+            if not t or not raw:
+                continue
+            try:
+                dt = datetime.fromisoformat(raw)
+            except ValueError:
+                continue  # 原文短语/非 ISO → 不猜, 跳行
+            if dt.tzinfo is None:
+                dt = dt.astimezone()  # naive 按本地时区解读
+            if not (lo <= dt <= hi):
+                continue  # 窗外 (now-7d ~ now+21d) 事件不注入
+            evs.append((abs(dt - now), t, raw))
+        evs.sort(key=lambda x: x[0])  # 距 now 最近优先
+        for _, t, raw in evs[:3]:
+            lines.append(f"日程: {t} — {raw}")
+        out: list[str] = []
+        budget = _LANE_MAX_BYTES
+        for ln in lines:
+            n = len(ln.encode("utf-8"))
+            if budget - n < 0:
+                break  # 总量帽超 → 截行
+            out.append(ln)
+            budget -= n
+        return out
+    except Exception:
+        return []  # lane 是增强的增强, 任何失败静默降级为空
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -264,6 +324,9 @@ def main() -> int:
         cand_k = max(cand_k, first_topk)
 
     query = prompt[:query_chars]
+    # v3 确定性 lane (偏好/近期日程): 先于锚定门 — lane 有货时无锚定实体也注入
+    # (首 turn 常驻口径), 与锚定召回同包 <memsvc-recall> (回声闸整块覆盖)。
+    lane_lines = _det_lanes()
     try:
         import cli  # noqa: F401 — module import 即 _load_env() (.env → ZHIPU 等)
         import recall as recall_mod
@@ -290,8 +353,8 @@ def main() -> int:
                 return None
             return next((n for n in anchor_names if n.lower() in t), None)
 
-        if not anchor_ids:
-            return 0  # prompt 未指名任何已知实体 → 无可注入, 跳过整个 recall
+        if not anchor_ids and not lane_lines:
+            return 0  # 未指名实体且无 lane → 无可注入, 跳过整个 recall
         # boost=False + 大候选窗: 稀释使被指名实体的关键 fact (~0.15) 排不进
         # 小 top_k; recall 内建 boost 会对**返回的全部**候选记 LIF 账 (污染
         # — 未注入不该强化)。这里纯读大窗, 记账只对最终注入的 ≤top_k 条做。
@@ -308,7 +371,9 @@ def main() -> int:
                     recall_kw["gate_account"] = True  # F1 b) 授权一行: 首轮档 keep 入 N2 账
             except (TypeError, ValueError):
                 pass
-        result = cli.recall(query, **recall_kw)
+        # v3: 无锚定实体 → 锚定召回整段跳过 (旧: 早退), lane 有货仍纯 lane 注入
+        result = cli.recall(query, **recall_kw) if anchor_ids \
+            else {"results": []}
     except Exception as exc:  # 召回失败 → 零注入 + 记日志 (不降级, 不挡路)
         _log_fail(f"recall-fail: {type(exc).__name__}: {exc}")
         return 0
@@ -346,7 +411,7 @@ def main() -> int:
         hits.append(r)
         if len(hits) >= top_k:
             break
-    if not hits:
+    if not hits and not lane_lines:
         return 0
 
     # v1.7 E9/⑤a 注入端统一分账: 凡注入皆记 recall_sessions (记忆被使用过,
@@ -384,9 +449,10 @@ def main() -> int:
     # 显式声明其未经主径 LLM 验证 — 全降级块打 quality="fallback" + 块顶
     # 警示; 混合块在每条 fallback 条目前插警示行。
     _FALLBACK_WARN = "产生于降级通道、未经主径 LLM 验证，需自行判断召回准确性"
-    all_fallback = all(
+    # v3: lane 行 (确定性 SQL 产物) 不参与 fallback 判定 — 纯 lane 块零警示
+    all_fallback = bool(hits) and all(
         scoring.fact_is_fallback((r.get("fact") or {})) for r in hits)
-    lines = [f"## Memory recall (auto, {len(hits)} hits)"]
+    lines = [""]   # 头行占位 — 计数须按预算后实际 emitted 行数 (对抗审查 minor)
     if all_fallback:
         lines.append(f"[warning] 以下各条均{_FALLBACK_WARN}")
     # 预算含 <memsvc-recall> 包裹开销 (ASCII, 全降级块含 quality 属性)
@@ -394,6 +460,16 @@ def main() -> int:
                 else "<memsvc-recall>")
     budget = max_bytes - (len(open_tag) + len("\n\n</memsvc-recall>"))
     emitted = 0
+    lane_emitted = 0
+    # v3 lane 行先入 (偏好/日程钉块首; 自身 ~400B 帽已在 _det_lanes 截行)
+    for ln in lane_lines:
+        n = len(ln.encode("utf-8"))
+        if budget - n < 0:
+            break
+        lines.append(ln)
+        budget -= n
+        emitted += 1
+        lane_emitted += 1
     for r in hits:
         f = r.get("fact") or {}
         tag = r.get("tag") or {}
@@ -417,6 +493,8 @@ def main() -> int:
         emitted += 1
     if emitted == 0:
         return 0  # 预算内一条都放不下 → 零输出
+    n_hits_emitted = emitted - lane_emitted
+    lines[0] = f"## Memory recall (auto, {n_hits_emitted + lane_emitted} hits)"
 
     # 出端打标 (2026-08-28 闭环): <memsvc-recall> 为 memsvc 自有中性标签 —
     # 非 harness 保留语法, cc/dsh/pi 解析器原样透传 (零适配器), 活会话 LLM

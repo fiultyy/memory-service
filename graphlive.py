@@ -118,7 +118,7 @@ def snapshot(cwd: str | None = None) -> dict:
         "(SELECT COALESCE(MAX(rowid),0) FROM atom_edge) f").fetchone()
     nodes = _entity_nodes({i for i, d in deg.items() if d > 0}, deg)
     comm = _communities(edges)
-    tags, mounts = _tag_bipartite({int(n["id"]) for n in nodes})
+    tags, mounts, clusters = _tag_bipartite({int(n["id"]) for n in nodes}, edges)
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "cwd": cwd,
@@ -128,6 +128,7 @@ def snapshot(cwd: str | None = None) -> dict:
         "comm": comm,
         "tags": tags,
         "mounts": mounts,
+        "clusters": clusters,
     }
 
 
@@ -164,25 +165,75 @@ def _communities(edges: list[dict]) -> dict[str, int]:
     return out
 
 
-def _tag_bipartite(live_ids: set[int]) -> tuple[list[dict], list[dict]]:
-    """semantic tag 旁挂面: tags=[{id,name,mounts}] + mounts=[{atom,tag,w}]。
+def _tag_bipartite(live_ids: set[int],
+                   edges: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """semantic tag 旁挂面: tags + mounts(带 atom 生时, 时间窗可用) + clusters。
 
     只收 semantic (factual session:/repo: 是来源标记非主题聚合, 画进来只会
-    炸成几千个 session 枢纽); atom 侧只收快照内 live 原子。"""
+    炸成几千个 session 枢纽); atom 侧只收快照内 live 原子。
+    生产 tag 几乎全 L1 (parent_id 仅 29/191) → 二级聚合自动生成
+    (见 _tag_clusters: 原子边连通 louvain)。"""
     import db
     rows = db.get_conn().execute(
-        "SELECT m.atom_id, m.tag_id, m.w, t.name FROM tag_mount m "
-        "JOIN tag t ON t.id = m.tag_id WHERE t.kind = 'semantic' "
-        "ORDER BY m.tag_id, m.atom_id").fetchall()
-    mounts = [{"atom": str(r["atom_id"]), "tag": r["tag_id"],
-               "w": r["w"]} for r in rows if r["atom_id"] in live_ids]
-    cnt: dict[int, int] = {}
+        "SELECT m.atom_id, m.tag_id, m.w, t.name, a.valid_from FROM tag_mount m "
+        "JOIN tag t ON t.id = m.tag_id JOIN atom a ON a.id = m.atom_id "
+        "WHERE t.kind = 'semantic' ORDER BY m.tag_id, m.atom_id").fetchall()
+    mounts = [{"atom": str(r["atom_id"]), "tag": r["tag_id"], "w": r["w"],
+               "ts": r["valid_from"]} for r in rows if r["atom_id"] in live_ids]
+    by_tag: dict[int, list[dict]] = {}
     for m in mounts:
-        cnt[m["tag"]] = cnt.get(m["tag"], 0) + 1
+        by_tag.setdefault(m["tag"], []).append(m)
     names = {r["tag_id"]: r["name"] for r in rows}
-    tags = [{"id": t, "name": names.get(t, "?"), "mounts": c}
-            for t, c in sorted(cnt.items(), key=lambda x: -x[1])]
-    return tags, mounts
+    tags = [{"id": t, "name": names.get(t, "?"), "mounts": len(ms),
+             "t0": min((m["ts"] for m in ms if m["ts"]), default=None),
+             "t1": max((m["ts"] for m in ms if m["ts"]), default=None)}
+            for t, ms in by_tag.items()]
+    tags.sort(key=lambda t: -t["mounts"])
+    clusters = _tag_clusters(by_tag, edges)
+    return tags, mounts, clusters
+
+
+def _tag_clusters(by_tag: dict[int, list[dict]], edges: list[dict]) -> list[dict]:
+    """tag 二级聚簇: 生产实测语义 tag 零共挂载 (挂载互斥) → 共挂载聚不了类。
+
+    改走原子边连通: tag 图上 tag-t↔tag-u 权重 = Σ 跨两 tag 原子集的
+    atom_edge.w, 对 40 节点 tag 图跑 louvain。单例簇照收 (树不强行凑)。"""
+    try:
+        import networkx as nx
+        from networkx.algorithms import community as nx_comm
+    except ImportError:
+        return []
+    tag_of: dict[str, int] = {}
+    for t, ms in by_tag.items():
+        for m in ms:
+            tag_of[m["atom"]] = t
+    g = nx.Graph()
+    for e in edges:
+        ta, tb = tag_of.get(str(e["subject_id"])), tag_of.get(str(e["object_id"]))
+        if ta is None or tb is None or ta == tb:
+            continue
+        a, b = min(ta, tb), max(ta, tb)
+        if g.has_edge(a, b):
+            g[a][b]["weight"] += e["value"]
+        else:
+            g.add_edge(a, b, weight=e["value"])
+    if not g.number_of_edges():
+        return [{"id": i, "members": [t], "atoms": len(ms)}
+                for i, (t, ms) in enumerate(sorted(by_tag.items(),
+                                                   key=lambda x: -len(x[1])))]
+    try:
+        parts = nx_comm.louvain_communities(g, weight="weight", seed=42)
+    except Exception:  # noqa: BLE001 — 老 nx / 收敛异常 → 单例退化
+        return [{"id": i, "members": [t], "atoms": len(ms)}
+                for i, (t, ms) in enumerate(sorted(by_tag.items(),
+                                                   key=lambda x: -len(x[1])))]
+    out = []
+    for part in parts:
+        members = sorted(part, key=lambda t: -len(by_tag[t]))
+        out.append({"members": members,
+                    "atoms": len({m["atom"] for t in part for m in by_tag[t]})})
+    out.sort(key=lambda c: -c["atoms"])
+    return [{"id": i, **c} for i, c in enumerate(out)]
 
 
 def delta(after_entity: int, after_fact: int) -> dict:

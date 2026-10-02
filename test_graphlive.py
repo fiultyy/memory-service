@@ -174,6 +174,32 @@ def test_snapshot_comm_empty_on_isolated():
     assert snap["comm"] == {} and snap["tags"] == []
 
 
+def test_snapshot_clusters_atom_edge_bridging():
+    """二级聚簇走原子边连通: 跨 tag 原子有边 → tag 相邻 → louvain 同簇。"""
+    _fresh("clu.db")
+    a, b, c = _seed_triangle()               # a(t1) — b(t2) 相连
+    t1, t2, t3, t4, t5 = (_tag("主题甲"), _tag("主题乙"), _tag("孤岛"),
+                          _tag("远组一"), _tag("远组二"))
+    _mount(t1, a)
+    _mount(t2, b)
+    _mount(t3, c)
+    d, e = _atom("远结论一"), _atom("远结论二")
+    _edge(d, e)                              # 独立二元组 → 另一簇
+    _mount(t4, d)
+    _mount(t5, e)
+    snap = graphlive.snapshot()
+    tn = {t["id"]: t["name"] for t in snap["tags"]}
+    assert tn[t1] == "主题甲"
+    # mounts 带时间 (时间窗 slider 依赖)
+    assert all("ts" in m for m in snap["mounts"]) and snap["mounts"][0]["ts"]
+    assert all("members" in c and "atoms" in c for c in snap["clusters"])
+    def cluster_of(t):
+        return next((c["id"] for c in snap["clusters"] if t in c["members"]), None)
+    assert cluster_of(t1) == cluster_of(t2), "a-b 边应把 t1/t2 桥进同簇"
+    assert cluster_of(t4) == cluster_of(t5)
+    assert cluster_of(t1) != cluster_of(t4), "无跨边的两组不应同簇"
+
+
 # ── 导出 ─────────────────────────────────────────────────────────────
 
 def test_export_csv_and_json():

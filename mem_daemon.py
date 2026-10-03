@@ -328,18 +328,18 @@ _INFLIGHT: dict[tuple[str, str], concurrent.futures.Future] = {}
 _DAEMON_DB: str | None = None
 
 
-def _distill_segment_hard(distill_mod, seg_text: str, session_id: str,
-                          cwd: str, ts: str,
-                          inflight_key: tuple[str, str] | None = None) -> dict:
-    """线程池 + 硬超时执行 ``distill.distill_segment`` (H0: 不阻塞主循环)。
+def _distill_segment_hard(fn, inflight_key: tuple[str, str] | None = None) -> dict:
+    """线程池 + 硬超时执行段消费 callable (H0: 不阻塞主循环)。
 
     线程不可强杀 — 超时后 ``shutdown(wait=False)`` 并重建线程池, 使后续段
     不排在僵尸调用之后 (daemon 不被单调用饿死); 僵尸线程由 provider 自带
     socket 超时兜底自行退出。callable 异常原样透传 (LayaUnavailable 语义
-    由调用方裁决)。超时的 future 经 ``inflight_key`` 登记 _INFLIGHT (M1)。"""
+    由调用方裁决)。超时的 future 经 ``inflight_key`` 登记 _INFLIGHT (M1)。
+
+    (批次2 2026-10-03: 入参从 distill_segment 固定签名通用化为零参 callable —
+    v2 句级车道与 v4 语义切分车道共用超时/在途/attempt 语义。)"""
     global _DISTILL_POOL
-    fut = _DISTILL_POOL.submit(distill_mod.distill_segment, seg_text,
-                               session_id, cwd, ts)
+    fut = _DISTILL_POOL.submit(fn)
     try:
         return fut.result(timeout=SEGMENT_HARD_TIMEOUT)
     except concurrent.futures.TimeoutError:
@@ -349,6 +349,41 @@ def _distill_segment_hard(distill_mod, seg_text: str, session_id: str,
         _DISTILL_POOL = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="mem-distill")
         raise
+
+
+def _v4_segment(distill_mod, seg_text: str, wm_sha: str,
+                session_id: str, cwd: str, ts: str) -> dict:
+    """v4 transcript 车道 (批次2): 轮段 → 语义切分 → 逐 chunk distill_chunk
+    → 段水位落库。
+
+    段水位 ``wm_sha`` (``chunk-seg:`` 前缀) 在**全部 chunk 成功后**落
+    distill_seen — PreCompact 每次快照文件名含内容哈希 (新内容 → 新名,
+    offset state 按文件键失效), 重放靠段水位零 LLM 跳过 (缝扫描本身是
+    LLM 调用, 无水位则每次快照重跑切分)。中途挂起水位不落 — 下轮重跑
+    缝扫描 (chunk 级 sha 兜底零重复入图, 挂起异常态的重复成本可接受)。
+    ``ChunkerUnavailable`` 翻译为 ``LayaUnavailable`` — daemon 挂起 lane
+    (offset 停 ack / 不计 attempts / spool 积压持有) 复用, 不走毒段 DLQ。"""
+    try:
+        import semantic_chunk
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+        import semantic_chunk
+    try:
+        chunks = semantic_chunk.semantic_chunks(seg_text)
+    except semantic_chunk.ChunkerUnavailable as exc:
+        raise distill_mod.LayaUnavailable(f"chunker unavailable: {exc}")
+    totals = {"atoms": 0, "edges": 0, "merged": 0}
+    for ch in chunks:
+        r = distill_mod.distill_chunk(ch["text"], ch["gist"],
+                                      session_id, cwd, ts)
+        for k in totals:
+            totals[k] += r.get(k, 0)
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO distill_seen(sha, status, created_at) "
+        "VALUES(?, 'ok', ?)", (wm_sha, ts))
+    conn.commit()
+    return totals
 
 
 def _spool_recover_locks(spool: Path) -> None:
@@ -442,10 +477,21 @@ def _sweep_spool(state: dict, cwd: str, spool_dir: Path | None = None) -> dict:
             if _sha_seen(sha):    # 跨文件/跨重放已见 → 零 LLM 跳过
                 ack = offset + seg_end     # m1: seg_end 是本轮相对值, ack 须绝对
                 continue
+            # v4 车道 (批次2): 段水位 (chunk-seg: 前缀) 已见 → 缝扫描零 LLM
+            # 跳过 (重放免疫; conftest 钉 MEM_SEMANTIC_CHUNK=0 保旧面 hermetic)
+            v4 = os.environ.get("MEM_SEMANTIC_CHUNK", "1") != "0"
+            wm_sha = "chunk-seg:" + sha
+            if v4 and _sha_seen(wm_sha):
+                ack = offset + seg_end
+                continue
+            if v4:
+                fn = lambda: _v4_segment(distill_mod, seg_text, wm_sha,  # noqa: E731
+                                          session_id, seg_cwd, ts)
+            else:
+                fn = lambda: distill_mod.distill_segment(seg_text,  # noqa: E731
+                                                         session_id, seg_cwd, ts)
             try:
-                res = _distill_segment_hard(distill_mod, seg_text,
-                                            session_id, seg_cwd, ts,
-                                            inflight_key=ikey)
+                res = _distill_segment_hard(fn, inflight_key=ikey)
             except distill_mod.LayaUnavailable:
                 outcome = "suspend"
                 _log(f"laya 不可用: {jf.name} 段 sha={sha[:12]} 挂起, "

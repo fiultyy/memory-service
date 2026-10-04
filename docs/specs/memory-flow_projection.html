@@ -5185,7 +5185,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="255.70000000000002" y="150" width="84.8" height="16" rx="3" class="c-mask"/>
           <text x="298.1" y="160" class="t-backend" font-size="9" text-anchor="middle">① 开局自动投影</text>
         </g>
-        <text data-detail="fine" x="148.5" y="188" class="t-dim" font-size="7">09-01 终裁A: SessionStart 是 MEMORY.md 投影单点; PreCompact 只入库不投影防双写</text>
+        <text data-detail="fine" x="148.5" y="188" class="t-dim" font-size="7">对账非召回: 扫既有散件 fact_id → KG 取现值 → 重写 MEMORY.md; 冷启动不兜底 (grill 裁决)</text>
         </g>
 
         <g data-edge-from="rc" data-edge-to="proj" data-edge-label="② recall --project" data-edge-key="1" data-edge-id="p2">
@@ -5194,7 +5194,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="329.59999999999997" y="190" width="105.60000000000001" height="16" rx="3" class="c-mask"/>
           <text x="382.4" y="200" class="t-backend" font-size="9" text-anchor="middle">② recall --project</text>
         </g>
-        <text data-detail="fine" x="317.1" y="228" class="t-dim" font-size="7">主动面: 同一次召回顺带投影; M18 recall-&lt;DATE&gt;.md+索引行; 空命中不投影</text>
+        <text data-detail="fine" x="317.1" y="228" class="t-dim" font-size="7">唯一散件生产者: 命中非空即写 (机械落盘, 无投影专属 gate); 空命中不投影</text>
         </g>
 
         <g data-edge-from="proj" data-edge-to="memdir" data-edge-label="③ 散件写" data-edge-key="2" data-edge-id="p3">

@@ -718,6 +718,102 @@ def _count_dsh_user_turns(path, limit: int) -> int:
 
 
 
+# ── spool 快照段级切分 (自 mem_daemon._spool_segments/_line_ts 搬家, S7) ──
+
+_SNAPSHOT_USER_CTX_MAX = 1200  # 段内用户原话上下文字符帽 (旧 --scenes 同口径)
+
+
+def _line_ts(d: dict, default_ts: str) -> str:
+    """行内时戳透传 (CC ``timestamp`` / dsh ``ts``), 无则回退文件 mtime。"""
+    for k in ("timestamp", "ts"):
+        v = d.get(k)
+        if isinstance(v, str) and v:
+            return v
+    return default_ts
+
+
+def segments_from_snapshot(lines, default_ts: str, default_cwd: str,
+                           dsh: bool | None = None):
+    """transcript 快照行 → ``(段文本, 段尾字节偏移, ts, cwd)`` 列表 (段级切分)。
+
+    判型 ``dsh``: 显式传参优先 (daemon 消费端 .harness sidecar 真值);
+    None → 内容嗅探兜底 (``_looks_like_dsh`` 形, 兼容无 sidecar 旧快照)。
+    - CC: user 文本累积, ``assistant`` 且 ``stop_reason=end_turn`` 收段;
+    - dsh: ``user/message`` 累积 + ``turn/end reason=completed`` 收段
+      (delegationDepth>0 侧链整文件排除)。
+    段文本 = ``[用户] …\n[助手] …``; 纯用户尾部不收段。偏移按行字节累计。
+    M5 段级 cwd: CC 行内顶层 ``cwd`` 字段 → 段取收段前最后见到的; 无 →
+    ``default_cwd`` 兜底。
+    """
+    import endsteps
+    out: list[tuple[str, int, str, str]] = []
+    user_buf: list[str] = []
+    sidechain = False
+    last_assistant = None
+    last_assistant_ts = default_ts
+    cur_cwd = default_cwd
+    if dsh is None:
+        dsh = endsteps._looks_like_dsh(lines)
+
+    def _close(atxt: str, ts: str, end_pos: int) -> None:
+        uctx = "\n".join(user_buf)[-_SNAPSHOT_USER_CTX_MAX:]
+        seg = (f"[用户] {uctx}\n" if uctx else "") + f"[助手] {atxt}"
+        out.append((seg, end_pos, ts, cur_cwd))
+        user_buf.clear()
+
+    pos = 0
+    for line in lines:
+        pos += len(line.encode("utf-8")) + 1     # +1 = 换行符
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue                              # 坏行静默跳 (尾部半行常见)
+        if not isinstance(d, dict):
+            continue
+        c = d.get("cwd")
+        if isinstance(c, str) and c.startswith("/"):
+            cur_cwd = c                           # M5: 行内真实 cwd (CC 常带)
+        if dsh:
+            t = d.get("type")
+            if t == "session":
+                sidechain = bool(d.get("delegationDepth", 0))
+            elif t == "user/message":
+                txt = _texts_of(((d.get("data") or {}).get("message") or {})
+                                .get("content"))
+                if txt:
+                    user_buf.append(txt)
+            elif t == "assistant/message":
+                txt = _texts_of(((d.get("data") or {}).get("message") or {})
+                                .get("content"))
+                if txt:
+                    last_assistant = txt
+                    last_assistant_ts = _line_ts(d, default_ts)
+            elif t == "turn/end":
+                reason = (d.get("data") or {}).get("reason") or {}
+                if isinstance(reason, dict):      # 容错裸串/异形 (B1-P2 同款)
+                    reason = reason.get("kind")
+                if reason == "completed" and last_assistant:
+                    _close(last_assistant, last_assistant_ts, pos)
+                last_assistant = None
+        else:
+            if d.get("isSidechain"):
+                continue
+            msg = d.get("message") or {}
+            t = d.get("type")
+            if t == "user":
+                txt = _texts_of(msg.get("content"))
+                if txt:
+                    user_buf.append(txt)
+            elif t == "assistant" and msg.get("stop_reason") == "end_turn":
+                txt = _texts_of(msg.get("content"))
+                if txt:
+                    _close(txt, _line_ts(d, default_ts), pos)
+    if sidechain:
+        return []
+    return out
+
+
+
 if __name__ == "__main__":  # 手动诊断: python3 transcripts.py <cwd> [harness]
     _cwd = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
     _h = sys.argv[2] if len(sys.argv) > 2 else "cc"

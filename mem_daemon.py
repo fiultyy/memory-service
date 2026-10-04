@@ -153,8 +153,10 @@ def _extract_new_lines(path: Path, last_offset: int) -> tuple[str, int]:
 
 
 def _transcript_dir(cwd: str) -> Path:
-    """Resolve the CC projects subdir for a given cwd."""
-    return PROJECTS_ROOT / _encode_cwd(cwd)
+    """(S7 归一 2026-10-04) cc transcript 目录走 harness.SPECS 单源 —
+    cwd 编码三拷贝 (daemon/_cc_project_dir/cc_memory_dir) 中的 daemon 份退场。"""
+    import harness as _h
+    return _h.SPECS["cc"].project_dir(cwd)
 
 
 # ── H1: spool 第二 watch 源 (段级消费, spec v2 §二) ─────────────────
@@ -218,99 +220,25 @@ def _spool_session(jf: Path) -> str:
     return session or "unknown"
 
 
+def _spool_harness(jf: Path) -> str | None:
+    """.harness sidecar (快照端写的真值) 读 harness 名; 缺失/空 → None。"""
+    try:
+        return jf.with_name(jf.name + ".harness").read_text("utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def _line_ts(d: dict, default_ts: str) -> str:
-    """行内时戳透传 (CC ``timestamp`` / dsh ``ts``), 无则回退文件 mtime。"""
-    for k in ("timestamp", "ts"):
-        v = d.get(k)
-        if isinstance(v, str) and v:
-            return v
-    return default_ts
+    """(S7 搬家) 实现在 transcripts._line_ts — 薄委托保符号。"""
+    import transcripts as _t
+    return _t._line_ts(d, default_ts)
 
 
-def _spool_segments(lines: list[str], default_ts: str,
-                    default_cwd: str) -> list[tuple[str, int, str, str]]:
-    """transcript 快照行 → ``(段文本, 段尾字节偏移, ts, cwd)`` 列表 (段级切分)。
-
-    双格式自动识别 (``endsteps._looks_like_dsh``):
-    - CC: user 文本累积, ``assistant`` 且 ``stop_reason=end_turn`` 收段
-      (endsteps 同判据; isSidechain 侧链行排除);
-    - dsh: ``user/message`` 累积 + ``turn/end reason=completed`` 收段
-      (delegationDepth>0 侧链整文件排除, transcripts 同口径)。
-    段文本 = ``[用户] …\\n[助手] …`` (用户上下文截尾 ≤ _USER_CTX_MAX);
-    纯用户尾部无 assistant 结论不收段 — 零段 = 快照消费成功 (旧 worker
-    「空蒸馏即成功删文件」同语义)。偏移按行字节累计, 段边界即行边界。
-
-    M5 段级 cwd: CC transcript 行内带顶层 ``cwd`` 字段 → 每段取收段前最后
-    见到的行内 cwd (repo: tag 铸币用真实工作目录, 不再误铸 daemon 启动
-    目录); 无行内 cwd (dsh 事件流 / 旧行) → ``default_cwd`` 兜底 (watch
-    目录; .harness sidecar 只记 harness 名不含路径)。
-    """
-    import endsteps                       # 延迟 import (daemon 启动零副作用)
-    from transcripts import _texts_of
-    out: list[tuple[str, int, str, str]] = []
-    user_buf: list[str] = []
-    sidechain = False
-    last_assistant: str | None = None
-    last_assistant_ts = default_ts
-    cur_cwd = default_cwd
-    dsh = endsteps._looks_like_dsh(lines)
-
-    def _close(atxt: str, ts: str, end_pos: int) -> None:
-        uctx = "\n".join(user_buf)[-_USER_CTX_MAX:]
-        seg = (f"[用户] {uctx}\n" if uctx else "") + f"[助手] {atxt}"
-        out.append((seg, end_pos, ts, cur_cwd))
-        user_buf.clear()
-
-    pos = 0
-    for line in lines:
-        pos += len(line.encode("utf-8")) + 1     # +1 = 换行符
-        try:
-            d = json.loads(line)
-        except Exception:
-            continue                              # 坏行静默跳过 (尾部半行常见)
-        if not isinstance(d, dict):
-            continue
-        c = d.get("cwd")
-        if isinstance(c, str) and c.startswith("/"):
-            cur_cwd = c                           # M5: 行内真实 cwd (CC 常带)
-        if dsh:
-            t = d.get("type")
-            if t == "session":
-                sidechain = bool(d.get("delegationDepth", 0))
-            elif t == "user/message":
-                txt = _texts_of(((d.get("data") or {}).get("message") or {})
-                                .get("content"))
-                if txt:
-                    user_buf.append(txt)
-            elif t == "assistant/message":
-                txt = _texts_of(((d.get("data") or {}).get("message") or {})
-                                .get("content"))
-                if txt:
-                    last_assistant = txt
-                    last_assistant_ts = _line_ts(d, default_ts)
-            elif t == "turn/end":
-                reason = (d.get("data") or {}).get("reason") or {}
-                if isinstance(reason, dict):      # 容错裸串/异形 (B1-P2 同款)
-                    reason = reason.get("kind")
-                if reason == "completed" and last_assistant:
-                    _close(last_assistant, last_assistant_ts, pos)
-                last_assistant = None
-        else:
-            if d.get("isSidechain"):
-                continue
-            msg = d.get("message") or {}
-            t = d.get("type")
-            if t == "user":
-                txt = _texts_of(msg.get("content"))
-                if txt:
-                    user_buf.append(txt)
-            elif t == "assistant" and msg.get("stop_reason") == "end_turn":
-                txt = _texts_of(msg.get("content"))
-                if txt:
-                    _close(txt, _line_ts(d, default_ts), pos)
-    if sidechain:
-        return []
-    return out
+def _spool_segments(lines, default_ts, default_cwd, dsh=None):
+    """(S7 搬家 2026-10-04) 判据实现在 transcripts.segments_from_snapshot
+    (行 schema 归 L1); 本符号保留薄委托。判型 dsh: None=嗅探兜底。"""
+    import transcripts as _t
+    return _t.segments_from_snapshot(lines, default_ts, default_cwd, dsh=dsh)
 
 
 _DISTILL_POOL = concurrent.futures.ThreadPoolExecutor(
@@ -457,11 +385,13 @@ def _sweep_spool(state: dict, cwd: str, spool_dir: Path | None = None) -> dict:
         session_id = _spool_session(jf)
         default_ts = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
                                    time.gmtime(st.st_mtime))
+        # S7 判型: .harness sidecar (快照端真值) 优先; 缺失/异值 → 嗅探兜底
+        _dsh = {"cc": False, "dsh": True}.get(_spool_harness(jf))
 
         ack = offset
         outcome = "done"          # done | suspend | retry | dlq
         for seg_text, seg_end, ts, seg_cwd in _spool_segments(
-                text.splitlines(), default_ts, cwd):
+                text.splitlines(), default_ts, cwd, dsh=_dsh):
             sha = hashlib.sha256(seg_text.encode("utf-8")).hexdigest()
             ikey = (str(jf.resolve()), sha)
             zfut = _INFLIGHT.get(ikey)

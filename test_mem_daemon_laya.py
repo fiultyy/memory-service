@@ -251,7 +251,7 @@ def test_spool_poison_dlq_after_max_attempts(tmp_path, monkeypatch):
     _fake_distill(monkeypatch, seg)
     spool = _spool(tmp_path)
     f = _cc_snapshot(spool, "sess-poison-0000000000000004.jsonl")
-    (spool / (f.name + ".harness")).write_text("dsh", encoding="utf-8")
+    (spool / (f.name + ".harness")).write_text("cc", encoding="utf-8")
     state = {}
     for i in range(mem_daemon._SEGMENT_ATTEMPTS_MAX):
         state = mem_daemon._sweep_spool(state, "/w")

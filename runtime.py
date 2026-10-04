@@ -10,6 +10,7 @@ dsh 桥同形) + env, harness 差异全部经 harness.SPECS (L1) 消解。
   docstring 声明的既有契约, 平移原位保留)。
 
 入口面:
+- ``snapshot_transcript(payload, env)`` — ①ingest 自动·快照面 (S5);
 - ``read_payload()`` — stdin CC 形 JSON 单源收口;
 - ``emit_context(ctx, channel)`` — 协议出端 (cc-hook → hookSpecificOutput);
 - ``inject_context(payload, env)`` — ④注入业务体 (自 hooks/recall_inject.py
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -375,6 +377,107 @@ def inject_context(payload: dict, env=None) -> str | None:
     return ctx
 
 
+# ── ①ingest 自动·快照面 (自 pre-compact-mem.sh:51-98 平移, S5) ─────
+
+def snapshot_transcript(payload: dict, env=None) -> Path | None:
+    """PreCompact transcript 快照 → spool 池 (毫秒级, compact 永不阻塞)。
+
+    语义钉子 (tests/test_golden_hooks.py 黄金重放逐字节断言):
+    - cc 形 (明文): 幂等键 = ``<session>-<sha16>``, sha16 = 文件内容
+      sha256 前 16 (≡ ``sha256sum | cut -c1-16``); 产物 = 原字节拷贝。
+    - dsh 形 (``.zstd``): 幂等键 = ``<session>-<cid12>``, cid12 =
+      compaction_id 去 '-' 前 12; 缺失回退内容 sha16; 产物 = zstdcat 明文化。
+    - dsh 回查: payload.transcript_path 空 + session_id →
+      ``~/.dsh/sessions/*/``<sid>/session.jsonl.zstd`` mtime 最新 (≡ ls -1t)。
+    - 原子写: tmp + mv; sidecar ``.harness`` 只在快照成功后写 (MEM_HARNESS
+      缺省 cc); 无 zstd 工具 / 文件不可读 → None 放行 (tolerate-everything)。
+    """
+    import hashlib
+    import shutil
+    import harness as harness_reg
+    if env is None:
+        env = os.environ
+    spec = harness_reg.SPECS[harness_reg.resolve_harness(env.get("MEM_HARNESS"))]
+    spool = (Path(env["MEM_SPOOL_DIR"]) if env.get("MEM_SPOOL_DIR")
+             else (spec.spool_default() if spec.spool_default else None))
+    if spool is None:
+        return None
+    transcript = (payload.get("transcript_path") or "").strip()
+    session_id = (payload.get("session_id") or "").strip() or "unknown"
+
+    # dsh 桥回填: payload 恒带空 transcript_path → 按 session_id 从 dsh
+    # session 存储回查, mtime 最新; 找不到维持空 → 放行。
+    if not transcript and session_id and session_id != "unknown":
+        home = env.get("HOME") or str(Path.home())
+        cands = list((Path(home) / ".dsh" / "sessions").glob(
+            f"*/{session_id}/session.jsonl.zstd"))
+        if cands:
+            transcript = str(max(cands, key=lambda p: p.stat().st_mtime))
+    if not transcript:
+        return None
+    tpath = Path(transcript)
+    if not tpath.is_file() or not os.access(tpath, os.R_OK):
+        return None
+
+    def _fallback_key() -> str:
+        return f"{os.getpid()}-{int(time.time())}"
+
+    spool.mkdir(parents=True, exist_ok=True)
+    if tpath.suffix == ".zstd":
+        zcat = shutil.which("zstdcat") or shutil.which("zstd")
+        if zcat is None:
+            return None  # 无 zstd → 放行 compact (tolerate-everything)
+        cid = (payload.get("compaction_id") or "").replace("-", "")[:12]
+        if not cid:
+            try:
+                cid = hashlib.sha256(tpath.read_bytes()).hexdigest()[:16]
+            except OSError:
+                cid = ""
+        if not cid:
+            cid = _fallback_key()
+        spool_file = spool / f"{session_id}-{cid}.jsonl"
+        cmd = [zcat] + (["--"] if Path(zcat).name == "zstdcat" else ["-dc", "--"])
+        tmp = spool_file.with_name(spool_file.name + ".tmp")
+        ok = False
+        try:
+            with tmp.open("wb") as out:
+                ok = subprocess.run(cmd + [str(tpath)], stdout=out,
+                                    stderr=subprocess.DEVNULL).returncode == 0
+            if ok:
+                tmp.replace(spool_file)
+        except Exception:
+            ok = False
+        finally:
+            if not ok and tmp.exists():
+                tmp.unlink(missing_ok=True)
+        if not ok:
+            return None
+    else:
+        try:
+            sha16 = hashlib.sha256(tpath.read_bytes()).hexdigest()[:16]
+        except OSError:
+            sha16 = ""
+        spool_file = spool / f"{session_id}-{sha16 or _fallback_key()}.jsonl"
+        tmp = spool_file.with_name(spool_file.name + ".tmp")
+        try:
+            shutil.copyfile(tpath, tmp)
+            tmp.replace(spool_file)
+        except OSError:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+            return None
+
+    # harness 溯源 sidecar (快照成功才写; 原子 tmp+mv 同款)
+    try:
+        stmp = spool_file.with_name(spool_file.name + ".harness.tmp")
+        stmp.write_text(env.get("MEM_HARNESS") or "cc", encoding="utf-8")
+        stmp.replace(spool_file.with_name(spool_file.name + ".harness"))
+    except OSError:
+        pass
+    return spool_file
+
+
+
 # ── 壳分发入口 (python3 runtime.py <event>) ─────────────────────────
 
 def hook_main(argv: list[str] | None = None) -> int:
@@ -383,7 +486,9 @@ def hook_main(argv: list[str] | None = None) -> int:
     events: ``user-prompt`` (④注入; S5/S6 步序再补 precompact/session-start)。"""
     argv = list(sys.argv[1:] if argv is None else argv)
     event = argv[0] if argv else ""
-    if event == "user-prompt":
+    if event == "precompact":
+        snapshot_transcript(read_payload() or {})
+    elif event == "user-prompt":
         payload = read_payload()
         if payload is not None:
             ctx = inject_context(payload)

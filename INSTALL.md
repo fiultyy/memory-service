@@ -1,6 +1,6 @@
 # mem-service 安装与接线 Guide
 
-mem-service = 独立 Python CLI(无 daemon/端口),叠加在 CC MEMORY.md 之上的 KG fact 层
+mem-service = Python CLI + memory-ingest daemon, 叠加在 CC MEMORY.md 之上的 KG fact 层
 (Entity + Fact reified + LIF 五维 + 向量召回 + PreCompact autoDream)。**双轨不改 CC MEMORY.md**。
 
 本 guide:部署到新环境 / 新 CC 的 step-by-step。能力详见 `docs/mem-service-iteration-log.md`(12 ADR, v1→v6)。
@@ -110,18 +110,15 @@ sqlite3 data/embeddings.db  "SELECT COUNT(*) FROM embed_cache"
 
 ## 调度(systemd user)
 
-| 单元 | 节奏 | 干什么 |
-|------|------|--------|
-| `memory-spool-drain.timer` | hourly | dsh PreCompact spool 快照排水 → 蒸馏入库(进端唯一自动面) |
-| `memory-dream.timer` | daily | `cli.py dream` 一轮六职责(记忆新陈代谢: recall_hits 重放/晋升/decay/降档/回流/队列) |
+| 单元 | 干什么 |
+|------|--------|
+| `memory-ingest.service` | 常驻 daemon: spool 双池段级消费 (四色蒸馏入图) + 夜间 dreaming (settle/TTL/tag) + hygiene; Restart=on-failure |
 
-单元正本在 `deploy/systemd-user/`, 安装:
+单元正本在 `deploy/systemd-user/memory-ingest.service`, 安装:
 
 ```bash
-cp deploy/systemd-user/memory-dream.{service,timer} ~/.config/systemd/user/
-systemctl --user daemon-reload && systemctl --user enable --now memory-dream.timer
+cp deploy/systemd-user/memory-ingest.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now memory-ingest
 ```
 
-dream 语义幂等(水位文件 + fact 级 NOOP), Persistent 补跑/重复跑无害; 手动单跑: `systemctl --user start memory-dream.service`。
-
-recall 强化缺省(2026-09-07 起)即为**延迟改道**: recall 纯读, 命中记 `data/signals/recall_hits`, 由上表 dream 轮批量补回 LIF。显式 `MEM_DELAYED_REINFORCE=0` 可退回即时写回(锁敏感场景)。
+(旧 memory-spool-drain.timer / memory-dream.timer 已于 2026-10-04 退役——职责并入 memory-ingest daemon。)

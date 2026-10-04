@@ -19,7 +19,13 @@ SVC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Drain stdin (CC delivers the hook payload on fd 0) → python 单点消费。
 if command -v python3 >/dev/null 2>&1; then
-    cat 2>/dev/null | python3 "${SVC_DIR}/runtime.py" precompact 2>/dev/null || true
+    # timeout 守护 (体检修复 2026-10-04): 三钩子防线对齐 — 挂起不卡 compact。
+    if command -v timeout >/dev/null 2>&1; then
+        cat 2>/dev/null | timeout "${MEM_PRECOMPACT_TIMEOUT:-10}" \
+            python3 "${SVC_DIR}/runtime.py" precompact 2>/dev/null || true
+    else
+        cat 2>/dev/null | python3 "${SVC_DIR}/runtime.py" precompact 2>/dev/null || true
+    fi
 fi
 
 # compact 永不阻塞。

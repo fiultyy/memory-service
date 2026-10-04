@@ -4,6 +4,7 @@
    "hooks": [
     {
      "command": "if [ -f '/home/yy/projects/memory-service/hooks/pre-compact-mem.sh' ] && [ -x '/home/yy/projects/memory-service/hooks/pre-compact-mem.sh' ]; then MEM_HARNESS=cc /home/yy/projects/memory-service/hooks/pre-compact-mem.sh; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+     "timeout": 20,
      "type": "command"
     }
    ],

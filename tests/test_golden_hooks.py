@@ -97,7 +97,18 @@ def test_registration_surfaces_frozen():
             cur[ev] = keep
     golden = json.load(open(GOLDEN / "reg" / "cc-settings-hooks.json"))
     assert cur == golden, "~/.claude/settings.json memsvc hooks 段漂移 (见头注)"
-    assert json.load(open(REPO / "hooks" / "dsh-hooks.json")) == \
+    # 加固 (体检 2026-10-04): memsvc 钩子文件名特征出现却不含仓路径 → 红
+    # (防换路径重注册后被 memory-service 子串过滤器静默漏检; 特征窄匹配
+    # 不打扰他系 hook 如 i-have-adhd/orchestrator/orca)。
+    _FEATS = ("pre-compact-mem", "session-start-mem", "user-prompt-recall",
+              "recall_inject", "runtime.py")
+    for ev, entries in (S.get("hooks") or {}).items():
+        for e in (entries if isinstance(entries, list) else [entries]) if entries else []:
+            for m in (e.get("hooks") or []):
+                cmd = m.get("command") or ""
+                if any(f in cmd for f in _FEATS):
+                    assert "memory-service" in cmd, \
+                        f"{ev}: memsvc 钩子特征出现但 command 不含仓路径: {cmd[:120]}"
         json.load(open(GOLDEN / "reg" / "dsh-hooks.json")), \
         "hooks/dsh-hooks.json 漂移 (解耦全程不许动)"
 

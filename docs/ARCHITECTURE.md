@@ -1,18 +1,20 @@
 # memsvc 架构概述与指针文档
 
-memsvc（mem-service）是一个独立 Python 记忆服务：把对话事实与实体沉淀为 KG fact 层（Entity + Fact reified + 正交元数据），并按需加权召回。存储自治（SQLite WAL，`data/memory.db`），无常驻服务进程——形态是短命 CLI 进程直连库，用完即退。
+memsvc（mem-service）是一个独立 Python 记忆服务：把对话事实与实体沉淀为 KG fact 层（Entity + Fact reified + 正交元数据），并按需加权召回。存储自治（SQLite WAL，`data/memory.db`）。形态 = 短命 CLI 门面 + 常驻 `memory-ingest` daemon (systemd user, spool 段级消费 + 夜间 dreaming + hygiene)。
 
 ## 一、分层总览
 
 ```
 接入面   skills/memsvc（软链三处: repo 正本 / ~/.dsh/skills / ~/.claude/skills）
-命令面   cli.py 20+ 子命令（唯一写入口口径；stats/recall 为读面）
-管道层   endsteps → transcripts → autodream → gazetteer/llm_extract → resolver → store
+SDK 层   runtime.py（五业务编排 harness 盲: snapshot/project_on_start/inject_context/hook_main）
+L1 注册   harness.py SPECS（五家 harness 知识唯一存放地: 定位/行 schema/memory_dir/spool/session_env）
+命令面   cli.py 22 子命令（SDK 手动门面, dict-in-dict-out；stats/recall 为读面）
+管道层   endsteps → transcripts(行 schema 单源) → autodream → gazetteer/llm_extract → resolver → store
 存储层   store.py + db.py + schema.sql（SQLite WAL, vec0 向量表, upgrade_queue, signals）
 召回层   recall.py + scoring.py + vec_index.py + embedding.py
 投影层   projection.py + hygiene.py（KG → CC memory md, 单向）
 常驻面   mem_daemon(dream-daemon) + graphlive.py(M20 实时图, 按需手动拉起)
-自动面   hooks/pre-compact-mem.sh + spool-worker.sh（唯一自动面, CC 端）
+自动面   hooks 三守护壳 → runtime.py（cc + dsh 桥两注册面）; spool 消费归 mem_daemon
 ```
 
 ## 二、模块指针（文件 → 职责）
@@ -60,7 +62,7 @@ memsvc（mem-service）是一个独立 Python 记忆服务：把对话事实与�
 - 幂等：autodream/init-memory/re-ingest 重跑 fact 级 NOOP 吸收；ingest-recent 有 sha256 注册表防重跑。
 - 无 delete：物理删除不存在（P38）；过时走 supersede 链（bi-temporal 可回溯）。
 - 通道判定（DR-9）：agent 不可声明 human 档；provenance 随源块自动映射。
-- 唯一自动面 = PreCompact（CC）；recall/consolidation 手动；dsh/pi 进端手动（钩子桥无 PreCompact 缝）。
+- 自动面 = 三钩子 (cc/dsh) + daemon；consolidation 已自动化 (settle/TTL/dream), 手动票仅干预入口；dsh/pi 进端手动（钩子桥无 PreCompact 缝）。
 - 例外（用户裁决 2026-08-27）：recall --project 把召回结果投影成 memory/recall-<DATE>.md + MEMORY.md 索引行。
 - 图语义边界（用户裁决 2026-08-28）：图不连通只能读作「库内查无记录」，不是现实无关的证明。
 - 复述禁令：召回内容不复述原文（防提取管道回流污染，U7）。

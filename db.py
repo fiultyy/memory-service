@@ -44,6 +44,10 @@ def init(db_path: str | Path | None = None,
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # WAL 尺寸帽 (体检修复 2026-10-04): 缺省 -1 永不收缩, 实测膨胀至 1.35GB
+    # (≈主库 99%) — graph-live 等长寿读连接钉住 checkpoint 不回落。256MB 帽
+    # 让 checkpoint 后 WAL 截断到此上限。
+    conn.execute("PRAGMA journal_size_limit=268435456")
     conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
     # ADR-14 migration: 老 db fact 表无 source_cwd 列(b 方案 cwd 隔离)→ ALTER ADD。
     # CREATE TABLE IF NOT EXISTS 不改老表; PRAGMA table_info 检测 + ALTER 补列。

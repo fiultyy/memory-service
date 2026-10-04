@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# [已退役 2026-10-01, H1 切换票] pre-compact-mem.sh 不再拉起本 worker —
+# spool 消费切至 mem_daemon 第二 watch 源 (段级 distill, spec v2 §二:
+# docs/specs/graph-reform-v2-ingest-tags.md)。文件保留作历史参照/手动排干;
+# endsteps.py 本身未退役 (cli ingest-recent 等仍在用)。
+#
+# spool-worker.sh — PreCompact 快照排干 worker (P1 → 2026-08-27 v2 重接线;
+# 2026-08-28 v3: --scenes 用户声音通道, Codex 阅读优先级采纳)。
+#
+# v2 形态 (2026-08-27 用户裁决; 2026-09-01 终裁A方案修订: 「CC automemory 不动」
+# 红线取消, 投影恢复 SessionStart 单点):
+#   1. 逐 spool 文件先经 endsteps.py --scenes 蒸馏 — 每个 assistant end
+#      step (stop_reason=end_turn 主链 text, 长度门 120, 文内去重) 配对其前
+#      累积的用户原话块 (≤4 块/1200 字, v3), 合成 autodream 可吃的
+#      transcript ([用户]/[助手结论] 角色标记)。
+#   2. 蒸馏为空 (纯工具会话) → 视为成功, 删文件零 LLM。
+#   3. autodream 入 KG (LLM 直抽, 断供响亮跳过留重试)。
+#   4. 不在本 worker 内跑 synthesis-index — MEMORY.md 投影索引统一归
+#      SessionStart 单点 (09-01 终裁A方案: 红线取消, 恢复 ADR-A 原生格式投影);
+#      本 worker 职责止于 KG 入库, 避免双写入口。
+#
+# 单例锁 (flock) 防并发双跑; 处理中 .lock 后缀可回收重试; 失败文件留在
+# spool 下次重试 (不丢记忆, 只延迟)。排空即退出, 无 daemon。
+set -u
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SVC_DIR="$(cd "${HOOK_DIR}/.." && pwd)"
+CLI="${SVC_DIR}/cli.py"
+ENDSTEPS="${SVC_DIR}/endsteps.py"
+# MEM_SPOOL_DIR: 测试注入口 (与 pre-compact-mem.sh B1-P2 同款, MF3) —
+# 快照与排干必须指向同一 spool; 缺省回落生产行为不变。
+SPOOL="${MEM_SPOOL_DIR:-${SVC_DIR}/data/transcript-spool}"
+CWD_ARG=""
+[ "${1:-}" = "--cwd" ] && [ -n "${2:-}" ] && CWD_ARG="--cwd ${2}"
+
+[ -f "${CLI}" ] || exit 0
+[ -f "${ENDSTEPS}" ] || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
+mkdir -p "${SPOOL}" 2>/dev/null || exit 0
+
+# 单例锁: 非阻塞抢锁, 抢不到 = 已有 worker 在跑 → 退出。
+exec 9>"${SPOOL}/worker.lock"
+flock -n 9 || exit 0
+
+# 回收上次中断的半成品 (.lock → 原名重试)。
+for f in "${SPOOL}"/*.jsonl.lock; do
+    [ -f "$f" ] || continue
+    mv -- "$f" "${f%.lock}" 2>/dev/null || true
+done
+
+shopt -s nullglob
+for f in "${SPOOL}"/*.jsonl; do
+    # 文件名: <session_id>-<sha16>.jsonl — session 可能含 '-', 取到
+    # 倒数第二段为止 (sha16 恒为末段)。
+    base="$(basename "$f" .jsonl)"
+    session="${base%-*}"
+    [ -z "${session}" ] && session="unknown"
+
+    # MF2-B (TM1 W2-R1): harness 溯源 sidecar (<file>.harness, 由
+    # pre-compact-mem.sh 快照时写) → 逐文件 --harness 转发。spool 可能
+    # cc/dsh 混排, 单 env 不可归属 (TM1 已证) — 只认逐文件 sidecar。
+    # 缺 sidecar (历史遗留) 不传 → 保持 argparse 缺省, 不臆测; 非法值
+    # 视同缺失 (防脏 sidecar 卡死重试)。
+    HARNESS_ARG=""
+    if [ -r "${f}.harness" ]; then
+        H="$(cat "${f}.harness" 2>/dev/null)"
+        case "${H}" in
+            cc|codex|dsh|pi|omp) HARNESS_ARG="--harness ${H}" ;;
+        esac
+    fi
+
+    # 占位: 处理中改名 .lock (中断可回收)。
+    mv -- "$f" "$f.lock" 2>/dev/null || continue
+
+    # ① 蒸馏: raw transcript → 用户声音场景合成 transcript (M21, 2026-08-28:
+    # --scenes = end step + 配对用户原话块, [用户]/[助手结论] 标记; 注入块
+    # 由 autodream 侧 corpus_prep 逐块清洗)。缺省 endsteps 行为不变。
+    if ! python3 "${ENDSTEPS}" --scenes "$f.lock" > "$f.endsteps" 2>>"${SPOOL}/worker.log"; then
+        mv -- "$f.lock" "$f" 2>/dev/null || true
+        echo "$(date -Is) filter-fail: ${base}" >>"${SPOOL}/worker.log"
+        continue
+    fi
+
+    # ② 空蒸馏 (纯工具会话/全短应答) → 成功, 零 LLM。
+    if [ ! -s "$f.endsteps" ]; then
+        rm -f -- "$f.lock" "$f.endsteps" "$f.harness"
+        echo "$(date -Is) no-end-steps: ${base}" >>"${SPOOL}/worker.log"
+        continue
+    fi
+
+    # ③ autodream 入 KG (LLM 直抽)。
+    ( cd "${SVC_DIR}" && \
+      python3 cli.py autodream --session "${session}" \
+                                --transcript "$f.endsteps" \
+                                ${HARNESS_ARG} \
+                                ${CWD_ARG:+--cwd "${CWD_ARG#--cwd }"} \
+          >>"${SPOOL}/worker.log" 2>&1 )
+    rc=$?
+
+    # ④ 成功删 raw+蒸馏+sidecar; 失败留 raw 重试 (蒸馏可再生+sidecar
+    # 随 raw 保留 — 重试仍按原源转发, 不丢记忆只延迟)。
+    if [ $rc -eq 0 ]; then
+        rm -f -- "$f.lock" "$f.endsteps" "$f.harness"
+    else
+        rm -f -- "$f.endsteps"
+        mv -- "$f.lock" "$f" 2>/dev/null || true
+        echo "$(date -Is) retry-later: ${base} rc=${rc}" >>"${SPOOL}/worker.log"
+    fi
+done
+
+exit 0

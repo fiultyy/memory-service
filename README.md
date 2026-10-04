@@ -2,9 +2,9 @@
 
 > Claude Code 的记忆叠加层 — 在 file-based memory 之下加一层 KG 事实图谱。
 
-mem-service 是一个独立 Python CLI（无 daemon / 无端口），为 Claude Code 提供结构化的长期记忆：把散落的对话事实与实体关系抽成 **Entity + Fact reified 知识图谱**，按需召回。它叠加在 CC 现有的 `MEMORY.md`（即时热层）之下，**不改 MEMORY.md**，仅在查询或 hook 触发时被读写。
+mem-service 是一个独立 Python 记忆服务（CLI 门面 + `memory-ingest` systemd daemon），为多 harness (cc/dsh/pi/…) 提供结构化的长期记忆：把散落的对话事实与实体关系抽成 **Entity + Fact reified 知识图谱**，按需召回。它叠加在 CC 现有的 `MEMORY.md`（即时热层）之下，**不改 MEMORY.md**，仅在查询或 hook 触发时被读写。
 
-- **形态**：argparse 短命进程 + SQLite 跨进程持久 + PreCompact hook 触发
+- **形态**：argparse 短命 CLI 门面 + SQLite 跨进程持久 + 三钩子自动面 (PreCompact/SessionStart/UserPromptSubmit, cc/dsh) + memory-ingest daemon (spool 段级消费/夜间 dreaming/hygiene)
 - **依赖**：仅 `networkx`（图谱中心性）；LLM / embedding 为外部服务，经环境变量配置
 - **零侵入**：CC 原生记忆不动；mem-service 是自治 KG + 单向投影
 

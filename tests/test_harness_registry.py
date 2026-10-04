@@ -84,3 +84,11 @@ def test_layering_no_upstream_imports():
     for banned in ("import cli", "import runtime", "import mem_daemon",
                    "from cli ", "from runtime ", "from mem_daemon "):
         assert banned not in src, f"harness.py 出现上层 import: {banned!r}"
+
+
+def test_count_user_turns_single_source():
+    """S3: cc/dsh spec 挂同一单源函数; 手动面 harness 无注入面。"""
+    import transcripts
+    assert harness.SPECS["cc"].count_user_turns is transcripts.count_user_turns
+    assert harness.SPECS["dsh"].count_user_turns is transcripts.count_user_turns
+    assert harness.SPECS["pi"].count_user_turns is None

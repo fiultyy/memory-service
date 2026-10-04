@@ -51,6 +51,8 @@ class HarnessSpec:
     spool_default: Callable[[], Path] | None
     # ── 会话 id env (cli recall --session 缺省源; None = 无约定) ──
     session_env: str | None
+    # ── 注入面 turn 计数 (S3 单源: transcripts.count_user_turns; None = 无注入面) ──
+    count_user_turns: Callable | None = None
 
 
 def _svc_spool() -> Path:
@@ -79,6 +81,8 @@ def _mk(name: str, *, memory_dir=None, spool_env=None, spool_default=None,
         spool_env=spool_env,
         spool_default=spool_default,
         session_env=session_env,
+        count_user_turns=(transcripts.count_user_turns
+                          if name in ("cc", "dsh") else None),
     )
 
 

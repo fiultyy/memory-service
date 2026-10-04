@@ -636,6 +636,88 @@ def session_id(path: Path, harness: str = "cc") -> str:
     return sid(path)
 
 
+def count_user_turns(path, limit: int) -> int:
+    """已落盘既往真人 user 回合数 (注入面首 n turn 窗口判据, S3 单源化
+    2026-10-04 — 自 hooks/recall_inject.py 双计数函数搬家, 判据逐字保留)。
+
+    双格式分派 (与快照/消费面同款): ``.zstd`` → dsh walker (``_dsh_open``
+    zstdcat 行迭代), 否则 CC 明文逐行。两 walker 语义:
+    - CC: type=="user" 且非 isSidechain → ``_texts_of`` (只收 text 块,
+      tool_result/thinking 天然排除) → ``corpus_prep.clean(txt, "cc")``
+      非空才计 (system-reminder / ``<memsvc-recall>`` 注入块剥除, 防自计数)。
+    - dsh: type=="session" 更新 delegationDepth; type=="user/message" 且
+      depth==0 → 守卫① source.kind 非 user (编排注入) 不计; 守卫②
+      ``DSHMSG]`` 信箱载荷 (kind=user 里混载) 不计; ``data.content`` 文本
+      块 → ``clean(txt, "dsh")`` 非空才计。
+    **早停**: count 达 ``limit`` 即返 (大 transcript 超时防线)。
+    坏行 json.loads 跳过。异常上抛 — fail-open (None → 常驻档) 是调用方
+    (hooks 注入壳) 的职责, 这里只管数。
+    """
+    if not path or limit <= 0:
+        return 0
+    path = Path(path)
+    if path.suffix == ".zstd":
+        return _count_dsh_user_turns(path, limit)
+    import corpus_prep
+    n = 0
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue  # 坏行跳 (半写行容错)
+            if not isinstance(d, dict) or d.get("type") != "user" \
+                    or d.get("isSidechain"):
+                continue
+            msg = d.get("message")
+            msg = msg if isinstance(msg, dict) else {}
+            txt = _texts_of(msg.get("content"))
+            if corpus_prep.clean(txt, "cc"):
+                n += 1
+                if n >= limit:
+                    return n
+    return n
+
+
+def _count_dsh_user_turns(path, limit: int) -> int:
+    """dsh session.jsonl(.zstd) 真人回合计数 (A3-T1 判据, 自 recall_inject
+    搬家): 注意与 assistant/message 的 data.message.content 不同形。"""
+    import corpus_prep
+    n = 0
+    depth = 0
+    for line in _dsh_open(path):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue  # 坏行跳 (半写行容错)
+        if not isinstance(d, dict):
+            continue
+        t = d.get("type")
+        if t == "session":
+            depth = d.get("delegationDepth", 0) or 0
+        elif t == "user/message":
+            if depth > 0:
+                continue  # 侧链回合不进窗口计数
+            data = d.get("data")
+            data = data if isinstance(data, dict) else {}
+            # MF2-A 守卫①: 非真人 source.kind (编排注入等) 不计 —
+            # None 兼容老版本流/测试桩。
+            if ((data.get("source") or {}).get("kind")) not in (None, "user"):
+                continue
+            txt = _texts_of(data.get("content"))
+            # MF2-A 守卫②: DSHMSG] 编排流量 (agent-to-agent 信箱载荷,
+            # 实测 kind=user 里混载) 不计 — 否则注入密集会话首 turn 前
+            # 计数≥n, 窗口门静默早退 (fail-closed)。
+            if txt and "DSHMSG]" in txt[:12]:
+                continue
+            if corpus_prep.clean(txt, "dsh"):
+                n += 1
+                if n >= limit:
+                    return n
+    return n
+
+
+
 if __name__ == "__main__":  # 手动诊断: python3 transcripts.py <cwd> [harness]
     _cwd = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
     _h = sys.argv[2] if len(sys.argv) > 2 else "cc"

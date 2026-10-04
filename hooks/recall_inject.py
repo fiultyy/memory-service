@@ -124,85 +124,21 @@ def _probe_rw() -> bool:
 
 
 def _count_user_turns_dsh(path: Path, limit: int) -> int:
-    """dsh session.jsonl(.zstd) 语义计数 (A3-T1): type=="user/message" 的
-    ``data.content`` text 块 (注意与 assistant/message 的 data.message.content
-    不同形), ``transcripts._dsh_open`` 行迭代 (zstdcat 子进程, 复用 memsvc
-    既有 zstd 读取, 无静默降级红线) → ``corpus_prep.clean(txt, "dsh")`` 非空
-    才计 (注入块剥除防自计数)。``delegationDepth>0`` = 侧链会话 → 不计
-    (照 transcripts._dsh_end_steps 先例)。**早停**同 CC: count 达 limit 即返。"""
-    import corpus_prep
+    """(S3 单源化 2026-10-04) 实现在 transcripts._count_dsh_user_turns —
+    本符号保留为薄委托 (兼容既有引用)。"""
     import transcripts
-    n = 0
-    depth = 0
-    for line in transcripts._dsh_open(path):
-        try:
-            d = json.loads(line)
-        except Exception:
-            continue  # 坏行跳过 (半写行容错)
-        if not isinstance(d, dict):
-            continue
-        t = d.get("type")
-        if t == "session":
-            depth = d.get("delegationDepth", 0) or 0
-        elif t == "user/message":
-            if depth > 0:
-                continue  # 侧链回合不进窗口计数
-            data = d.get("data")
-            data = data if isinstance(data, dict) else {}
-            # MF2-A 守卫① (逐字对齐金标准 transcripts.py:308): 非真人 source
-            # kind (编排注入等) 不计 — None 兼容老版本流/测试桩。
-            if ((data.get("source") or {}).get("kind")) not in (None, "user"):
-                continue
-            txt = transcripts._texts_of(data.get("content"))
-            # MF2-A 守卫② (逐字对齐金标准 transcripts.py:317): DSHMSG] 编排
-            # 流量 (agent-to-agent 信箱载荷, 实测 kind=user 里混载) 不计 —
-            # 否则注入密集会话首 turn 前计数≥n, 窗口门静默早退 (fail-closed)。
-            if txt and "DSHMSG]" in txt[:12]:
-                continue
-            if corpus_prep.clean(txt, "dsh"):
-                n += 1
-                if n >= limit:
-                    return n
-    return n
+    return transcripts._count_dsh_user_turns(path, limit)
 
 
 def _count_user_turns(path: str | None, limit: int) -> int | None:
-    """transcript 里已落盘的既往 user_text 块数 (v1.7 ② turn 判据)。
-
-    双格式分流 (A3-T1): dsh 桥 UPS payload 的 transcript_path 指向
-    ``session.jsonl.zstd`` (zstd 压缩) → ``_count_user_turns_dsh``; CC 纯文本
-    路径: 逐行 json.loads(坏行跳) → type=="user" 且非 isSidechain →
-    ``transcripts._texts_of`` (只收 text 块, tool_result/thinking 天然排除)
-    → ``corpus_prep.clean(txt, "cc")`` 非空才计 (system-reminder /
-    ``<memsvc-recall>`` 注入块剥除后计, 防注入自计数)。**早停**: count 达
-    ``limit`` 即返回, 不读全文件 (大 transcript 超时防线)。任何异常 → None
-    = 调用方静默降级常驻档 (fail-open, 不挡路)。
-    """
+    """(S3 单源化 2026-10-04) 判据实现在 transcripts.count_user_turns
+    (cc/dsh 双格式分派 + 早停 + 注入块剥除); 本函数保留 fail-open 壳:
+    任何异常 → None = 调用方静默降级常驻档 (不挡路)。"""
     if not path or limit <= 0:
         return None
     try:
-        if Path(path).suffix == ".zstd":
-            return _count_user_turns_dsh(Path(path), limit)
-        import corpus_prep
         import transcripts
-        n = 0
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    d = json.loads(line)
-                except Exception:
-                    continue  # 坏行跳过 (半写行容错)
-                if not isinstance(d, dict) or d.get("type") != "user" \
-                        or d.get("isSidechain"):
-                    continue
-                msg = d.get("message")
-                msg = msg if isinstance(msg, dict) else {}
-                txt = transcripts._texts_of(msg.get("content"))
-                if corpus_prep.clean(txt, "cc"):
-                    n += 1
-                    if n >= limit:
-                        return n
-        return n
+        return transcripts.count_user_turns(path, limit)
     except Exception:
         return None
 

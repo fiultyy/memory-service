@@ -1,0 +1,15 @@
+[Unit]
+Description=memsvc v4 daemon (spool 段级消费 → 四色蒸馏 → atom 图 + dreaming + hygiene)
+# v2 spec H0/H7: 唯一 laya 调用方; laya 不可用→spool 挂起持有
+# 切换票: 取代 memory-spool-drain.timer(旧 endsteps→autodream→fact 通道, 已于 2026-10-01 停用)
+
+[Service]
+ExecStart=/usr/bin/python3 /home/yy/projects/memory-service/mem_daemon.py
+WorkingDirectory=/home/yy/projects/memory-service
+Restart=on-failure
+RestartSec=30
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

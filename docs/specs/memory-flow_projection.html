@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="generator" content="archify 2.17.0-dev.1">
-  <title>投影 — per-hit 散件与回声闸 (零引擎机械流)</title>
+  <title>投影 — SessionStart 单点与主动 per-hit (双触发)</title>
   <script>
     // Resolve the theme before first paint so light-preference users don't
     // see a dark flash. The toolbar script below re-applies with UI state.
@@ -5081,7 +5081,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
            data-preset-badge-blueprint="蓝图 / 修订 01"
            data-preset-badge-editorial="编辑风格 / 现场笔记">
         <div class="pulse-dot"></div>
-        <h1>投影 — per-hit 散件与回声闸 (零引擎机械流)</h1>
+        <h1>投影 — SessionStart 单点与主动 per-hit (双触发)</h1>
       </div>
     </div>
 
@@ -5131,7 +5131,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / 图版 04">
       <svg viewBox="0 0 1080 620" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="classic" data-quality-profile="showcase">
-        <title id="archify-diagram-title">投影 — per-hit 散件与回声闸 (零引擎机械流)</title>
+        <title id="archify-diagram-title">投影 — SessionStart 单点与主动 per-hit (双触发)</title>
         <desc id="archify-diagram-description">由 Archify 生成的时序图。</desc>
         <!-- Definitions -->
         <defs>
@@ -5156,9 +5156,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Time Segments -->
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="0" x="48" y="148" width="984" height="152" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="0" x="48" y="148" width="984" height="172" rx="10" class="c-lane" stroke-width="1"/>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="1" x="48" y="314" width="984" height="246" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="1" x="48" y="334" width="984" height="226" rx="10" class="c-lane" stroke-width="1"/>
 
         <!-- Lifelines -->
         <path d="M 129.5 142 L 129.5 555" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
@@ -5169,135 +5169,125 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path d="M 972.5 142 L 972.5 555" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
 
         <!-- Activations -->
-        <rect x="293.1" y="177" width="10" height="40" rx="3" class="c-mask"/>
-        <rect x="293.1" y="177" width="10" height="40" rx="3" class="c-backend" stroke-width="1"/>
-        <rect x="461.7" y="211" width="10" height="208" rx="3" class="c-mask"/>
-        <rect x="461.7" y="211" width="10" height="208" rx="3" class="c-database" stroke-width="1"/>
-        <rect x="630.3" y="245" width="10" height="40" rx="3" class="c-mask"/>
-        <rect x="630.3" y="245" width="10" height="40" rx="3" class="c-backend" stroke-width="1"/>
-        <rect x="798.9" y="279" width="10" height="106" rx="3" class="c-mask"/>
-        <rect x="798.9" y="279" width="10" height="106" rx="3" class="c-frontend" stroke-width="1"/>
-        <rect x="967.5" y="345" width="10" height="74" rx="3" class="c-mask"/>
-        <rect x="967.5" y="345" width="10" height="74" rx="3" class="c-security" stroke-width="1"/>
+        <rect x="461.7" y="168" width="10" height="100" rx="3" class="c-mask"/>
+        <rect x="461.7" y="168" width="10" height="100" rx="3" class="c-backend" stroke-width="1"/>
+        <rect x="630.3" y="263" width="10" height="50" rx="3" class="c-mask"/>
+        <rect x="630.3" y="263" width="10" height="50" rx="3" class="c-database" stroke-width="1"/>
+        <rect x="798.9" y="308" width="10" height="147" rx="3" class="c-mask"/>
+        <rect x="798.9" y="308" width="10" height="147" rx="3" class="c-frontend" stroke-width="1"/>
+        <rect x="967.5" y="398" width="10" height="57" rx="3" class="c-mask"/>
+        <rect x="967.5" y="398" width="10" height="57" rx="3" class="c-security" stroke-width="1"/>
 
         <!-- Messages -->
-        <g data-edge-from="rc" data-edge-to="proj" data-edge-label="① per-hit 投影请求" data-edge-key="0" data-edge-id="m1">
-          <path data-composition-edge-from="rc" data-composition-edge-to="proj" data-composition-edge-id="m1" data-composition-points="136.5,180;291.1,180" d="M 136.5 180 L 291.1 180" class="a-default" data-animate="edge" style="--step:0" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <g data-edge-from="ss" data-edge-to="proj" data-edge-label="① 开局自动投影" data-edge-key="0" data-edge-id="p1">
+          <path data-composition-edge-from="ss" data-composition-edge-to="proj" data-composition-edge-id="p1" data-composition-points="136.5,170;459.7,170" d="M 136.5 170 L 459.7 170" class="a-emphasis" data-animate="edge" style="--step:0" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <g data-detail="context">
-          <rect x="161" y="160" width="105.60000000000001" height="16" rx="3" class="c-mask"/>
-          <text x="213.8" y="170" class="t-backend" font-size="9" text-anchor="middle">① per-hit 投影请求</text>
+          <rect x="255.70000000000002" y="150" width="84.8" height="16" rx="3" class="c-mask"/>
+          <text x="298.1" y="160" class="t-backend" font-size="9" text-anchor="middle">① 开局自动投影</text>
         </g>
-        <text data-detail="fine" x="148.5" y="198" class="t-dim" font-size="7">cli recall / skill 触发</text>
+        <text data-detail="fine" x="148.5" y="188" class="t-dim" font-size="7">09-01 终裁A: SessionStart 是 MEMORY.md 投影单点; PreCompact 只入库不投影防双写</text>
         </g>
 
-        <g data-edge-from="proj" data-edge-to="memdir" data-edge-label="② 散件写" data-edge-key="1" data-edge-id="m2">
-          <path data-composition-edge-from="proj" data-composition-edge-to="memdir" data-composition-edge-id="m2" data-composition-points="305.1,214;459.7,214" d="M 305.1 214 L 459.7 214" class="a-emphasis" data-animate="edge" style="--step:1" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <g data-edge-from="rc" data-edge-to="proj" data-edge-label="② recall --project" data-edge-key="1" data-edge-id="p2">
+          <path data-composition-edge-from="rc" data-composition-edge-to="proj" data-composition-edge-id="p2" data-composition-points="305.1,210;459.7,210" d="M 305.1 210 L 459.7 210" class="a-default" data-animate="edge" style="--step:1" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <g data-detail="context">
-          <rect x="355.59999999999997" y="194" width="53.6" height="16" rx="3" class="c-mask"/>
-          <text x="382.4" y="204" class="t-backend" font-size="9" text-anchor="middle">② 散件写</text>
+          <rect x="329.59999999999997" y="190" width="105.60000000000001" height="16" rx="3" class="c-mask"/>
+          <text x="382.4" y="200" class="t-backend" font-size="9" text-anchor="middle">② recall --project</text>
         </g>
-        <text data-detail="fine" x="317.1" y="232" class="t-dim" font-size="7">mem-{hex4} 文件名严格契约 (原生索引格式)</text>
+        <text data-detail="fine" x="317.1" y="228" class="t-dim" font-size="7">主动面: 同一次召回顺带投影; M18 recall-&lt;DATE&gt;.md+索引行; 空命中不投影</text>
         </g>
 
-        <g data-edge-from="memdir" data-edge-to="synth" data-edge-label="③ SessionStart 读取" data-edge-key="2" data-edge-id="m3">
-          <path data-composition-edge-from="memdir" data-composition-edge-to="synth" data-composition-edge-id="m3" data-composition-points="473.7,248;628.3,248" d="M 473.7 248 L 628.3 248" class="a-default" data-animate="edge" style="--step:2" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <g data-edge-from="proj" data-edge-to="memdir" data-edge-label="③ 散件写" data-edge-key="2" data-edge-id="p3">
+          <path data-composition-edge-from="proj" data-composition-edge-to="memdir" data-composition-edge-id="p3" data-composition-points="473.7,265;628.3,265" d="M 473.7 265 L 628.3 265" class="a-emphasis" data-animate="edge" style="--step:2" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <g data-detail="context">
-          <rect x="495.6" y="228" width="110.8" height="16" rx="3" class="c-mask"/>
-          <text x="551" y="238" class="t-backend" font-size="9" text-anchor="middle">③ SessionStart 读取</text>
+          <rect x="524.2" y="245" width="53.6" height="16" rx="3" class="c-mask"/>
+          <text x="551" y="255" class="t-backend" font-size="9" text-anchor="middle">③ 散件写</text>
         </g>
-        <text data-detail="fine" x="485.7" y="266" class="t-dim" font-size="7">新会话启动时拼装</text>
+        <text data-detail="fine" x="485.7" y="283" class="t-dim" font-size="7">mem-{hex4} 文件名严格契约 (原生索引格式)</text>
         </g>
 
-        <g data-edge-from="synth" data-edge-to="cc" data-edge-label="④ MEMORY.md 装载" data-edge-key="3" data-edge-id="m4">
-          <path data-composition-edge-from="synth" data-composition-edge-to="cc" data-composition-edge-id="m4" data-composition-points="642.3,282;796.9,282" d="M 642.3 282 L 796.9 282" class="a-emphasis" data-animate="edge" style="--step:3" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <g data-edge-from="memdir" data-edge-to="cc" data-edge-label="④ MEMORY.md 装载" data-edge-key="3" data-edge-id="p4">
+          <path data-composition-edge-from="memdir" data-composition-edge-to="cc" data-composition-edge-id="p4" data-composition-points="642.3,310;796.9,310" d="M 642.3 310 L 796.9 310" class="a-default" data-animate="edge" style="--step:3" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <g data-detail="context">
-          <rect x="671.9999999999999" y="262" width="95.2" height="16" rx="3" class="c-mask"/>
-          <text x="719.5999999999999" y="272" class="t-backend" font-size="9" text-anchor="middle">④ MEMORY.md 装载</text>
+          <rect x="671.9999999999999" y="290" width="95.2" height="16" rx="3" class="c-mask"/>
+          <text x="719.5999999999999" y="300" class="t-backend" font-size="9" text-anchor="middle">④ MEMORY.md 装载</text>
         </g>
-        <text data-detail="fine" x="654.3" y="300" class="t-dim" font-size="7">CC 原生记忆面, 每会话注入上下文</text>
+        <text data-detail="fine" x="654.3" y="328" class="t-dim" font-size="7">CC 原生 auto-memory 开局装 MEMORY.md 进上下文</text>
         </g>
 
-        <g data-edge-from="cc" data-edge-to="corpus" data-edge-label="⑤ 回声进语料" data-edge-key="4" data-edge-id="m5">
-          <path data-composition-edge-from="cc" data-composition-edge-to="corpus" data-composition-edge-id="m5" data-composition-points="810.9,348;965.5,348" d="M 810.9 348 L 965.5 348" class="a-dashed" data-animate="edge" style="--step:4" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <g data-edge-from="cc" data-edge-to="corpus" data-edge-label="⑤ 回声进语料" data-edge-key="4" data-edge-id="p5">
+          <path data-composition-edge-from="cc" data-composition-edge-to="corpus" data-composition-edge-id="p5" data-composition-points="810.9,400;965.5,400" d="M 810.9 400 L 965.5 400" class="a-dashed" data-animate="edge" style="--step:4" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
         <g data-detail="context">
-          <rect x="851" y="328" width="74.4" height="16" rx="3" class="c-mask"/>
-          <text x="888.2" y="338" class="t-messagebus" font-size="9" text-anchor="middle">⑤ 回声进语料</text>
+          <rect x="851" y="380" width="74.4" height="16" rx="3" class="c-mask"/>
+          <text x="888.2" y="390" class="t-messagebus" font-size="9" text-anchor="middle">⑤ 回声进语料</text>
         </g>
-        <text data-detail="fine" x="822.9" y="366" class="t-dim" font-size="7">注入内容随 transcript 重进 PreCompact 快照</text>
+        <text data-detail="fine" x="822.9" y="418" class="t-dim" font-size="7">装载内容随 transcript 重进 PreCompact 快照</text>
         </g>
 
-        <g data-edge-from="corpus" data-edge-to="cc" data-edge-label="⑥ 整块 DROP" data-edge-key="5" data-edge-id="m6">
-          <path data-composition-edge-from="corpus" data-composition-edge-to="cc" data-composition-edge-id="m6" data-composition-points="965.5,382;810.9,382" d="M 965.5 382 L 810.9 382" class="a-security" data-animate="edge" style="--step:5" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <g data-edge-from="corpus" data-edge-to="cc" data-edge-label="⑥ DROP+滤除" data-edge-key="5" data-edge-id="p6">
+          <path data-composition-edge-from="corpus" data-composition-edge-to="cc" data-composition-edge-id="p6" data-composition-points="965.5,450;810.9,450" d="M 965.5 450 L 810.9 450" class="a-security" data-animate="edge" style="--step:5" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
         <g data-detail="context">
-          <rect x="853.6" y="362" width="69.2" height="16" rx="3" class="c-mask"/>
-          <text x="888.2" y="372" class="t-security" font-size="9" text-anchor="middle">⑥ 整块 DROP</text>
+          <rect x="853.6" y="430" width="69.2" height="16" rx="3" class="c-mask"/>
+          <text x="888.2" y="440" class="t-security" font-size="9" text-anchor="middle">⑥ DROP+滤除</text>
         </g>
-        <text data-detail="fine" x="822.9" y="400" class="t-dim" font-size="7">COMMON 规则+扫描跳过+计数滤除; 回声不重入库</text>
-        </g>
-
-        <g data-edge-from="corpus" data-edge-to="memdir" data-edge-label="⑦ 计数滤除" data-edge-key="6" data-edge-id="m7">
-          <path data-composition-edge-from="corpus" data-composition-edge-to="memdir" data-composition-edge-id="m7" data-composition-points="965.5,416;473.7,416" d="M 965.5 416 L 473.7 416" class="a-dashed" data-animate="edge" style="--step:6" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
-        <g data-detail="context">
-          <rect x="687.6" y="396" width="64" height="16" rx="3" class="c-mask"/>
-          <text x="719.6" y="406" class="t-messagebus" font-size="9" text-anchor="middle">⑦ 计数滤除</text>
-        </g>
-        <text data-detail="fine" x="485.7" y="434" class="t-dim" font-size="7">同源散件计数帽</text>
+        <text data-detail="fine" x="822.9" y="468" class="t-dim" font-size="7">COMMON 整块 DROP+扫描跳过+计数滤除; 回声不重入库</text>
         </g>
 
         <!-- Segment Labels -->
         <g data-graph-role="segment-label" data-segment-id="0">
-          <rect x="56" y="126" width="55.6" height="18" rx="3" class="c-mask"/>
-          <text x="62" y="139" class="t-dim" font-size="9" font-weight="600">投影供给</text>
+          <rect x="56" y="126" width="66" height="18" rx="3" class="c-mask"/>
+          <text x="62" y="139" class="t-dim" font-size="9" font-weight="600">双触发投影</text>
         </g>
         <g data-graph-role="segment-label" data-segment-id="1">
-          <rect x="56" y="292" width="107.60000000000001" height="18" rx="3" class="c-mask"/>
-          <text x="62" y="305" class="t-dim" font-size="9" font-weight="600">synthesis 与回声闸</text>
+          <rect x="56" y="312" width="76.4" height="18" rx="3" class="c-mask"/>
+          <text x="62" y="325" class="t-dim" font-size="9" font-weight="600">装载与回声闸</text>
         </g>
 
         <!-- Participants -->
-        <g id="node-rc" data-node-id="rc" data-node-label="recall 命中" tabindex="0" role="button" aria-label="聚焦recall 命中，唯一供给口·带 cwd, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="唯一供给口·带 cwd" data-node-context="时序参与者">
-          <title>recall 命中 · 唯一供给口·带 cwd · 时序参与者</title>
+        <g id="node-ss" data-node-id="ss" data-node-label="SessionStart hook" tabindex="0" role="button" aria-label="聚焦SessionStart hook，session-start-mem.sh, 时序参与者" aria-pressed="false" data-node-kind="security" data-node-sublabel="session-start-mem.sh" data-node-context="时序参与者">
+          <title>SessionStart hook · session-start-mem.sh · 时序参与者</title>
           <rect x="62" y="72" width="135" height="54" rx="6" class="c-mask"/>
-          <rect x="62" y="72" width="135" height="54" rx="6" class="c-backend" data-animate="node" style="--step:0" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(68 78) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          <rect x="62" y="72" width="135" height="54" rx="6" class="c-security" data-animate="node" style="--step:0" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(68 78) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="129.5" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">recall 命中</text>
-          <text data-detail="context" x="129.5" y="111" class="t-muted" font-size="7" text-anchor="middle">唯一供给口·带 cwd</text>
+          <text data-node-label="" data-detail-anchor="" x="129.5" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">SessionStart hook</text>
+          <text data-detail="context" x="129.5" y="111" class="t-muted" font-size="7" text-anchor="middle">session-start-mem.sh</text>
         </g>
 
-        <g id="node-proj" data-node-id="proj" data-node-label="projection" tabindex="0" role="button" aria-label="聚焦projection，per-hit 投影器, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="per-hit 投影器" data-node-context="时序参与者">
-          <title>projection · per-hit 投影器 · 时序参与者</title>
+        <g id="node-rc" data-node-id="rc" data-node-label="cli recall --project" tabindex="0" role="button" aria-label="聚焦cli recall --project，主动面 · 带 cwd, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="主动面 · 带 cwd" data-node-context="时序参与者">
+          <title>cli recall --project · 主动面 · 带 cwd · 时序参与者</title>
           <rect x="230.60000000000002" y="72" width="135" height="54" rx="6" class="c-mask"/>
           <rect x="230.60000000000002" y="72" width="135" height="54" rx="6" class="c-backend" data-animate="node" style="--step:1" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(236.60000000000002 78) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="298.1" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">projection</text>
-          <text data-detail="context" x="298.1" y="111" class="t-muted" font-size="7" text-anchor="middle">per-hit 投影器</text>
+          <text data-node-label="" data-detail-anchor="" x="298.1" y="94" class="t-primary" font-size="10.5" font-weight="600" text-anchor="middle">cli recall --project</text>
+          <text data-detail="context" x="298.1" y="111" class="t-muted" font-size="7" text-anchor="middle">主动面 · 带 cwd</text>
+        </g>
+
+        <g id="node-proj" data-node-id="proj" data-node-label="synthesis-index" tabindex="0" role="button" aria-label="聚焦synthesis-index，MEMORY.md 投影单点, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="MEMORY.md 投影单点" data-node-context="时序参与者">
+          <title>synthesis-index · MEMORY.md 投影单点 · 时序参与者</title>
+          <rect x="399.2" y="72" width="135" height="54" rx="6" class="c-mask"/>
+          <rect x="399.2" y="72" width="135" height="54" rx="6" class="c-backend" data-animate="node" style="--step:2" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(405.2 78) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="466.7" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">synthesis-index</text>
+          <text data-detail="context" x="466.7" y="111" class="t-muted" font-size="7" text-anchor="middle">MEMORY.md 投影单点</text>
         </g>
 
         <g id="node-memdir" data-node-id="memdir" data-node-label="CC memory 目录" tabindex="0" role="button" aria-label="聚焦CC memory 目录，mem-{hex4} 散件, 时序参与者" aria-pressed="false" data-node-kind="database" data-node-sublabel="mem-{hex4} 散件" data-node-context="时序参与者">
           <title>CC memory 目录 · mem-{hex4} 散件 · 时序参与者</title>
-          <rect x="399.2" y="72" width="135" height="54" rx="6" class="c-mask"/>
-          <rect x="399.2" y="72" width="135" height="54" rx="6" class="c-database" data-animate="node" style="--step:2" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(405.2 78) scale(0.6875)">
+          <rect x="567.8" y="72" width="135" height="54" rx="6" class="c-mask"/>
+          <rect x="567.8" y="72" width="135" height="54" rx="6" class="c-database" data-animate="node" style="--step:3" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(573.8 78) scale(0.6875)">
             <ellipse cx="8" cy="4" rx="5" ry="2"/>
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="466.7" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">CC memory 目录</text>
-          <text data-detail="context" x="466.7" y="111" class="t-muted" font-size="7" text-anchor="middle">mem-{hex4} 散件</text>
-        </g>
-
-        <g id="node-synth" data-node-id="synth" data-node-label="synthesis" tabindex="0" role="button" aria-label="聚焦synthesis，MEMORY.md 唯一写口, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="MEMORY.md 唯一写口" data-node-context="时序参与者">
-          <title>synthesis · MEMORY.md 唯一写口 · 时序参与者</title>
-          <rect x="567.8" y="72" width="135" height="54" rx="6" class="c-mask"/>
-          <rect x="567.8" y="72" width="135" height="54" rx="6" class="c-backend" data-animate="node" style="--step:3" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(573.8 78) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="635.3" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">synthesis</text>
-          <text data-detail="context" x="635.3" y="111" class="t-muted" font-size="7" text-anchor="middle">MEMORY.md 唯一写口</text>
+          <text data-node-label="" data-detail-anchor="" x="635.3" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">CC memory 目录</text>
+          <text data-detail="context" x="635.3" y="111" class="t-muted" font-size="7" text-anchor="middle">mem-{hex4} 散件</text>
         </g>
 
         <g id="node-cc" data-node-id="cc" data-node-label="CC 会话" tabindex="0" role="button" aria-label="聚焦CC 会话，原生 auto-memory, 时序参与者" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="原生 auto-memory" data-node-context="时序参与者">
@@ -5314,16 +5304,16 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <text data-detail="context" x="803.9" y="111" class="t-muted" font-size="7" text-anchor="middle">原生 auto-memory</text>
         </g>
 
-        <g id="node-corpus" data-node-id="corpus" data-node-label="corpus_prep 回声闸" tabindex="0" role="button" aria-label="聚焦corpus_prep 回声闸，COMMON 规则, 时序参与者" aria-pressed="false" data-node-kind="security" data-node-sublabel="COMMON 规则" data-node-context="时序参与者">
-          <title>corpus_prep 回声闸 · COMMON 规则 · 时序参与者</title>
+        <g id="node-corpus" data-node-id="corpus" data-node-label="corpus_prep" tabindex="0" role="button" aria-label="聚焦corpus_prep，回声闸, 时序参与者" aria-pressed="false" data-node-kind="security" data-node-sublabel="回声闸" data-node-context="时序参与者">
+          <title>corpus_prep · 回声闸 · 时序参与者</title>
           <rect x="905" y="72" width="135" height="54" rx="6" class="c-mask"/>
           <rect x="905" y="72" width="135" height="54" rx="6" class="c-security" data-animate="node" style="--step:5" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(911 78) scale(0.6875)">
             <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="972.5" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">corpus_prep 回声闸</text>
-          <text data-detail="context" x="972.5" y="111" class="t-muted" font-size="7" text-anchor="middle">COMMON 规则</text>
+          <text data-node-label="" data-detail-anchor="" x="972.5" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">corpus_prep</text>
+          <text data-detail="context" x="972.5" y="111" class="t-muted" font-size="7" text-anchor="middle">回声闸</text>
         </g>
 
         <!-- Legend -->
@@ -5534,14 +5524,14 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     <div class="cards">
       <div class="card">
         <div class="card-header">
-          <div class="card-dot emerald"></div>
-          <h3>引擎参与</h3>
+          <div class="card-dot cyan"></div>
+          <h3>双触发与零引擎</h3>
         </div>
         <ul>
-          <li>&bull; jev / zhipu / emb 三引擎: 本流 0 参与</li>
-          <li>&bull; ①-④ 投影供给: 纯机械 per-hit 散件写, 无模型判定</li>
-          <li>&bull; ⑤-⑦ 回声闸: COMMON 规则整块 DROP, 计数帽纯机械</li>
-          <li>&bull; 唯一语义侧入口在 recall 命中之前, 流内零引擎</li>
+          <li>&bull; 自动: SessionStart hook → synthesis-index (投影单点)</li>
+          <li>&bull; 主动: cli recall --project (per-hit, 复用同一次召回)</li>
+          <li>&bull; 投影全链零引擎 — 机械拼装, gate 在上游注入面</li>
+          <li>&bull; 回声闸防自增强: 注入物重进语料即被弃</li>
         </ul>
       </div>
     </div>

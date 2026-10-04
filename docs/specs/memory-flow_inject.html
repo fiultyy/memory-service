@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="generator" content="archify 2.17.0-dev.1">
-  <title>注入 — 首 turn 锚定与确定性 lane</title>
+  <title>注入 — UserPromptSubmit hook 复用 recall 的首 turn 注入</title>
   <script>
     // Resolve the theme before first paint so light-preference users don't
     // see a dark flash. The toolbar script below re-applies with UI state.
@@ -5081,7 +5081,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
            data-preset-badge-blueprint="蓝图 / 修订 01"
            data-preset-badge-editorial="编辑风格 / 现场笔记">
         <div class="pulse-dot"></div>
-        <h1>注入 — 首 turn 锚定与确定性 lane</h1>
+        <h1>注入 — UserPromptSubmit hook 复用 recall 的首 turn 注入</h1>
       </div>
     </div>
 
@@ -5131,7 +5131,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / 图版 04">
       <svg viewBox="0 0 1080 620" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="classic" data-quality-profile="showcase">
-        <title id="archify-diagram-title">注入 — 首 turn 锚定与确定性 lane</title>
+        <title id="archify-diagram-title">注入 — UserPromptSubmit hook 复用 recall 的首 turn 注入</title>
         <desc id="archify-diagram-description">由 Archify 生成的时序图。</desc>
         <!-- Definitions -->
         <defs>
@@ -5156,9 +5156,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Time Segments -->
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="0" x="48" y="148" width="984" height="152" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="0" x="48" y="148" width="984" height="172" rx="10" class="c-lane" stroke-width="1"/>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="1" x="48" y="314" width="984" height="246" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="1" x="48" y="334" width="984" height="226" rx="10" class="c-lane" stroke-width="1"/>
 
         <!-- Lifelines -->
         <path d="M 145.5 142 L 145.5 555" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
@@ -5168,118 +5168,117 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path d="M 956.5 142 L 956.5 555" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
 
         <!-- Activations -->
-        <rect x="140.5" y="187" width="10" height="161" rx="3" class="c-mask"/>
-        <rect x="140.5" y="187" width="10" height="161" rx="3" class="c-backend" stroke-width="1"/>
-        <rect x="343.25" y="187" width="10" height="66" rx="3" class="c-mask"/>
-        <rect x="343.25" y="187" width="10" height="66" rx="3" class="c-backend" stroke-width="1"/>
-        <rect x="546" y="342" width="10" height="61" rx="3" class="c-mask"/>
-        <rect x="546" y="342" width="10" height="61" rx="3" class="c-backend" stroke-width="1"/>
-        <rect x="748.75" y="247" width="10" height="266" rx="3" class="c-mask"/>
-        <rect x="748.75" y="247" width="10" height="266" rx="3" class="c-frontend" stroke-width="1"/>
-        <rect x="951.5" y="452" width="10" height="61" rx="3" class="c-mask"/>
-        <rect x="951.5" y="452" width="10" height="61" rx="3" class="c-security" stroke-width="1"/>
+        <rect x="343.25" y="168" width="10" height="135" rx="3" class="c-mask"/>
+        <rect x="343.25" y="168" width="10" height="135" rx="3" class="c-backend" stroke-width="1"/>
+        <rect x="546" y="203" width="10" height="45" rx="3" class="c-mask"/>
+        <rect x="546" y="203" width="10" height="45" rx="3" class="c-backend" stroke-width="1"/>
+        <rect x="748.75" y="298" width="10" height="157" rx="3" class="c-mask"/>
+        <rect x="748.75" y="298" width="10" height="157" rx="3" class="c-frontend" stroke-width="1"/>
+        <rect x="951.5" y="398" width="10" height="57" rx="3" class="c-mask"/>
+        <rect x="951.5" y="398" width="10" height="57" rx="3" class="c-security" stroke-width="1"/>
 
         <!-- Messages -->
-        <g data-edge-from="hits" data-edge-to="anchor" data-edge-label="① 命中集→锚定" data-edge-key="0" data-edge-id="m1-hits-anchor">
-          <path data-composition-edge-from="hits" data-composition-edge-to="anchor" data-composition-edge-id="m1-hits-anchor" data-composition-points="152.5,190;341.25,190" d="M 152.5 190 L 341.25 190" class="a-default" data-animate="edge" style="--step:0" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <g data-edge-from="ups" data-edge-to="ri" data-edge-label="① prompt 提交触发" data-edge-key="0" data-edge-id="m1">
+          <path data-composition-edge-from="ups" data-composition-edge-to="ri" data-composition-edge-id="m1" data-composition-points="152.5,170;341.25,170" d="M 152.5 170 L 341.25 170" class="a-emphasis" data-animate="edge" style="--step:0" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <g data-detail="context">
-          <rect x="207.075" y="170" width="79.60000000000001" height="16" rx="3" class="c-mask"/>
-          <text x="246.875" y="180" class="t-backend" font-size="9" text-anchor="middle">① 命中集→锚定</text>
+          <rect x="196.675" y="150" width="100.4" height="16" rx="3" class="c-mask"/>
+          <text x="246.875" y="160" class="t-backend" font-size="9" text-anchor="middle">① prompt 提交触发</text>
         </g>
-        <text data-detail="fine" x="164.5" y="208" class="t-dim" font-size="7">符号锚定门: 实体/路径精确匹配优先</text>
+        <text data-detail="fine" x="164.5" y="188" class="t-dim" font-size="7">stdin payload(prompt/session_id/transcript_path); CC 2.1.179 hook 在 transcript append 前执行</text>
         </g>
 
-        <g data-edge-from="anchor" data-edge-to="cc" data-edge-label="② 首 turn 注入" data-edge-key="1" data-edge-id="m2-anchor-cc">
-          <path data-composition-edge-from="anchor" data-composition-edge-to="cc" data-composition-edge-id="m2-anchor-cc" data-composition-points="355.25,250;746.75,250" d="M 355.25 250 L 746.75 250" class="a-emphasis" data-animate="edge" style="--step:1" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <g data-edge-from="ri" data-edge-to="rc" data-edge-label="② 复用 recall" data-edge-key="1" data-edge-id="m3">
+          <path data-composition-edge-from="ri" data-composition-edge-to="rc" data-composition-edge-id="m3" data-composition-points="355.25,205;544,205" d="M 355.25 205 L 544 205" class="a-emphasis" data-animate="edge" style="--step:1" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <g data-detail="context">
-          <rect x="508.6" y="230" width="84.8" height="16" rx="3" class="c-mask"/>
-          <text x="551" y="240" class="t-backend" font-size="9" text-anchor="middle">② 首 turn 注入</text>
+          <rect x="409.825" y="185" width="79.60000000000001" height="16" rx="3" class="c-mask"/>
+          <text x="449.625" y="195" class="t-backend" font-size="9" text-anchor="middle">② 复用 recall</text>
         </g>
-        <text data-detail="fine" x="367.25" y="268" class="t-dim" font-size="7">UPS 窗生效; compact 后重开窗</text>
+        <text data-detail="fine" x="367.25" y="223" class="t-dim" font-size="7">count&lt;n 首轮档: use_vec=1+候选窗提升; 常驻档: 实体锚定零嵌入; ADR-14 全局跨项目</text>
         </g>
 
-        <g data-edge-from="hits" data-edge-to="lane" data-edge-label="③ 偏好/日程触发" data-edge-key="2" data-edge-id="m3-hits-lane">
-          <path data-composition-edge-from="hits" data-composition-edge-to="lane" data-composition-edge-id="m3-hits-lane" data-composition-points="152.5,345;544,345" d="M 152.5 345 L 544 345" class="a-dashed" data-animate="edge" style="--step:2" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <g data-edge-from="rc" data-edge-to="ri" data-edge-label="③ 命中+gate 收口" data-edge-key="2" data-edge-id="m4">
+          <path data-composition-edge-from="rc" data-composition-edge-to="ri" data-composition-edge-id="m4" data-composition-points="544,245;355.25,245" d="M 544 245 L 355.25 245" class="a-security" data-animate="edge" style="--step:2" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
         <g data-detail="context">
-          <rect x="303.25" y="325" width="90" height="16" rx="3" class="c-mask"/>
-          <text x="348.25" y="335" class="t-messagebus" font-size="9" text-anchor="middle">③ 偏好/日程触发</text>
+          <rect x="402.025" y="225" width="95.2" height="16" rx="3" class="c-mask"/>
+          <text x="449.625" y="235" class="t-security" font-size="9" text-anchor="middle">③ 命中+gate 收口</text>
         </g>
-        <text data-detail="fine" x="164.5" y="363" class="t-dim" font-size="7">preference/event 标签确定性分流</text>
+        <text data-detail="fine" x="367.25" y="263" class="t-dim" font-size="7">与 use_gate 同 schema; 注入面 gate_account=True 生产入账 (手动面不入账防污染)</text>
         </g>
 
-        <g data-edge-from="lane" data-edge-to="cc" data-edge-label="④ lane 直达" data-edge-key="3" data-edge-id="m4-lane-cc">
-          <path data-composition-edge-from="lane" data-composition-edge-to="cc" data-composition-edge-id="m4-lane-cc" data-composition-points="558,400;746.75,400" d="M 558 400 L 746.75 400" class="a-emphasis" data-animate="edge" style="--step:3" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <g data-edge-from="ri" data-edge-to="cc" data-edge-label="④ additionalContext" data-edge-key="3" data-edge-id="m5">
+          <path data-composition-edge-from="ri" data-composition-edge-to="cc" data-composition-edge-id="m5" data-composition-points="355.25,300;746.75,300" d="M 355.25 300 L 746.75 300" class="a-emphasis" data-animate="edge" style="--step:3" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <g data-detail="context">
-          <rect x="617.775" y="380" width="69.2" height="16" rx="3" class="c-mask"/>
-          <text x="652.375" y="390" class="t-backend" font-size="9" text-anchor="middle">④ lane 直达</text>
+          <rect x="495.6" y="280" width="110.8" height="16" rx="3" class="c-mask"/>
+          <text x="551" y="290" class="t-backend" font-size="9" text-anchor="middle">④ additionalContext</text>
         </g>
-        <text data-detail="fine" x="570" y="418" class="t-dim" font-size="7">无 gate — 用户偏好神圣直达</text>
+        <text data-detail="fine" x="367.25" y="318" class="t-dim" font-size="7">2KB 预算裁剪; &lt;memsvc-recall&gt; 包裹; 偏好/日程 lane 确定性直达无 gate</text>
         </g>
 
-        <g data-edge-from="cc" data-edge-to="corpus" data-edge-label="⑤ 注入内容进语料" data-edge-key="4" data-edge-id="m5-cc-corpus">
-          <path data-composition-edge-from="cc" data-composition-edge-to="corpus" data-composition-edge-id="m5-cc-corpus" data-composition-points="760.75,455;949.5,455" d="M 760.75 455 L 949.5 455" class="a-dashed" data-animate="edge" style="--step:4" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <g data-edge-from="cc" data-edge-to="corpus" data-edge-label="⑤ 回声进语料" data-edge-key="4" data-edge-id="m6">
+          <path data-composition-edge-from="cc" data-composition-edge-to="corpus" data-composition-edge-id="m6" data-composition-points="760.75,400;949.5,400" d="M 760.75 400 L 949.5 400" class="a-dashed" data-animate="edge" style="--step:4" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
         <g data-detail="context">
-          <rect x="807.525" y="435" width="95.2" height="16" rx="3" class="c-mask"/>
-          <text x="855.125" y="445" class="t-messagebus" font-size="9" text-anchor="middle">⑤ 注入内容进语料</text>
+          <rect x="817.925" y="380" width="74.4" height="16" rx="3" class="c-mask"/>
+          <text x="855.125" y="390" class="t-messagebus" font-size="9" text-anchor="middle">⑤ 回声进语料</text>
         </g>
-        <text data-detail="fine" x="772.75" y="473" class="t-dim" font-size="7">回声闸拦截 (见投影流)</text>
+        <text data-detail="fine" x="772.75" y="418" class="t-dim" font-size="7">注入内容随 transcript 重进 PreCompact 快照</text>
         </g>
 
-        <g data-edge-from="corpus" data-edge-to="cc" data-edge-label="⑥ DROP+滤除" data-edge-key="5" data-edge-id="m6-corpus-cc">
-          <path data-composition-edge-from="corpus" data-composition-edge-to="cc" data-composition-edge-id="m6-corpus-cc" data-composition-points="949.5,510;760.75,510" d="M 949.5 510 L 760.75 510" class="a-security" data-animate="edge" style="--step:5" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <g data-edge-from="corpus" data-edge-to="cc" data-edge-label="⑥ 整块 DROP" data-edge-key="5" data-edge-id="m7">
+          <path data-composition-edge-from="corpus" data-composition-edge-to="cc" data-composition-edge-id="m7" data-composition-points="949.5,450;760.75,450" d="M 949.5 450 L 760.75 450" class="a-security" data-animate="edge" style="--step:5" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
         <g data-detail="context">
-          <rect x="820.525" y="490" width="69.2" height="16" rx="3" class="c-mask"/>
-          <text x="855.125" y="500" class="t-security" font-size="9" text-anchor="middle">⑥ DROP+滤除</text>
+          <rect x="820.525" y="430" width="69.2" height="16" rx="3" class="c-mask"/>
+          <text x="855.125" y="440" class="t-security" font-size="9" text-anchor="middle">⑥ 整块 DROP</text>
         </g>
-        <text data-detail="fine" x="772.75" y="528" class="t-dim" font-size="7">回声不重入库, 防自增强循环</text>
+        <text data-detail="fine" x="772.75" y="468" class="t-dim" font-size="7">COMMON 规则+扫描跳过+计数滤除; 回声不重入库防自增强</text>
         </g>
 
         <!-- Segment Labels -->
         <g data-graph-role="segment-label" data-segment-id="0">
-          <rect x="56" y="126" width="55.6" height="18" rx="3" class="c-mask"/>
-          <text x="62" y="139" class="t-dim" font-size="9" font-weight="600">锚定注入</text>
+          <rect x="56" y="126" width="112.8" height="18" rx="3" class="c-mask"/>
+          <text x="62" y="139" class="t-dim" font-size="9" font-weight="600">hook 触发与召回复用</text>
         </g>
         <g data-graph-role="segment-label" data-segment-id="1">
-          <rect x="56" y="292" width="128.4" height="18" rx="3" class="c-mask"/>
-          <text x="62" y="305" class="t-dim" font-size="9" font-weight="600">确定性 lane 与回声防护</text>
+          <rect x="56" y="312" width="86.8" height="18" rx="3" class="c-mask"/>
+          <text x="62" y="325" class="t-dim" font-size="9" font-weight="600">注入与回声防护</text>
         </g>
 
         <!-- Participants -->
-        <g id="node-hits" data-node-id="hits" data-node-label="gate 后命中集" tabindex="0" role="button" aria-label="聚焦gate 后命中集，P(high)≥0.20 已收口, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="P(high)≥0.20 已收口" data-node-context="时序参与者">
-          <title>gate 后命中集 · P(high)≥0.20 已收口 · 时序参与者</title>
+        <g id="node-ups" data-node-id="ups" data-node-label="UserPromptSubmit" tabindex="0" role="button" aria-label="聚焦UserPromptSubmit，CC hook · transcript append 前, 时序参与者" aria-pressed="false" data-node-kind="security" data-node-sublabel="CC hook · transcript append 前" data-node-context="时序参与者">
+          <title>UserPromptSubmit · CC hook · transcript append 前 · 时序参与者</title>
           <rect x="62" y="72" width="167" height="54" rx="6" class="c-mask"/>
-          <rect x="62" y="72" width="167" height="54" rx="6" class="c-backend" data-animate="node" style="--step:0" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(68 78) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          <rect x="62" y="72" width="167" height="54" rx="6" class="c-security" data-animate="node" style="--step:0" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(68 78) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="145.5" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">gate 后命中集</text>
-          <text data-detail="context" x="145.5" y="111" class="t-muted" font-size="7" text-anchor="middle">P(high)≥0.20 已收口</text>
+          <text data-node-label="" data-detail-anchor="" x="145.5" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">UserPromptSubmit</text>
+          <text data-detail="context" x="145.5" y="111" class="t-muted" font-size="7" text-anchor="middle">CC hook · transcript append 前</text>
         </g>
 
-        <g id="node-anchor" data-node-id="anchor" data-node-label="锚定注入" tabindex="0" role="button" aria-label="聚焦锚定注入，&lt;memsvc-recall&gt; 包裹, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="&lt;memsvc-recall&gt; 包裹" data-node-context="时序参与者">
-          <title>锚定注入 · &lt;memsvc-recall&gt; 包裹 · 时序参与者</title>
+        <g id="node-ri" data-node-id="ri" data-node-label="recall_inject.py" tabindex="0" role="button" aria-label="聚焦recall_inject.py，首n轮档/常驻档, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="首n轮档/常驻档" data-node-context="时序参与者">
+          <title>recall_inject.py · 首n轮档/常驻档 · 时序参与者</title>
           <rect x="264.75" y="72" width="167" height="54" rx="6" class="c-mask"/>
           <rect x="264.75" y="72" width="167" height="54" rx="6" class="c-backend" data-animate="node" style="--step:1" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(270.75 78) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="348.25" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">锚定注入</text>
-          <text data-detail="context" x="348.25" y="111" class="t-muted" font-size="7" text-anchor="middle">&lt;memsvc-recall&gt; 包裹</text>
+          <text data-node-label="" data-detail-anchor="" x="348.25" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">recall_inject.py</text>
+          <text data-detail="context" x="348.25" y="111" class="t-muted" font-size="7" text-anchor="middle">首n轮档/常驻档</text>
         </g>
 
-        <g id="node-lane" data-node-id="lane" data-node-label="偏好/日程 lane" tabindex="0" role="button" aria-label="聚焦偏好/日程 lane，确定性注入, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="确定性注入" data-node-context="时序参与者">
-          <title>偏好/日程 lane · 确定性注入 · 时序参与者</title>
+        <g id="node-rc" data-node-id="rc" data-node-label="recall 复用" tabindex="0" role="button" aria-label="聚焦recall 复用，top_k=8 · 全局无cwd, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="top_k=8 · 全局无cwd" data-node-context="时序参与者">
+          <title>recall 复用 · top_k=8 · 全局无cwd · 时序参与者</title>
           <rect x="467.5" y="72" width="167" height="54" rx="6" class="c-mask"/>
           <rect x="467.5" y="72" width="167" height="54" rx="6" class="c-backend" data-animate="node" style="--step:2" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(473.5 78) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="551" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">偏好/日程 lane</text>
-          <text data-detail="context" x="551" y="111" class="t-muted" font-size="7" text-anchor="middle">确定性注入</text>
+          <text data-node-label="" data-detail-anchor="" x="551" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">recall 复用</text>
+          <text data-detail="context" x="551" y="111" class="t-muted" font-size="7" text-anchor="middle">top_k=8 · 全局无cwd</text>
         </g>
 
-        <g id="node-cc" data-node-id="cc" data-node-label="CC 新会话" tabindex="0" role="button" aria-label="聚焦CC 新会话，首 turn 窗, 时序参与者" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="首 turn 窗" data-node-context="时序参与者">
-          <title>CC 新会话 · 首 turn 窗 · 时序参与者</title>
+        <g id="node-cc" data-node-id="cc" data-node-label="CC 会话" tabindex="0" role="button" aria-label="聚焦CC 会话，additionalContext, 时序参与者" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="additionalContext" data-node-context="时序参与者">
+          <title>CC 会话 · additionalContext · 时序参与者</title>
           <rect x="670.25" y="72" width="167" height="54" rx="6" class="c-mask"/>
           <rect x="670.25" y="72" width="167" height="54" rx="6" class="c-frontend" data-animate="node" style="--step:3" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(676.25 78) scale(0.6875)">
@@ -5288,8 +5287,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="753.75" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">CC 新会话</text>
-          <text data-detail="context" x="753.75" y="111" class="t-muted" font-size="7" text-anchor="middle">首 turn 窗</text>
+          <text data-node-label="" data-detail-anchor="" x="753.75" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">CC 会话</text>
+          <text data-detail="context" x="753.75" y="111" class="t-muted" font-size="7" text-anchor="middle">additionalContext</text>
         </g>
 
         <g id="node-corpus" data-node-id="corpus" data-node-label="corpus_prep 回声闸" tabindex="0" role="button" aria-label="聚焦corpus_prep 回声闸，COMMON 规则, 时序参与者" aria-pressed="false" data-node-kind="security" data-node-sublabel="COMMON 规则" data-node-context="时序参与者">
@@ -5318,10 +5317,6 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <g data-legend-semantic-kind="dashed" data-legend-x="210" data-legend-baseline="566" data-legend-width="83">
             <path d="M 210 563 L 244 563" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
             <text x="253" y="566" class="t-muted" font-size="10" font-weight="500">异步追踪</text>
-          </g>
-          <g data-legend-semantic-kind="default" data-legend-x="315" data-legend-baseline="566" data-legend-width="83">
-            <path d="M 315 563 L 349 563" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
-            <text x="358" y="566" class="t-muted" font-size="10" font-weight="500">默认消息</text>
           </g>
         </g>
       </svg>
@@ -5513,13 +5508,13 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>引擎参与</h3>
+          <h3>触发与复用</h3>
         </div>
         <ul>
-          <li>&bull; 本流全程零引擎调用 — 锚定与 lane 均为确定性符号匹配</li>
-          <li>&bull; jev/zhipu/emb 只在上游 gate 收口时参与, 注入环节不入场</li>
-          <li>&bull; 对照: gate 流用 embedding 召回+LLM 打分, 注入流只消费命中集</li>
-          <li>&bull; ⑤⑥ 回声闸是 COMMON 规则过滤, 同样不经过模型</li>
+          <li>&bull; 触发: UserPromptSubmit hook (非 SessionStart — 每 prompt 皆触发)</li>
+          <li>&bull; 复用: recall_inject 内部即 recall.recall 调用 (top_k=8 全局)</li>
+          <li>&bull; 首n轮档向量召回 / 常驻档实体锚定; lane 确定性直达</li>
+          <li>&bull; 零新引擎: gate 复用判官, 嵌入复用 embedding</li>
         </ul>
       </div>
     </div>

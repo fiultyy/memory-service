@@ -1,0 +1,3 @@
+{"type": "session", "delegationDepth": 0}
+{"type": "user/message", "data": {"source": {"kind": "user"}, "content": [{"type": "text", "text": "dsh 黄金样本用户回合"}]}}
+{"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": "dsh 助手回复"}]}}}

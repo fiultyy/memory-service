@@ -1,0 +1,7 @@
+{
+ "prompt": "黄金样本查询: sqlite-vec 部署版本",
+ "session_id": "gold-ups-cc",
+ "transcript_path": "@TRANSCRIPT@",
+ "cwd": "/tmp/gold",
+ "hook_event_name": "UserPromptSubmit"
+}

@@ -1,0 +1,7 @@
+{
+ "transcript_path": "",
+ "session_id": "gold-dsh-sess",
+ "cwd": "/tmp/gold",
+ "compaction_id": "c0mpact-1234-abcd",
+ "hook_event_name": "PreCompact"
+}

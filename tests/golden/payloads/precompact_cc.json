@@ -1,0 +1,7 @@
+{
+ "transcript_path": "@TRANSCRIPT@",
+ "session_id": "gold-cc-sess",
+ "cwd": "/tmp/gold",
+ "compaction_id": "",
+ "hook_event_name": "PreCompact"
+}

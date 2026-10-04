@@ -1,0 +1,3 @@
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "黄金样本第一条用户输入: 部署 sqlite-vec"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "黄金样本助手回复"}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "第二条用户输入"}]}}

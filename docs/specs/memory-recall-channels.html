@@ -5573,24 +5573,24 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>三通道职责</h3>
+          <h3>三通道职责与互斥</h3>
         </div>
         <ul>
-          <li>&bull; 通道1 注入: 锚定召回 + 偏好/日程确定性 lane, 零投影</li>
-          <li>&bull; 通道2 投影: SessionStart synthesis 单点写 MEMORY.md</li>
-          <li>&bull; 通道3 主动: 唯一 per-hit 投影供给口 (带 cwd)</li>
+          <li>&bull; 通道1 注入: UserPromptSubmit 每轮触发; 首 n turn 向量档→常驻实体锚定档; 进上下文不落盘</li>
+          <li>&bull; 通道2 SessionStart: 对账非召回 — 散件 fact_id→KG 现值→重写 MEMORY.md; 冷启动不兜底</li>
+          <li>&bull; 通道3 主动 --project: 唯一散件生产者; 互斥防双写 — 进上下文/写散件永不同开, 散件=唯一耦合点</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot rose"></div>
-          <h3>laya 处理节点 (security 色)</h3>
+          <h3>gate 分布</h3>
         </div>
         <ul>
-          <li>&bull; gate: 召回 tag/边翼 P(high)≥0.20 批评分收口 (三通道共享)</li>
-          <li>&bull; corpus 回声闸为纯机械规则, 非 laya — 已另标</li>
-          <li>&bull; 写径 laya (p_dur 审计) 不在本图, 见生命周期图</li>
+          <li>&bull; 注入面: gate P(high)≥0.20 收口 + gate_account 生产入账 (手动面不入账防污染)</li>
+          <li>&bull; 投影面/SessionStart: 零判官 — 机械落盘与对账 (mem_score 排序+主题聚合+分数地板)</li>
+          <li>&bull; 写径判官 (p_dur 审计) 不在本图, 见生命周期图</li>
         </ul>
       </div>
 

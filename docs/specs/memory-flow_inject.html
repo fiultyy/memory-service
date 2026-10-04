@@ -5184,7 +5184,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="196.675" y="150" width="100.4" height="16" rx="3" class="c-mask"/>
           <text x="246.875" y="160" class="t-backend" font-size="9" text-anchor="middle">① prompt 提交触发</text>
         </g>
-        <text data-detail="fine" x="164.5" y="188" class="t-dim" font-size="7">stdin payload(prompt/session_id/transcript_path); CC 2.1.179 hook 在 transcript append 前执行</text>
+        <text data-detail="fine" x="164.5" y="188" class="t-dim" font-size="7">每 prompt 触发 (transcript append 前); 首 n turn 首轮档, 之后常驻档</text>
         </g>
 
         <g data-edge-from="ri" data-edge-to="rc" data-edge-label="② 复用 recall" data-edge-key="1" data-edge-id="m3">
@@ -5211,7 +5211,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="495.6" y="280" width="110.8" height="16" rx="3" class="c-mask"/>
           <text x="551" y="290" class="t-backend" font-size="9" text-anchor="middle">④ additionalContext</text>
         </g>
-        <text data-detail="fine" x="367.25" y="318" class="t-dim" font-size="7">2KB 预算裁剪; &lt;memsvc-recall&gt; 包裹; 偏好/日程 lane 确定性直达无 gate</text>
+        <text data-detail="fine" x="367.25" y="318" class="t-dim" font-size="7">2KB 预算裁剪; &lt;memsvc-recall&gt; 包裹; lane 确定性直达; 不写散件 — 投影单点防双写</text>
         </g>
 
         <g data-edge-from="cc" data-edge-to="corpus" data-edge-label="⑤ 回声进语料" data-edge-key="4" data-edge-id="m6">
@@ -5508,13 +5508,13 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>触发与复用</h3>
+          <h3>触发·档位·互斥</h3>
         </div>
         <ul>
-          <li>&bull; 触发: UserPromptSubmit hook (非 SessionStart — 每 prompt 皆触发)</li>
-          <li>&bull; 复用: recall_inject 内部即 recall.recall 调用 (top_k=8 全局)</li>
-          <li>&bull; 首n轮档向量召回 / 常驻档实体锚定; lane 确定性直达</li>
-          <li>&bull; 零新引擎: gate 复用判官, 嵌入复用 embedding</li>
+          <li>&bull; 触发: UserPromptSubmit 每 prompt (非仅开局)</li>
+          <li>&bull; 档位: 首 n turn 向量档 (use_vec=1+topk 提升) → 常驻档实体锚定零嵌入</li>
+          <li>&bull; 复用: recall_inject 即 recall.recall 包装 (top_k=8 全局无 cwd)</li>
+          <li>&bull; 互斥: 只进上下文不落盘; gate_account=True 生产入账</li>
         </ul>
       </div>
     </div>

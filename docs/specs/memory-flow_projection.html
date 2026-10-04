@@ -5212,7 +5212,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="671.9999999999999" y="290" width="95.2" height="16" rx="3" class="c-mask"/>
           <text x="719.5999999999999" y="300" class="t-backend" font-size="9" text-anchor="middle">④ MEMORY.md 装载</text>
         </g>
-        <text data-detail="fine" x="654.3" y="328" class="t-dim" font-size="7">CC 原生 auto-memory 开局装 MEMORY.md 进上下文</text>
+        <text data-detail="fine" x="654.3" y="328" class="t-dim" font-size="7">CC 原生 auto-memory 开局装载; 本流 stdout 给调用者, 不注入会话上下文 (与注入面互斥)</text>
         </g>
 
         <g data-edge-from="cc" data-edge-to="corpus" data-edge-label="⑤ 回声进语料" data-edge-key="4" data-edge-id="p5">
@@ -5525,13 +5525,13 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>双触发与零引擎</h3>
+          <h3>双触发·对账·互斥</h3>
         </div>
         <ul>
-          <li>&bull; 自动: SessionStart hook → synthesis-index (投影单点)</li>
-          <li>&bull; 主动: cli recall --project (per-hit, 复用同一次召回)</li>
-          <li>&bull; 投影全链零引擎 — 机械拼装, gate 在上游注入面</li>
-          <li>&bull; 回声闸防自增强: 注入物重进语料即被弃</li>
+          <li>&bull; 自动: SessionStart → synthesis-index 对账 (非召回; 冷启动清行不兜底)</li>
+          <li>&bull; 主动: cli recall --project — 唯一散件生产者; 空命中不写; 无投影专属 gate</li>
+          <li>&bull; 互斥: 本流不进会话上下文; 注入面只进上下文不落盘 (防双写)</li>
+          <li>&bull; 散件=两路唯一耦合: 生产→对账→CC 开局装载; 回声闸防自增强</li>
         </ul>
       </div>
     </div>

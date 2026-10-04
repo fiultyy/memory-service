@@ -7,8 +7,8 @@
   "visualReview": "pending",
   "artifact": {
     "path": "/home/yy/projects/memory-service/docs/specs/memory-flow_inject.html",
-    "sha256": "d256d6176c6ef1fd857e0b20e11d198e5cb7f39bda49b99c1800cd811648ef89",
-    "bytes": 805224
+    "sha256": "676ff9dfc2d904ce16d0492bb45e7bfbd89b8d624e04b235676fc485a4d0cbc9",
+    "bytes": 805238
   },
   "state": {
     "detail": "read",

@@ -602,14 +602,14 @@ def ingest_recent(cwd: str | None = None, limit: int = 10,
 # ── init-memory (bootstrap) ─────────────────────────────────────────
 
 def _proj_memory_dir(memory_dir: str | None, cwd: str, harness: str = "cc") -> Path:
-    """投影目录解析优先级: 显式 --memory-dir > harness 缺省(cc→cc_memory_dir,
-    dsh→dsh_memory_dir)。此 harness 维=存放位置方案(与 corpus 清洗的 harness 键分属两面)。"""
-    import projection
+    """投影目录解析优先级: 显式 --memory-dir > harness 缺省。此 harness 维=
+    存放位置方案(与 corpus 清洗的 harness 键分属两面)。
+    (S2 解耦改道 2026-10-04: 缺省路径走 harness.SPECS 注册表 — 单源;
+    调用面 choices 仍 [cc,dsh], 行为与旧 cc/dsh 分支逐字节等价。)"""
     if memory_dir:
         return Path(memory_dir)
-    if harness == "dsh":
-        return projection.dsh_memory_dir(cwd)
-    return projection.cc_memory_dir(cwd)
+    import harness as harness_reg
+    return harness_reg.memory_dir_or_raise(harness, cwd)
 
 
 def init_memory(memory_dir: str | None = None,

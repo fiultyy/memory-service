@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "hooks"))
 
 import db
-import recall_inject as ri
+import recall_inject as ri   # shim (S4): 兼容门面
+import runtime as rt            # 业务体单源 (patch 目标随实现搬家)
 
 
 def _payload(prompt="专家职位 的结论是什么"):
@@ -52,7 +53,7 @@ def _patch(monkeypatch, n_hits=1):
                       "extractor": "llm", "value": f"结论 {i}"}}
             for i in range(n_hits)]
     monkeypatch.setattr(cli, "recall", lambda *a, **k: {"results": hits})
-    monkeypatch.setattr(ri, "_log_fail", lambda m: None)
+    monkeypatch.setattr(rt, "_log_fail", lambda m: None)
     monkeypatch.setattr(scoring, "record_recall_observation", lambda *a, **k: None)
     monkeypatch.setattr(scoring, "refresh_lif_on_recall", lambda *a, **k: None)
     monkeypatch.setattr(scoring, "refresh_restricted", lambda f: True)
@@ -123,7 +124,7 @@ def test_both_lanes_empty_behavior_unchanged(monkeypatch, tmp_path):
     import recall as recall_mod
     monkeypatch.setattr(recall_mod, "search_entities",
                         lambda toks: [{"id": "e1", "name": "专家职位"}])
-    monkeypatch.setattr(ri, "_log_fail", lambda m: None)
+    monkeypatch.setattr(rt, "_log_fail", lambda m: None)
     assert _run(monkeypatch, prompt="完全无关提问") == ""  # 无锚零输出 (现状)
 
 
@@ -136,7 +137,7 @@ def test_lane_budget_cap_truncates_rows(monkeypatch, tmp_path):
     ctx = _ctx(_run(monkeypatch, prompt="完全无关提问"))
     lane_rows = [ln for ln in ctx.splitlines() if ln.startswith("偏好:")]
     assert 0 < sum(len(ln.encode("utf-8")) for ln in lane_rows) \
-        <= ri._LANE_MAX_BYTES
+        <= rt._LANE_MAX_BYTES
     assert len(lane_rows) == 1, lane_rows  # 两条即超帽 → 只留 p_dur 最高首行
 
 

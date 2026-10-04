@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "hooks"))
 
 import db
-import recall_inject as ri
+import recall_inject as ri   # shim (S4): 兼容门面
+import runtime as rt            # 业务体单源 (patch 目标随实现搬家)
 
 PROMPT = "专家职位 的结论是什么"
 
@@ -44,7 +45,7 @@ def _run_inject(monkeypatch, tmp_path, transcript_lines=()):
     """count=0 (空 transcript) → 首轮档窗内 → 跑到记账段。返回 stdout 文本。"""
     # A1-RW-001-F1: 日志路径统一隔离 (与 _run_main 同款), 零真台账污染。
     logged: list[str] = []
-    monkeypatch.setattr(ri, "_log_fail", logged.append)
+    monkeypatch.setattr(rt, "_log_fail", logged.append)
     tpath = tmp_path / "t.jsonl"
     tpath.write_text("\n".join(transcript_lines) + "\n", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", io.StringIO(_payload(str(tpath))))
@@ -57,7 +58,7 @@ def _run_inject(monkeypatch, tmp_path, transcript_lines=()):
 def test_probe_false_skips_accounting_but_still_injects(tmp_path, monkeypatch):
     """核心契约: DB 只读 (_probe_rw=False) → 记账零调用, 注入照常发射。"""
     fid = _mk_lexical_kg(tmp_path)
-    monkeypatch.setattr(ri, "_probe_rw", lambda: False)
+    monkeypatch.setattr(rt, "_probe_rw", lambda: False)
     calls = []
     import scoring
     monkeypatch.setattr(scoring, "refresh_lif_on_recall",
@@ -75,7 +76,7 @@ def test_probe_false_skips_accounting_but_still_injects(tmp_path, monkeypatch):
 def test_probe_true_keeps_accounting(tmp_path, monkeypatch):
     """探测可写 → 记账语义不变 (refresh 只对最终注入条)。"""
     fid = _mk_lexical_kg(tmp_path)
-    monkeypatch.setattr(ri, "_probe_rw", lambda: True)
+    monkeypatch.setattr(rt, "_probe_rw", lambda: True)
     calls = []
     import scoring
     monkeypatch.setattr(scoring, "refresh_lif_on_recall",
@@ -98,12 +99,12 @@ def test_probe_rw_ok_on_writable_db(tmp_path, monkeypatch):
 def test_probe_rw_logs_fs_and_sqlite_failure(tmp_path, monkeypatch):
     """fs 写 + sqlite 写双失败 → False 且台账落 rw-probe 行 (鉴别信号)。"""
     logged = []
-    monkeypatch.setattr(ri, "_log_fail", logged.append)
+    monkeypatch.setattr(rt, "_log_fail", logged.append)
     # fs 写失败: SVC_DIR/data 指向不可写目录 (monkeypatch SVC_DIR → tmp 空目录下
     # 的只读路径不存在直接建失败不严谨 — 改为指到一个文件路径上必失败)
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("x")
-    monkeypatch.setattr(ri, "SVC_DIR", blocker)
+    monkeypatch.setattr(rt, "SVC_DIR", blocker)
     import db as db_mod
     monkeypatch.setattr(db_mod, "get_conn",
                         lambda: (_ for _ in ()).throw(
@@ -118,7 +119,7 @@ def test_log_fail_line_carries_pid_argv0_trace(tmp_path, monkeypatch):
     """F1 溯源字段: 真实 _log_fail 落盘行带 `[pid=N argv0]` 前缀 —
     pytest 进程与 hook 子进程写入一眼可分 (A1 误诊教训的回归锚)。"""
     (tmp_path / "data").mkdir()
-    monkeypatch.setattr(ri, "SVC_DIR", tmp_path)  # _log_fail 写 SVC_DIR/data/
+    monkeypatch.setattr(rt, "SVC_DIR", tmp_path)  # _log_fail 写 SVC_DIR/data/
     ri._log_fail("rw-probe: trace-check")
     line = (tmp_path / "data" / "hook-recall.log").read_text(
         encoding="utf-8").strip()

@@ -100,3 +100,53 @@ def test_registration_surfaces_frozen():
     assert json.load(open(REPO / "hooks" / "dsh-hooks.json")) == \
         json.load(open(GOLDEN / "reg" / "dsh-hooks.json")), \
         "hooks/dsh-hooks.json 漂移 (解耦全程不许动)"
+
+
+# ── S6: SessionStart 投影下沉 (库面直调) 两级验证 ────────────────────
+
+def test_sessionstart_shell_tolerant(gold_env):
+    """壳级: 任意 payload 恒 exit 0 (timeout 守护 + 容错留壳)。"""
+    r = _run_hook(REPO / "hooks" / "session-start-mem.sh",
+                  _payload("sessionstart_cc.json"), gold_env["env"])
+    assert r.returncode == 0
+
+
+def _project_fixture(tmp_path, monkeypatch, harness_env, mem_dir_of):
+    """库面重放: 隔离 DB + 一 atom + 一散件 → project_on_start → MEMORY.md。"""
+    import db as db_mod
+    import projection
+    import runtime
+    db_mod.init(tmp_path / "m.db")
+    conn = db_mod.get_conn()
+    proj_cwd = tmp_path / "proj"
+    proj_cwd.mkdir()
+    cur = conn.execute(
+        "INSERT INTO atom(text, label, p_dur, valid_from) VALUES(?,?,?,?)",
+        ("sqlite-vec 黄金投影原子", "fact", 0.7, "2026-10-04T00:00:00+00:00"))
+    aid = cur.lastrowid
+    row = dict(conn.execute("SELECT * FROM atom WHERE id=?", (aid,)).fetchone())
+    row["id"] = f"atom-{aid}"  # project_atom_md 期望形 (ATOM_FID_RE)
+    mem_dir = mem_dir_of(str(proj_cwd))
+    projection.project_atom_md(dict(row), mem_dir)
+    payload = json.loads(_payload("sessionstart_cc.json"))
+    payload["cwd"] = str(proj_cwd)
+    env = {"MEM_HARNESS": harness_env} if harness_env else {}
+    out = runtime.project_on_start(payload, env=env)
+    assert out and out.get("cold_start") is not True
+    memory_md = (mem_dir / "MEMORY.md")
+    assert memory_md.is_file(), "对账后 MEMORY.md 必须重写"
+    body = memory_md.read_text(encoding="utf-8")
+    assert "sqlite-vec 黄金投影原子" in body
+
+
+def test_project_on_start_cc(tmp_path, monkeypatch):
+    import projection
+    _project_fixture(tmp_path, monkeypatch, None, projection.cc_memory_dir)
+
+
+def test_project_on_start_dsh(tmp_path, monkeypatch):
+    """dsh env → 落 ~/.dsh/projects/<enc>/memory (HOME 隔离下验证)。"""
+    import projection
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    _project_fixture(tmp_path, monkeypatch, "dsh", projection.dsh_memory_dir)

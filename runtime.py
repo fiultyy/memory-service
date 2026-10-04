@@ -11,6 +11,7 @@ dsh 桥同形) + env, harness 差异全部经 harness.SPECS (L1) 消解。
 
 入口面:
 - ``snapshot_transcript(payload, env)`` — ①ingest 自动·快照面 (S5);
+- ``project_on_start(payload, env)`` — ③投影·SessionStart 对账面 (S6);
 - ``read_payload()`` — stdin CC 形 JSON 单源收口;
 - ``emit_context(ctx, channel)`` — 协议出端 (cc-hook → hookSpecificOutput);
 - ``inject_context(payload, env)`` — ④注入业务体 (自 hooks/recall_inject.py
@@ -478,6 +479,33 @@ def snapshot_transcript(payload: dict, env=None) -> Path | None:
 
 
 
+# ── ③投影·SessionStart 对账面 (自 session-start-mem.sh 平移, S6) ────
+
+def project_on_start(payload: dict, env=None) -> dict | None:
+    """SessionStart 对账投影: KG 现值 → memory 目录 MEMORY.md 重写
+    (synthesis-index 单点, 09-01 终裁A方案; 输出丢弃 — hook 契约是落盘
+    副作用, 非 stdout)。
+
+    白名单路由 (≡ 旧 bash case): MEM_HARNESS=dsh → dsh 目录, 其余 → cc。
+    (S6 唯一有意微变: 库面直调 cli.synthesis_index, 不再起子进程 —
+    少一次冷启动, 落盘内容不变; timeout 守护留壳层。)
+    """
+    if env is None:
+        env = os.environ
+    import cli  # noqa: F401 — import 即 _load_env() (与旧子进程同款 env 面)
+    import harness as harness_reg
+    session_id = (payload.get("session_id") or "").strip() or "unknown"
+    # scope 空 → SVC_DIR (≡ 旧 bash 子进程 cd SVC_DIR 后 --scope 缺省取 getcwd)
+    scope = (payload.get("cwd") or "").strip() or str(SVC_DIR)
+    h = harness_reg.resolve_harness(env.get("MEM_HARNESS"))
+    try:
+        return cli.synthesis_index(scope=scope, session=session_id, harness=h)
+    except Exception as exc:
+        _log_fail(f"session-start-fail: {type(exc).__name__}: {exc}")
+        return None
+
+
+
 # ── 壳分发入口 (python3 runtime.py <event>) ─────────────────────────
 
 def hook_main(argv: list[str] | None = None) -> int:
@@ -488,6 +516,8 @@ def hook_main(argv: list[str] | None = None) -> int:
     event = argv[0] if argv else ""
     if event == "precompact":
         snapshot_transcript(read_payload() or {})
+    elif event == "session-start":
+        project_on_start(read_payload() or {})
     elif event == "user-prompt":
         payload = read_payload()
         if payload is not None:

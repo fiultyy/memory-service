@@ -406,14 +406,14 @@ def snapshot_transcript(payload: dict, env=None) -> Path | None:
     transcript = (payload.get("transcript_path") or "").strip()
     session_id = (payload.get("session_id") or "").strip() or "unknown"
 
-    # dsh 桥回填: payload 恒带空 transcript_path → 按 session_id 从 dsh
-    # session 存储回查, mtime 最新; 找不到维持空 → 放行。
+    # dsh 桥回填: payload 恒带空 transcript_path → spec 回查 (补票下沉
+    # 2026-10-04: 存储布局知识归 harness.SPECS, L2 不再内联 glob)。
     if not transcript and session_id and session_id != "unknown":
-        home = env.get("HOME") or str(Path.home())
-        cands = list((Path(home) / ".dsh" / "sessions").glob(
-            f"*/{session_id}/session.jsonl.zstd"))
-        if cands:
-            transcript = str(max(cands, key=lambda p: p.stat().st_mtime))
+        locate = spec.locate_transcript
+        if locate is not None:
+            found = locate(session_id, env.get("HOME") or str(Path.home()))
+            if found is not None:
+                transcript = str(found)
     if not transcript:
         return None
     tpath = Path(transcript)

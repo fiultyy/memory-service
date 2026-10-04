@@ -53,6 +53,10 @@ class HarnessSpec:
     session_env: str | None
     # ── 注入面 turn 计数 (S3 单源: transcripts.count_user_turns; None = 无注入面) ──
     count_user_turns: Callable | None = None
+    # ── 快照回查 (补票 2026-10-04): payload transcript_path 空 + session_id 时按
+    # harness 存储布局反查; None = 无回查能力 (cc 靠 payload 自带路径)。
+    # (session_id, home) → Path | None (mtime 最新)。
+    locate_transcript: Callable[[str, str], Path | None] | None = None
 
 
 def _svc_spool() -> Path:
@@ -64,8 +68,17 @@ def _dsh_spool() -> Path:
     return Path.home() / ".dsh" / "memory-spool"
 
 
+def _locate_dsh_transcript(session_id: str, home: str) -> Path | None:
+    """dsh session_id → transcript (补票下沉 2026-10-04, 自 runtime.py 内联
+    glob 搬家): 桥 payload 恒带空 transcript_path → 按 session_id 回查
+    ~/.dsh/sessions/*/；多命中取 mtime 最新 (≡ ls -1t); 找不到 → None。"""
+    cands = list((Path(home) / ".dsh" / "sessions").glob(
+        f"*/{session_id}/session.jsonl.zstd"))
+    return max(cands, key=lambda p: p.stat().st_mtime) if cands else None
+
+
 def _mk(name: str, *, memory_dir=None, spool_env=None, spool_default=None,
-        session_env=None) -> HarnessSpec:
+        session_env=None, locate_transcript=None) -> HarnessSpec:
     """从 transcripts 既有表组装 (引用不重写) — 表结构变更由身份断言暴露。"""
     pdir, sid, esteps, keep = transcripts._ADAPTORS[name]
     return HarnessSpec(
@@ -83,6 +96,7 @@ def _mk(name: str, *, memory_dir=None, spool_env=None, spool_default=None,
         session_env=session_env,
         count_user_turns=(transcripts.count_user_turns
                           if name in ("cc", "dsh") else None),
+        locate_transcript=locate_transcript,
     )
 
 
@@ -97,7 +111,8 @@ SPECS: dict[str, HarnessSpec] = {
     # 投影落 ~/.dsh/projects/<enc>/memory, spool 池固定 ~/.dsh/memory-spool。
     "dsh": _mk("dsh",
                memory_dir=projection.dsh_memory_dir,
-               spool_env=None, spool_default=_dsh_spool),
+               spool_env=None, spool_default=_dsh_spool,
+               locate_transcript=_locate_dsh_transcript),
     # pi/omp/codex: 仅手动 cli ingest 面 (transcript 消费原语齐), 无
     # memory 投影约定 / 自动快照面 / session env — 能力=None 响亮可查。
     "pi": _mk("pi"),

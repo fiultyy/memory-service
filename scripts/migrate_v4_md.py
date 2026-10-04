@@ -55,7 +55,9 @@ def _retire_ids(conn, name: str, keep_ids: set[int]) -> list[int]:
     """refs 全部指向 name 的 live 句级 atom → 拟退场 id 列表。
 
     gist 非空 (v4 新段) 不碰; refs 含其他源 (transcript/其他 md) 不碰;
-    keep_ids (shadow keep 带) 不碰。"""
+    keep_ids (shadow keep 带) 不碰。判定只看 ``session:`` 前缀的正规引用
+    行 — v2 存量 refs 混入段文本脏串 (merge 通道历史 append), 字面
+    ``all()`` 会被脏串卡死 (实测 retired 恒 0 的根因)。"""
     rows = conn.execute(
         "SELECT id, source_refs FROM atom "
         "WHERE valid_to IS NULL AND gist IS NULL").fetchall()
@@ -67,8 +69,9 @@ def _retire_ids(conn, name: str, keep_ids: set[int]) -> list[int]:
             refs = json.loads(r["source_refs"] or "[]")
         except (ValueError, TypeError):
             refs = []
-        refs = [s for s in refs if isinstance(s, str)]
-        if refs and all(f"memory:{name}#" in s for s in refs):
+        mem_refs = [s for s in refs
+                    if isinstance(s, str) and s.startswith("session:memory:")]
+        if mem_refs and all(f"memory:{name}#" in s for s in mem_refs):
             out.append(r["id"])
     return out
 
@@ -103,6 +106,7 @@ def main() -> int:
 
     conn = db.get_conn()
     totals = {"files": 0, "segments": 0, "retired": 0, "kept": 0}
+    failed: list[str] = []
     now = _now()
     for name in names:
         path = md_paths.get(name) or name
@@ -117,9 +121,17 @@ def main() -> int:
             keep_n = sum(1 for i in _ids_of(conn, name) if i in keep_ids)
             totals["kept"] += keep_n
             print(f"[dry] {name}: shadow_segs={r['segments']} "
-                  f"retire_candidates={len(ids)} keep={keep_n}")
+                  f"retire_candidates={len(ids)} keep={keep_n}", flush=True)
         else:
-            r = bootstrap.re_ingest_file(path)
+            try:
+                r = bootstrap.re_ingest_file(path)
+            except Exception as exc:  # noqa: BLE001 — 挂起: 该文件留待重跑
+                # LayaUnavailable 族 (jev 云端批偶发失败) 不杀全量 — 文件级
+                # 断点: chunk sha 幂等保重跑零重复 (已入图段跳过, 切分重复
+                # 成本可接受), retire 未执行 → 旧句级全在。
+                failed.append(f"{name}: {type(exc).__name__}: {exc}")
+                print(f"SUSPEND {name}: {type(exc).__name__}: {exc}")
+                continue
             for aid in ids:
                 conn.execute(
                     "UPDATE atom SET valid_to=? WHERE id=? AND valid_to IS NULL",
@@ -127,11 +139,16 @@ def main() -> int:
                 vec_index.delete_atom(aid)
             conn.commit()
             print(f"{name}: segments={r.get('segments')} retired={len(ids)} "
-                  f"(ingest atoms={r.get('atoms')} merged={r.get('merged')})")
+                  f"(ingest atoms={r.get('atoms')} merged={r.get('merged')})",
+                  flush=True)
         totals["files"] += 1
         totals["segments"] += r.get("segments", 0)
         totals["retired"] += len(ids)
     print(json.dumps(totals, ensure_ascii=False))
+    if failed:
+        print(f"SUSPENDED {len(failed)} 文件 (重跑即续):")
+        for f in failed:
+            print("  -", f)
     return 0
 
 

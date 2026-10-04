@@ -10,7 +10,7 @@
 
 H1 切换票 (2026-10-01): hook 不再拉起 spool-worker (旧通道下线, spool 由
 mem_daemon 第二 watch 源段级消费) — 5. 断言 worker 零拉起 + 快照照常落盘;
-worker 直跑用例保留 (脚本文件仍在, 作历史参照/手动排干)。
+worker 直跑用例已随脚本退役删除 (S8 归档 .archive/hooks-retired-20261004/)。
 
 红线: 全程 tmp 注入池 (MEM_SPOOL_DIR) + python3 shim 硬拦 autodream —
 生产 db 零触碰, 零 LLM 调用; 生产 spool 内容断言前后不变。
@@ -25,7 +25,6 @@ import time
 
 REPO = pathlib.Path(__file__).parent
 HOOK_PRECOMPACT = REPO / "hooks" / "pre-compact-mem.sh"
-HOOK_WORKER = REPO / "hooks" / "spool-worker.sh"
 PROD_SPOOL = REPO / "data" / "transcript-spool"
 
 
@@ -206,76 +205,6 @@ def test_snapshot_zstd_fallback_sha16(tmp_path):
 
 
 # ── 4. worker: 注入池排干 + 生产池零触碰 ───────────────────────────
-
-def test_worker_drains_injected_spool_production_untouched(tmp_path):
-    before = _spool_jsonl(PROD_SPOOL) if PROD_SPOOL.is_dir() else []
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    t = _tool_only_transcript(tmp_path, "t4.jsonl")
-    shutil.copy(t, spool / "sess-drain-beefbeefdeadbeef.jsonl")
-    shim = _shim_bin(tmp_path, "autodream")  # 保险带: 即便误达也硬拦
-    r = subprocess.run(["bash", str(HOOK_WORKER)], capture_output=True,
-                       text=True, env=_worker_env(spool, shim), timeout=120)
-    assert r.returncode == 0, r.stderr
-    assert _spool_jsonl(spool) == [], "注入池未排干"
-    log = (spool / "worker.log").read_text()
-    assert "no-end-steps" in log and "sess-drain" in log
-    assert not (tmp_path / "shim-autodream" / "shim.log").exists(), \
-        "纯工具会话不该到 autodream"
-    # 生产池零触碰 (fix ① 前此处恒被误排)
-    after = _spool_jsonl(PROD_SPOOL) if PROD_SPOOL.is_dir() else []
-    assert after == before
-
-
-def test_worker_default_fallback_declared():
-    """缺省回落逐字不变 (grep 可证): 无 MEM_SPOOL_DIR → 生产路径。"""
-    line = 'SPOOL="${MEM_SPOOL_DIR:-${SVC_DIR}/data/transcript-spool}"'
-    assert line in HOOK_WORKER.read_text(encoding="utf-8")
-
-
-# ── 5. worker 失败路径有日志 + sidecar 转发 ────────────────────────
-
-def test_worker_retry_later_logs_and_forwards_sidecar(tmp_path):
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    raw = spool / "sess-side-cafecafecafecafe.jsonl"
-    shutil.copy(_end_turn_transcript(tmp_path, "t5.jsonl"), raw)
-    (spool / "sess-side-cafecafecafecafe.jsonl.harness").write_text(
-        "dsh", encoding="utf-8")
-    shim = _shim_bin(tmp_path, "autodream")
-    r = subprocess.run(["bash", str(HOOK_WORKER)], capture_output=True,
-                       text=True, env=_worker_env(spool, shim), timeout=120)
-    assert r.returncode == 0, r.stderr
-    log = (spool / "worker.log").read_text()
-    assert "retry-later" in log, "失败路径无日志"
-    # 失败保留重试: raw+sidecar 保留 (.lock 可回收), 蒸馏中间物清理
-    assert raw.is_file() and not (spool / (raw.name + ".lock")).exists()
-    assert (spool / (raw.name + ".harness")).read_text() == "dsh"
-    assert not (spool / (raw.name + ".endsteps")).exists()
-    # sidecar 逐文件转发: autodream 收到 --harness dsh (spool cc/dsh 混排可归属)
-    calls = (tmp_path / "shim-autodream" / "shim.log").read_text()
-    assert "autodream" in calls and "--harness dsh" in calls
-    assert "--session sess-side" in calls
-    assert f"--transcript {raw}.endsteps" in calls
-
-
-def test_worker_filter_fail_logs_and_recovers(tmp_path):
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    raw = spool / "sess-fltr-deadbeefdeadbeef.jsonl"
-    shutil.copy(_tool_only_transcript(tmp_path, "t6.jsonl"), raw)
-    shim = _shim_bin(tmp_path, "endsteps")  # 蒸馏器故障注入
-    r = subprocess.run(["bash", str(HOOK_WORKER)], capture_output=True,
-                       text=True, env=_worker_env(spool, shim), timeout=120)
-    assert r.returncode == 0, r.stderr
-    log = (spool / "worker.log").read_text()
-    assert "filter-fail" in log, "蒸馏失败路径无日志"
-    assert "sess-fltr" in log
-    # .lock 回收: 文件回原名, 留待下次重试 (不丢记忆只延迟)
-    assert raw.is_file() and not (spool / (raw.name + ".lock")).exists()
-
-
-# ── 5. H1 切换票: hook 不再拉起 worker ────────────────────────────
 
 def test_hook_no_longer_launches_worker(tmp_path):
     """H1 (2026-10-01): nohup 拉起块已删 — 旧 worker 通道下线, spool 换

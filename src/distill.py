@@ -800,7 +800,14 @@ def distill_chunk(chunk_text: str, gist: str, session_id: str, cwd: str,
     elif best_id is not None and best_cos >= _CAND_COS_CHUNK:
         cand_edge = (best_id, best_cos)
 
-    # laya 单调用: p_dur (+ 候选边验证)
+    # laya 单调用: p_dur (+ 候选边验证 + 覆盖提案)
+    cand_text = None       # 摘要 (state 展示用, 400 字帽)
+    cand_text_full = None  # 全文 (settle 精确匹配要求)
+    if cand_edge is not None:
+        row = conn.execute(
+            "SELECT text FROM atom WHERE id=?", (cand_edge[0],)).fetchone()
+        cand_text_full = (row[0] if row else "") or ""
+        cand_text = cand_text_full[:400]
     qs: dict[str, dict] = {
         "dur": {"type": "score",
                 "instructions": f"Is [{judged['summary'][:130]}] durable knowledge "
@@ -808,19 +815,29 @@ def distill_chunk(chunk_text: str, gist: str, session_id: str, cwd: str,
                                 "process detail?",
                 "criteria": CRIT_DUR}}
     if cand_edge is not None:
+        # 邻居文本必须进 state (旧版只给 [atom id] 盲判, edg 无信息量)
         qs["edg"] = {"type": "score",
                      "instructions": f"How related are the memory items "
-                                     f"[{judged['summary'][:90]}] and "
-                                     f"[atom {cand_edge[0]}] in topic?",
+                                     f"[new segment] and [existing item] in topic?",
                      "criteria": CRIT_EDGE}
+        # 覆盖问 (2026-10-04 用户裁决「清晰标记直接清理」): 段(原文)是否完全
+        # 承载既有 atom(旧摘要)的全部要点 → 是则落 supersede_proposal, settle
+        # 夜间向量+laya 复核后 retire — v4 段对句级存量的自动消融通道。
+        qs["cov"] = {"type": "noul",
+                     "instructions": "Does [new segment] fully restate every key "
+                                     "point of [existing item], so the existing "
+                                     "item adds no information?"}
     state = ("new memory item:\n" + judged["summary"][:130]
-             + ("\nexisting neighbor:\n" if cand_edge is not None else "")
-             + (f"[atom {cand_edge[0]}]" if cand_edge is not None else ""))
+             + ("\nexisting neighbor:\n" if cand_text is not None else "")
+             + (cand_text if cand_text is not None else ""))
     answers = _laya_one(state, qs)
     if answers is None:
         raise LayaUnavailable("laya batch None x2; 段保留, 图零写入")
     p_dur = _prob(answers.get("dur"), CRIT_DUR.index("durable-knowledge"))
     edge_w = _prob(answers.get("edg"), CRIT_EDGE.index("same-topic"))
+    cov = None
+    if cand_edge is not None and isinstance(answers.get("cov"), dict):
+        cov = float(answers["cov"].get("noul") or 0.0)
 
     n_atoms = n_edges = 0
     aid_out = None
@@ -855,6 +872,13 @@ def distill_chunk(chunk_text: str, gist: str, session_id: str, cwd: str,
                     "INSERT OR IGNORE INTO atom_edge(a_id, b_id, w, kind) "
                     "VALUES(?, ?, ?, 'related')", (pair[0], pair[1], edge_w))
                 n_edges = 1
+            # 覆盖提案 (cov≥0.65): 段已完全承载既有句级摘要 → settle 夜间
+            # 复核 retire (向量兜底 + laya 双保险)。旧=候选句级全文。
+            if cand_edge is not None and cov is not None and cov >= 0.65:
+                conn.execute(
+                    "INSERT INTO supersede_proposal(old_text, new_text, "
+                    "created_at) VALUES(?,?,?)",
+                    (cand_text_full, chunk_text, ts))
         conn.execute("INSERT OR IGNORE INTO distill_seen(sha, status, created_at) "
                      "VALUES(?, 'ok', ?)", (sha, ts))
         conn.commit()

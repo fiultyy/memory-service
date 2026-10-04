@@ -265,3 +265,55 @@ def test_gist_downstream(tmp_path, monkeypatch):
     import recall_inject as RI
     lanes = RI._det_lanes()
     assert any("回复用中文" in ln for ln in lanes), lanes
+
+
+def test_distill_chunk_cov_proposal(tmp_path, monkeypatch):
+    """cand 带 (0.78≤cos<0.88) + cov noul≥0.65 → supersede_proposal 落行
+    (settle 夜间复核 retire); cov 缺席/低 → 不落。"""
+    import numpy as np
+    conn = _init(tmp_path)
+    _mock_avail(monkeypatch)
+    _mock_judge(monkeypatch, label="fact")
+    _mock_embed(monkeypatch)
+    # 既有句级: 与新段向量 cos≈0.8 (60° 夹角基向量构造)
+    import math
+    dim = D._EMBED_DIM_MIN + 10
+    va = [1.0] + [0.0] * (dim - 1)
+    th = math.acos(0.8)
+    vb = [math.cos(th), math.sin(th)] + [0.0] * (dim - 2)
+    conn.execute(
+        "INSERT INTO atom(text, label, p_dur, valid_from, source_refs, last_seen_at) "
+        "VALUES('既有句级摘要甲。', 'fact', 0.5, '2026-09-01T00:00:00+00:00', '[]', "
+        "'2026-09-01T00:00:00+00:00')")
+    calls = {"i": 0}
+
+    def vec_by_call(texts):
+        calls["i"] += 1
+        # 第一批 = 新段 embed, 第二批 = 无 (merge/路径); 直接都给段向量
+        return [list(vb) for _ in texts]
+    monkeypatch.setattr(D.embedding, "embed_batch", vec_by_call)
+    monkeypatch.setattr(D, "_load_existing",
+                        lambda: [(1, np.asarray(va, dtype=np.float32))])
+
+    def fake_laya(state, questions):
+        out = {}
+        for k in questions:
+            out[k] = (_mk_answer(0.8) if k in ("dur", "edg")
+                      else {"noul": 0.9})
+        return out
+    monkeypatch.setattr(D, "_laya_one", fake_laya)
+    r = D.distill_chunk("覆盖判定段原文。第二句。", "结论", "s1", "/w",
+                        "2026-10-04T00:00:00+00:00")
+    assert r["atoms"] == 1
+    prop = conn.execute(
+        "SELECT old_text, new_text FROM supersede_proposal").fetchone()
+    assert prop and prop["old_text"] == "既有句级摘要甲。" \
+        and prop["new_text"] == "覆盖判定段原文。第二句。"
+    # cov 低 → 不落
+    conn.execute("DELETE FROM supersede_proposal")
+    monkeypatch.setattr(D, "_laya_one",
+                        lambda s, q: {k: (_mk_answer(0.8) if k in ("dur", "edg")
+                                          else {"noul": 0.2}) for k in q})
+    D.distill_chunk("覆盖判定段原文乙。", "结论乙", "s1", "/w",
+                    "2026-10-04T00:00:00+00:00")
+    assert conn.execute("SELECT COUNT(*) FROM supersede_proposal").fetchone()[0] == 0

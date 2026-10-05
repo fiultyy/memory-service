@@ -24,7 +24,7 @@ from corpus_prep import (ACTION_DROP, ACTION_UNWRAP, HARNESSES,
 # ── 映射表结构 ────────────────────────────────────────────────────────
 
 def test_table_covers_all_harnesses():
-    assert set(HARNESSES) == {"cc", "codex", "dsh", "pi", "omp"}
+    assert set(HARNESSES) == {"cc", "codex", "dsh", "pi", "omp", "openclaw"}
     for h in HARNESSES:
         assert rule_table(h)[h], f"{h} 规则表为空"
 

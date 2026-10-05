@@ -15,6 +15,7 @@ runtime/cli/mem_daemon/hooks** (防环: 那些是上层消费者)。
 
 resolve_harness 白名单语义与 hooks/session-start-mem.sh 的 bash case
 等价: 显式 "dsh" → dsh, 其余任何值 (空/None/"cc"/未知) → cc。
+"openclaw" (2026-10-05) 仅 cli 投影面放行 — hooks 场景不遇该值。
 """
 from __future__ import annotations
 
@@ -120,13 +121,22 @@ SPECS: dict[str, HarnessSpec] = {
     "pi": _mk("pi"),
     "omp": _mk("omp"),
     "codex": _mk("codex"),
+    # openclaw (2026-10-05 适配): 无 transcript 文件面 (会话在 gateway
+    # sqlite; 插件 before_compaction 快照写 CC 兼容 spool 行 → 行 schema 借
+    # cc 别名); memory 投影 = Claw workspace 原生 memory/ 目录 (散件与
+    # topics-*.md 共存); 自动快照面落 CC 共用池 (spool_env=None — 插件写
+    # 固定路径, 无 env 注入约定)。
+    "openclaw": _mk("openclaw",
+                    memory_dir=projection.openclaw_memory_dir,
+                    spool_default=_svc_spool),
 }
 
 
 def resolve_harness(value: str | None) -> str:
-    """env/旗标值 → SPECS 键。白名单放行 dsh, 其余 (空/None/cc/未知) → cc
-    (与 hooks/session-start-mem.sh bash case 等价 — 防任意旗标注入)。"""
-    return value if value == "dsh" else "cc"
+    """env/旗标值 → SPECS 键。白名单放行 dsh/openclaw, 其余 (空/None/cc/
+    未知) → cc (与 hooks/session-start-mem.sh bash case 等价 — 防任意旗标
+    注入; openclaw 仅 cli 投影面出现, hooks 场景不遇)。"""
+    return value if value in ("dsh", "openclaw") else "cc"
 
 
 def memory_dir_or_raise(harness: str, cwd: str) -> Path:

@@ -532,7 +532,13 @@ _ADAPTORS = {
 # 兼容旧名 (拼写正名 _ADAPTORS, 历史引用保持)
 _ADAPTERS = _ADAPTORS
 
-HARNESSES = ("cc", "dsh", "pi", "omp", "codex")
+# openclaw 与 cc 同 wire 格式 (2026-10-05 适配): 插件 before_compaction 快照
+# 写 CC 兼容行 + sidecar "cc"; transcript 定位面无消费者 — Claw 会话在
+# gateway sqlite, 非 jsonl 文件 (与 omp:pi 别名同款先例)。
+_ADAPTORS["openclaw"] = _ADAPTORS["cc"]
+_SCENES["openclaw"] = _cc_scenes
+
+HARNESSES = ("cc", "dsh", "pi", "omp", "codex", "openclaw")
 
 
 def locate(cwd: str, harness: str = "cc", limit: int = 10) -> list[Path]:

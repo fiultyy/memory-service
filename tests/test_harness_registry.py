@@ -37,6 +37,11 @@ def test_identity_spec_fields_reference_existing_functions():
     assert codex.cwd_filter is transcripts._CWD_FILTERS["codex"]
     assert harness.SPECS["pi"].scenes is transcripts._SCENES["pi"]
     assert harness.SPECS["omp"].scenes is transcripts._SCENES["omp"]
+    # openclaw (2026-10-05): 行 schema 借 cc 别名 + 原生 memory_dir 函数
+    oc = harness.SPECS["openclaw"]
+    assert oc.memory_dir is projection.openclaw_memory_dir
+    assert oc.scenes is transcripts._SCENES["cc"]
+    assert oc.end_steps is transcripts._ADAPTORS["cc"][2]
 
 
 def test_harness_name_lists_equal():
@@ -51,9 +56,10 @@ def test_capability_none_for_manual_only_harnesses():
         assert spec.spool_env is None
         assert spec.spool_default is None
         assert spec.session_env is None
-    # cc/dsh 有投影目录 + spool 池
+    # cc/dsh/openclaw 有投影目录 (openclaw: <ws>/memory, 散件与 topics 共存)
     assert harness.SPECS["cc"].memory_dir is not None
     assert harness.SPECS["dsh"].memory_dir is not None
+    assert harness.SPECS["openclaw"].memory_dir is not None
     assert harness.SPECS["cc"].spool_env == "MEM_SPOOL_DIR"
     assert harness.SPECS["cc"].session_env == "CLAUDE_CODE_SESSION_ID"
 
@@ -65,6 +71,7 @@ def test_corpus_keys_resolve():
 
 def test_resolve_harness_whitelist_matches_bash_case():
     assert harness.resolve_harness("dsh") == "dsh"
+    assert harness.resolve_harness("openclaw") == "openclaw"
     for v in (None, "", "cc", "unknown", "pi"):
         assert harness.resolve_harness(v) == "cc"
 

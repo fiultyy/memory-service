@@ -57,6 +57,13 @@ def dsh_memory_dir(cwd: str) -> Path:
     return Path.home() / ".dsh" / "projects" / encoded / "memory"
 
 
+def openclaw_memory_dir(cwd: str) -> Path:
+    """cwd (Claw workspace 根) → <workspace>/memory/ — memsvc 散件与原生
+    topics-*.md 同目录共存 (2026-10-05 适配裁决: 投影与 CC 同构, MEMORY.md
+    在 workspace 根 → 索引行链接须带 memory/ link_prefix)。"""
+    return Path(cwd) / "memory"
+
+
 _SLUG_MAX = 60  # 字符上限: 全中文 60 字 = 180 字节 + "mem-xxxx-.md" ≈ 193 < ext4 NAME_MAX 255
 
 

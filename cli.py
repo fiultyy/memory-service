@@ -609,7 +609,7 @@ def _proj_memory_dir(memory_dir: str | None, cwd: str, harness: str = "cc") -> P
     """投影目录解析优先级: 显式 --memory-dir > harness 缺省。此 harness 维=
     存放位置方案(与 corpus 清洗的 harness 键分属两面)。
     (S2 解耦改道 2026-10-04: 缺省路径走 harness.SPECS 注册表 — 单源;
-    调用面 choices 仍 [cc,dsh], 行为与旧 cc/dsh 分支逐字节等价。)"""
+    调用面 choices [cc,dsh,openclaw], cc/dsh 行为与旧分支逐字节等价。)"""
     if memory_dir:
         return Path(memory_dir)
     import harness as harness_reg
@@ -758,8 +758,10 @@ def _main(argv: list[str] | None = None) -> int:
     rec.add_argument("--project", action="store_true",
                      help="M18: 召回正文投影 recall-<DATE>.md + MEMORY.md 索引行 "
                           "(dir = 按 --harness 解析(--cwd 或 $PWD); 空命中不投影)")
-    rec.add_argument("--harness", dest="harness", default="cc", choices=["cc", "dsh"],
-                     help="存放位置方案(dsh → ~/.dsh/projects/<enc>/memory; 默认 cc)")
+    rec.add_argument("--harness", dest="harness", default="cc",
+                     choices=["cc", "dsh", "openclaw"],
+                     help="存放位置方案(dsh → ~/.dsh/projects/<enc>/memory; "
+                          "openclaw → <workspace>/memory 与原生 topics 共存; 默认 cc)")
     rec.add_argument("--gate", dest="gate", action="store_true", default=True,
                      help="v1.7③: 对 BFS 扩展(B 翼) fact 跑单 LLM 一致性 gate "
                           "(query 自动升格 {keywords, intent, scope:manual}; "

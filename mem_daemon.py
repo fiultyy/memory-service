@@ -746,6 +746,16 @@ def run(cwd: str | None = None, interval: int = POLL_INTERVAL, once: bool = Fals
                 state = _sweep(tdir, watch_cwd, state)
             for _sd in _spool_dirs():                # H1: CC 池 + dsh 池双 watch
                 state = _sweep_spool(state, watch_cwd, _sd)
+            # OpenClaw watchdog (2026-10-05 适配): 记忆文件轮询 ingest, 不走
+            # hooks/spool。挂起 (LayaUnavailable) 上抛由本 except 兜 — 水位
+            # 不推进, 下轮重试; 与 spool 车道互不阻塞。
+            try:
+                from openclaw_watch import sweep as _sweep_openclaw
+                r = _sweep_openclaw()
+                if r["files"]:
+                    _log(f"openclaw sweep: {r}")
+            except Exception as _exc:
+                _log(f"openclaw sweep: {_exc} (deferred)")
             state = _maybe_dream(state, watch_cwd)  # M11: dreaming 阶段门控
             _save_state(state)
         except Exception as exc:

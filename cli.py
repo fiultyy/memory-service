@@ -178,6 +178,10 @@ def _load_env() -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, _, v = line.partition("=")
+        # 行内注释剥 (2026-10-05 事故: `KEY=value  # 注释` 整串进值 →
+        # MEM_LAYA_BACKEND 比较失配静默落 local 后端)。仅 " #" 起注释,
+        # 值内裸 # (token 片段) 不伤。
+        v = v.split(" #", 1)[0]
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 

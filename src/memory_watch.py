@@ -1,20 +1,31 @@
-"""OpenClaw 记忆文件 watchdog — 最轻 ingest 通道 (2026-10-05 适配)。
+"""记忆文件 watchdog — 双端 md 文件最轻 ingest 通道 (2026-10-05 泛化)。
 
-OpenClaw 记忆机制 = 每 workspace `memory/` 目录下的 md 文件
-(topics-*.md 一文件一事实带 CC 同款 frontmatter / 日记 / summary),
-agent 自主维护 + maintenance cron 重组。不走 hooks — daemon 主循环
-每 cycle 调 sweep() 轮询目录 (glob+sha, 144 文件 <50ms)。
+**双端 watch 源** (原 openclaw_watch, T4 泛化):
+- Claw: {MEM_OPENCLAW_ROOT}/workspace*/memory/ (topics-*.md 一文件一事实
+  带 CC 同款 frontmatter / 日记 / summary, agent 自主维护) — session_id
+  `openclaw:<ws>`
+- CC: {MEM_CC_MEMORY_ROOT} 缺省 ~/.claude/projects/*/memory/ (用户驱动落盘
+  精华 md — 手动 re-ingest 通道退役, 双端能力并集) — session_id `cc:<enc>`
+
+不走 hooks — daemon 主循环每 cycle 调 sweep() 轮询目录 (glob+sha)。
 
 文件 = 持久队列: 失败 = 水位不推进 = 下轮重试, 不需要 spool
 (spool 是为 CC 内存态 transcript 快照发明的)。文件一事实与 v4
 段级车道 (distill_chunk) 天然对齐, frontmatter description 现成 gist。
 
-去重两层: 文件 sha 快路径 (openclaw_seen) + 段级 distill_seen
-(sha="chunk:"+text) — 文件重组后未变段零调用, 变段自动走 cov
-(_COV_SUPERSEDE) 消融通道管新旧更替。
+去重两层: 文件 sha 快路径 (openclaw_seen 表, 键=path 双端共用天然隔离) +
+段级 distill_seen (sha="chunk:"+text) — 文件重组后未变段零调用, 变段自动
+走 cov (_COV_SUPERSEDE) 消融通道管新旧更替 (CC md 与 transcript 双写同
+一事实也由它管)。
 
-env: MEM_OPENCLAW_ROOT (缺省 ~/.openclaw; 空 → 功能关) |
-MEM_OPENCLAW_BATCH (每 cycle 文件帽, 缺省 20 — 存量回填分批不占死主循环)
+**跳过规则 (两端同款, 防自指)**: MEMORY.md (投影索引非知识) +
+`mem-{4hex}-*.md` 散件 (recall 投影产物 — 进 ingest = 投影→蒸馏→再投影
+循环)。
+
+env: MEM_OPENCLAW_ROOT (缺省 ~/.openclaw; 空 → Claw 源关) |
+MEM_CC_MEMORY_ROOT (缺省 ~/.claude/projects; 显式空 → CC 源关 — 单测
+fixture 用) | MEM_OPENCLAW_BATCH (每 cycle 文件帽, 缺省 20 — 存量回填
+分批不占死主循环)
 """
 from __future__ import annotations
 
@@ -31,6 +42,10 @@ from distill import LayaUnavailable, distill_chunk
 _H2 = re.compile(r"^## ", re.M)
 _H3 = re.compile(r"^### ", re.M)
 _JUDGE_CAP = 6000  # 对齐 _judge_chunk 判官帽 (distill.py); atom.text 仍存全文
+
+# 跳过规则 (两端同款, 防自指/防索引污染): MEMORY.md 投影索引 +
+# mem-{4hex}-*.md recall 投影散件 (T4)
+_SKIP_RE = re.compile(r"^(?:mem-[0-9a-f]{4}-.*|MEMORY)\.md$")
 
 # 段消费硬超时守护 (2026-10-05 生产卡死实录: zhipu 挂死 300s×3 重试连环,
 # daemon 主循环静默 30min) — 与 mem_daemon._distill_segment_hard 同款:
@@ -133,15 +148,27 @@ def _chunk_md(text: str) -> list[tuple[str, str]]:
 
 
 def _watch_dirs() -> list[tuple[str, Path]]:
-    """{ROOT}/workspace*/memory/ 存在即监控 (新 workspace 自动进)。"""
-    root = os.environ.get("MEM_OPENCLAW_ROOT", "")
-    if not root:
-        return []
-    ws = Path(root).expanduser()
-    if not ws.is_dir():
-        return []
-    return sorted((d.parent.name.removeprefix("workspace-"), d)
-                  for d in ws.glob("workspace*/memory") if d.is_dir())
+    """双端 watch 源 → [(session_id, memory_dir)] (T4 泛化)。
+
+    Claw: {MEM_OPENCLAW_ROOT}/workspace*/memory/ → session_id
+    ``openclaw:<ws>``; CC: {MEM_CC_MEMORY_ROOT} 缺省 ~/.claude/projects/
+    */memory/ → session_id ``cc:<enc>``。空 env 值 = 该源关 (显式逃生口)。"""
+    out: list[tuple[str, Path]] = []
+    oc_root = os.environ.get("MEM_OPENCLAW_ROOT", "")
+    if oc_root:
+        ws = Path(oc_root).expanduser()
+        if ws.is_dir():
+            out += sorted(
+                (f"openclaw:{d.parent.name.removeprefix('workspace-')}", d)
+                for d in ws.glob("workspace*/memory") if d.is_dir())
+    cc_root = os.environ.get(
+        "MEM_CC_MEMORY_ROOT", str(Path.home() / ".claude" / "projects"))
+    if cc_root:
+        cc = Path(cc_root).expanduser()
+        if cc.is_dir():
+            out += sorted((f"cc:{d.parent.name}", d)
+                          for d in cc.glob("*/memory") if d.is_dir())
+    return out
 
 
 def _ensure_table(conn) -> None:
@@ -167,27 +194,29 @@ def sweep() -> dict:
     _ensure_table(conn)
     seen = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT path, sha256, status FROM openclaw_seen")}
-    todo: list[tuple[str, Path, str]] = []  # (ws, file, sha)
-    for ws, d in dirs:
+    todo: list[tuple[str, Path, str]] = []  # (session_id, file, sha)
+    for sid, d in dirs:
         for f in sorted(d.glob("*.md")):
+            if _SKIP_RE.match(f.name):
+                continue  # MEMORY.md / mem-* 散件永不进 ingest 车道
             sha = hashlib.sha256(f.read_bytes()).hexdigest()
             row = seen.get(str(f))
             if row and row[0] == sha:
                 continue  # 快路径: 未变文件零处理
             if row and row[1] == "poison":
                 continue
-            todo.append((ws, f, sha))
+            todo.append((sid, f, sha))
     skipped = max(0, len(todo) - batch)  # 本轮批帽外余量 (下轮吃)
     todo = todo[:batch]
     n_seg = 0
-    for ws, f, sha in todo:
+    for sid, f, sha in todo:
         try:
             segs = _chunk_md(f.read_text(encoding="utf-8", errors="replace"))
             ts = _now()
             for seg, gist in segs:
                 _distill_hard(
                     lambda s=seg, g=gist: distill_chunk(
-                        s, g, f"openclaw:{ws}", str(f), ts))
+                        s, g, sid, str(f), ts))
                 n_seg += 1
         except LayaUnavailable:
             raise  # 挂起: 水位不推进, 不计 attempts, 本轮放弃
@@ -215,5 +244,5 @@ def sweep() -> dict:
     return {"files": len(todo), "segments": n_seg, "skipped": skipped}
 
 
-if __name__ == "__main__":  # 手动 dry: python3 src/openclaw_watch.py
+if __name__ == "__main__":  # 手动 dry: python3 src/memory_watch.py
     print(sweep())

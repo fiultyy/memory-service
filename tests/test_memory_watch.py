@@ -1,4 +1,4 @@
-"""openclaw_watch 单测: 文件级水位幂等 / 段切 / frontmatter / 挂起 /
+"""memory_watch 单测 (T4 泛化双端): 文件级水位幂等 / 段切 / frontmatter / 挂起 /
 毒文件 / 批帽 / 目录发现。mock 模式同 test_semantic_chunk。"""
 import sys
 from pathlib import Path
@@ -8,8 +8,15 @@ import pytest
 sys.path.insert(0, "src")
 sys.path.insert(0, ".")
 
-import openclaw_watch as OW
+import memory_watch as MW
 import db
+
+
+@pytest.fixture(autouse=True)
+def _cc_source_off(monkeypatch):
+    """T4: 缺省关 CC 源 — 防单测真扫生产 ~/.claude/projects/*/memory/
+    (个别 CC 用例显式重设)。"""
+    monkeypatch.setenv("MEM_CC_MEMORY_ROOT", "")
 
 TOPIC = """---
 name: 482-shuiwu
@@ -49,7 +56,7 @@ def _mock_chunk(monkeypatch, calls=None):
             calls.append((chunk_text, gist, session_id))
         return {"atoms": 1, "edges": 0, "merged": 0,
                 "supersede_proposals": []}
-    monkeypatch.setattr(OW, "distill_chunk", fake)
+    monkeypatch.setattr(MW, "distill_chunk", fake)
 
 
 def test_watermark_idempotent(tmp_path, tdb, monkeypatch):
@@ -57,9 +64,9 @@ def test_watermark_idempotent(tmp_path, tdb, monkeypatch):
     monkeypatch.setenv("MEM_OPENCLAW_ROOT", str(_ws(tmp_path, files={"a.md": TOPIC})))
     calls = []
     _mock_chunk(monkeypatch, calls)
-    r1 = OW.sweep()
+    r1 = MW.sweep()
     assert r1["files"] == 1 and len(calls) == 1
-    r2 = OW.sweep()
+    r2 = MW.sweep()
     assert r2["files"] == 0 and len(calls) == 1
 
 
@@ -69,11 +76,11 @@ def test_increment_changed_file(tmp_path, tdb, monkeypatch):
                        str(_ws(tmp_path, files={"a.md": TOPIC, "b.md": "记 B。"})))
     calls = []
     _mock_chunk(monkeypatch, calls)
-    OW.sweep()
+    MW.sweep()
     n = len(calls)
     (tmp_path / "root" / "workspace-claw-02" / "memory" / "a.md").write_text(
         TOPIC + "\n新增一段。\n", encoding="utf-8")
-    OW.sweep()
+    MW.sweep()
     assert len(calls) == n + 1  # 只有 a.md 重过 (b.md 水位跳过)
 
 
@@ -81,7 +88,7 @@ def test_chunk_md_h2_split_gist():
     """>6000 字按 H2 切, 首段 gist=description, 其余=标题行。"""
     body = "---\ndescription: 测述\n---\n\n# 题\n\n## 甲\n" + "甲" * 3500 + \
         "\n\n## 乙\n" + "乙" * 3500
-    segs = OW._chunk_md(body)
+    segs = MW._chunk_md(body)
     assert len(segs) == 2
     assert all(len(s) <= 6000 for s, _ in segs)
     assert segs[0][1] == "测述"
@@ -90,10 +97,10 @@ def test_chunk_md_h2_split_gist():
 
 def test_chunk_md_short_and_bad_frontmatter():
     """短文单段取 description; 坏 frontmatter 兜底首行标题。"""
-    assert OW._chunk_md(TOPIC)[0][1] == "482 签证期间双线税务策略: 768-R 豁免难站住"
-    segs = OW._chunk_md("# 兜底标题\n\n正文。")
+    assert MW._chunk_md(TOPIC)[0][1] == "482 签证期间双线税务策略: 768-R 豁免难站住"
+    segs = MW._chunk_md("# 兜底标题\n\n正文。")
     assert segs[0][1] == "兜底标题"
-    assert OW._chunk_md("---\n坏块无闭合\n正文")  # 不炸, 整文单段
+    assert MW._chunk_md("---\n坏块无闭合\n正文")  # 不炸, 整文单段
 
 
 def test_suspend_no_watermark_no_attempts(tmp_path, tdb, monkeypatch):
@@ -103,29 +110,29 @@ def test_suspend_no_watermark_no_attempts(tmp_path, tdb, monkeypatch):
     def boom(*a, **k):
         from distill import LayaUnavailable
         raise LayaUnavailable("laya down")
-    monkeypatch.setattr(OW, "distill_chunk", boom)
-    with pytest.raises(OW.LayaUnavailable):
-        OW.sweep()
+    monkeypatch.setattr(MW, "distill_chunk", boom)
+    with pytest.raises(MW.LayaUnavailable):
+        MW.sweep()
     assert db.get_conn().execute(
         "SELECT COUNT(*) FROM openclaw_seen").fetchone()[0] == 0
     # 恢复后同文件重吃
     _mock_chunk(monkeypatch, [])
-    assert OW.sweep()["files"] == 1
+    assert MW.sweep()["files"] == 1
 
 
 def test_poison_after_3(tmp_path, tdb, monkeypatch):
     """3 试失败 → poison → 后续 sweep 跳过。"""
     monkeypatch.setenv("MEM_OPENCLAW_ROOT", str(_ws(tmp_path, files={"a.md": TOPIC})))
-    monkeypatch.setattr(OW, "distill_chunk",
+    monkeypatch.setattr(MW, "distill_chunk",
                         lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
     for _ in range(3):
-        OW.sweep()
+        MW.sweep()
     row = db.get_conn().execute(
         "SELECT attempts, status FROM openclaw_seen").fetchone()
     assert row[0] == 3 and row[1] == "poison"
     calls = []
     _mock_chunk(monkeypatch, calls)
-    assert OW.sweep()["files"] == 0  # poison 跳过
+    assert MW.sweep()["files"] == 0  # poison 跳过
     assert not calls
 
 
@@ -135,31 +142,31 @@ def test_batch_cap(tmp_path, tdb, monkeypatch):
     monkeypatch.setenv("MEM_OPENCLAW_ROOT", str(_ws(tmp_path, files=files)))
     calls = []
     _mock_chunk(monkeypatch, calls)
-    r = OW.sweep()
+    r = MW.sweep()
     assert r["files"] == 20 and r["skipped"] == 5
-    assert OW.sweep()["files"] == 5
+    assert MW.sweep()["files"] == 5
 
 
 def test_missing_memory_dir_and_disabled(tmp_path, tdb, monkeypatch):
     """无 memory/ 的 workspace 不炸; ROOT 空 → 零扫描。"""
     (tmp_path / "root" / "workspace-empty").mkdir(parents=True)
     monkeypatch.setenv("MEM_OPENCLAW_ROOT", str(tmp_path / "root"))
-    assert OW.sweep()["files"] == 0
+    assert MW.sweep()["files"] == 0
     monkeypatch.setenv("MEM_OPENCLAW_ROOT", "")
-    assert OW.sweep() == {"files": 0, "segments": 0, "skipped": 0}
+    assert MW.sweep() == {"files": 0, "segments": 0, "skipped": 0}
 
 
 def test_hard_timeout_counts_attempt(tmp_path, tdb, monkeypatch):
     """段消费超 420s 硬超时 → 按文件失败计 attempts (生产卡死实录守护)。"""
-    monkeypatch.setattr(OW, "_SEG_TIMEOUT", 0.05)
+    monkeypatch.setattr(MW, "_SEG_TIMEOUT", 0.05)
     monkeypatch.setenv("MEM_OPENCLAW_ROOT", str(_ws(tmp_path, files={"a.md": TOPIC})))
     import time
 
     def hang(*a, **k):
         time.sleep(1.0)
         return {"atoms": 0}
-    monkeypatch.setattr(OW, "distill_chunk", hang)
-    OW.sweep()  # 超时 raise → except Exception → attempts=1 不炸
+    monkeypatch.setattr(MW, "distill_chunk", hang)
+    MW.sweep()  # 超时 raise → except Exception → attempts=1 不炸
     r = db.get_conn().execute(
         "SELECT attempts, status FROM openclaw_seen").fetchone()
     assert tuple(r) == (1, "ok")
@@ -172,5 +179,48 @@ def test_multi_workspace(tmp_path, tdb, monkeypatch):
     monkeypatch.setenv("MEM_OPENCLAW_ROOT", str(tmp_path / "root"))
     calls = []
     _mock_chunk(monkeypatch, calls)
-    assert OW.sweep()["files"] == 2
+    assert MW.sweep()["files"] == 2
     assert {c[2] for c in calls} == {"openclaw:claw-02", "openclaw:english-expert"}
+
+
+def test_skip_projection_artifacts(tmp_path, tdb, monkeypatch):
+    """T4 防自指: MEMORY.md + mem-{4hex}-*.md 散件永不进 ingest 车道
+    (mem-aa11 / mem-dead 均为合法 4hex → 跳; mem-xyz9 非 hex → 吃)。"""
+    monkeypatch.setenv(
+        "MEM_OPENCLAW_ROOT",
+        str(_ws(tmp_path, files={
+            "MEMORY.md": "# Index\n- [x](memory/mem-aa11-y.md) — t\n",
+            "mem-aa11-some-slug.md": "---\natom_id: 12\n---\n投影散件\n",
+            "mem-dead-beef.md": "dead 也是合法 hex → 跳",
+            "mem-xyz9-nothex.md": "---\ndescription: 普通文件\n---\n非散件 pattern → 吃",
+            "topics-real.md": "真记忆 ✓",
+        })))
+    calls = []
+    _mock_chunk(monkeypatch, calls)
+    r = MW.sweep()
+    assert r["files"] == 2          # mem-xyz9-nothex + topics-real
+    assert not any("MEMORY" in c[0] or "mem-aa11" in c[0]
+                   or "mem-dead" in c[0] for c in calls)
+    # 水位表无 MEMORY.md 记录 (跳过在发现层, 不占 attempts)
+    rows = [row[0] for row in db.get_conn().execute(
+        "SELECT path FROM openclaw_seen")]
+    assert not any(p.endswith("MEMORY.md") or "mem-aa11" in p
+                   or "mem-dead" in p for p in rows)
+
+
+def test_cc_root_discovery_and_session_id(tmp_path, tdb, monkeypatch):
+    """T4 CC 源: {MEM_CC_MEMORY_ROOT}/*/memory/ 发现, session_id=cc:<enc>;
+    显式空 env = 源关。"""
+    enc = tmp_path / "projects" / "-home-yy-proj-x"
+    (enc / "memory").mkdir(parents=True)
+    (enc / "memory" / "note.md").write_text("---\ndescription: cc md\n---\n# t\ncc 记忆\n",
+                                            encoding="utf-8")
+    monkeypatch.setenv("MEM_CC_MEMORY_ROOT", str(tmp_path / "projects"))
+    monkeypatch.setenv("MEM_OPENCLAW_ROOT", "")
+    calls = []
+    _mock_chunk(monkeypatch, calls)
+    assert MW.sweep()["files"] == 1
+    assert calls[0][2] == "cc:-home-yy-proj-x"
+    # 显式空 → 关
+    monkeypatch.setenv("MEM_CC_MEMORY_ROOT", "")
+    assert MW.sweep() == {"files": 0, "segments": 0, "skipped": 0}

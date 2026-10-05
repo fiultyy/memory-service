@@ -64,7 +64,7 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
     - **自动面**: cc/dsh 两家三钩子全通（dsh 经 `dsh-hooks-claude-code` 桥; PreCompact 有缝——payload 空 transcript_path 时按 session_id 回查 `~/.dsh/sessions`，zstd 明文化 + cid12 幂等键 + `.harness` sidecar 判型）。
     - **出端投影**: cc 布局 + dsh 布局（`~/.dsh/projects/<enc>/memory`，SessionStart `MEM_HARNESS=dsh` 自动）；pi 无投影约定（SPECS `memory_dir=None` 能力关闭，调用响亮报错）。
     - **接新 harness 路径**: CC 形 payload+transcript ≈ SPECS 加条目 10 行；自有格式 ≈ transcripts 加 walker + SPECS 条目（模板即 `_dsh` 系列）。
-    - **openclaw (2026-10-05 适配)**: 装点 `~/.openclaw/workspace*/skills/memsvc` symlink 同一正本。**不走 hooks**——ingest 由 daemon watchdog（`src/openclaw_watch.py`）轮询 `~/.openclaw/workspace*/memory/*.md`（topics 一文件一事实带 frontmatter，description 即 gist）；文件 sha 水位 + 段级 distill_seen 双层去重，文件重组后变段自动走 cov 消融。召回直接 `recall` 子命令（词法/向量/BFS 全可用，harness 无关）。
+    - **openclaw (2026-10-05 适配)**: 装点 `~/.openclaw/workspace*/skills/memsvc` symlink 同一正本。**不走 hooks**——ingest 由 daemon watchdog（`src/memory_watch.py` (T4 泛化双端: Claw workspace + CC projects)）轮询 `~/.openclaw/workspace*/memory/*.md`（topics 一文件一事实带 frontmatter，description 即 gist）；文件 sha 水位 + 段级 distill_seen 双层去重，文件重组后变段自动走 cov 消融。召回直接 `recall` 子命令（词法/向量/BFS 全可用，harness 无关）。
     - omp 侧内建记忆 mnemopi 与本服务语义重叠，未裁决前不在 omp 里主动引导使用本 skill。
 
 ## 示例

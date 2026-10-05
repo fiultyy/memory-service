@@ -268,8 +268,8 @@ def test_gist_downstream(tmp_path, monkeypatch):
 
 
 def test_distill_chunk_cov_proposal(tmp_path, monkeypatch):
-    """cand 带 (0.78≤cos<0.88) + cov noul≥0.65 → supersede_proposal 落行
-    (settle 夜间复核 retire); cov 缺席/低 → 不落。"""
+    """cand 带 (0.78≤cos<0.88) + cov noul≥_COV_SUPERSEDE(0.21) →
+    supersede_proposal 落行 (settle 夜间复核 retire); cov 缺席/低 → 不落。"""
     import numpy as np
     conn = _init(tmp_path)
     _mock_avail(monkeypatch)
@@ -309,11 +309,18 @@ def test_distill_chunk_cov_proposal(tmp_path, monkeypatch):
         "SELECT old_text, new_text FROM supersede_proposal").fetchone()
     assert prop and prop["old_text"] == "既有句级摘要甲。" \
         and prop["new_text"] == "覆盖判定段原文。第二句。"
-    # cov 低 → 不落
+    # cov 低 → 不落 (0.15 < 阈值 0.21; AB 负例实测 max 0.14 同带)
     conn.execute("DELETE FROM supersede_proposal")
     monkeypatch.setattr(D, "_laya_one",
                         lambda s, q: {k: (_mk_answer(0.8) if k in ("dur", "edg")
-                                          else {"noul": 0.2}) for k in q})
+                                          else {"noul": 0.15}) for k in q})
     D.distill_chunk("覆盖判定段原文乙。", "结论乙", "s1", "/w",
                     "2026-10-04T00:00:00+00:00")
     assert conn.execute("SELECT COUNT(*) FROM supersede_proposal").fetchone()[0] == 0
+    # 阈值边界: 0.21 (AB 正例 min 0.28 同带上方) → 落
+    monkeypatch.setattr(D, "_laya_one",
+                        lambda s, q: {k: (_mk_answer(0.8) if k in ("dur", "edg")
+                                          else {"noul": 0.21}) for k in q})
+    D.distill_chunk("覆盖判定段原文丙。", "结论丙", "s1", "/w",
+                    "2026-10-04T00:00:00+00:00")
+    assert conn.execute("SELECT COUNT(*) FROM supersede_proposal").fetchone()[0] == 1

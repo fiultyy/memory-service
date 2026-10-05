@@ -714,6 +714,11 @@ SYS_JUDGE_CHUNK = (
 # 判读预期 0.82-0.88)。未校准前的保守初值 — 批次0 标定后改。[设]
 _MERGE_COS_CHUNK = float(os.environ.get("MEM_CHUNK_MERGE_COS", "0.88"))
 _CAND_COS_CHUNK = float(os.environ.get("MEM_CHUNK_CAND_COS", "0.78"))
+# cov 覆盖提案阈值 (2026-10-05 AB 校准, jev 1.13 后端): 原 0.65 下正例
+# max 0.34 → 通道零触发空转。17 真实对 (3正/14负) jev 完美分离: 负例
+# max 0.14 / 正例 min 0.28 → 取中点 0.21。假阳性有 settle 四层闸兜底
+# (冷静期+精确匹配/向量兜底 cos≥0.90+laya same-topic≥0.50+软删可恢复)。
+_COV_SUPERSEDE = float(os.environ.get("MEM_CHUNK_COV_SUPERSEDE", "0.21"))
 
 
 def _judge_chunk(chunk_text: str, gist: str) -> dict | None:
@@ -872,9 +877,10 @@ def distill_chunk(chunk_text: str, gist: str, session_id: str, cwd: str,
                     "INSERT OR IGNORE INTO atom_edge(a_id, b_id, w, kind) "
                     "VALUES(?, ?, ?, 'related')", (pair[0], pair[1], edge_w))
                 n_edges = 1
-            # 覆盖提案 (cov≥0.65): 段已完全承载既有句级摘要 → settle 夜间
-            # 复核 retire (向量兜底 + laya 双保险)。旧=候选句级全文。
-            if cand_edge is not None and cov is not None and cov >= 0.65:
+            # 覆盖提案 (cov≥_COV_SUPERSEDE): 段已完全承载既有句级摘要 →
+            # settle 夜间复核 retire (向量兜底 + laya 双保险)。旧=候选句级全文。
+            if cand_edge is not None and cov is not None \
+                    and cov >= _COV_SUPERSEDE:
                 conn.execute(
                     "INSERT INTO supersede_proposal(old_text, new_text, "
                     "created_at) VALUES(?,?,?)",

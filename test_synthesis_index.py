@@ -230,6 +230,55 @@ def test_batch():
 
 
 # ── T6: 重跑幂等(清空重写, 不重复追加) ────────────────────────────────
+def test_openclaw_off_dir_memory_md_and_link_prefix():
+    """T2 (2026-10-05): openclaw 形态 — MEMORY.md 在 ws 根、散件在 <ws>/memory/
+    (异目录)。memory_md 显式传 + link_prefix="memory/" → 行链接带前缀; 幂等;
+    原生 topics 行保行; mem_dir 内不副作用生成 MEMORY.md。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        db.init(Path(tmp) / "mem.db")
+        ws_root = Path(tmp)
+        mem_dir = ws_root / "memory"
+        mem_dir.mkdir()
+        native = "- [原生主题](memory/topics-x.md) — 原生保留\n"
+        (ws_root / "MEMORY.md").write_text(native, encoding="utf-8")
+
+        eid, fid = _mk_fact()
+        _write_mem_md(mem_dir, fid)
+
+        r = projection.synthesis_index(cwd="/test", mem_dir=mem_dir,
+                                       memory_md=ws_root / "MEMORY.md",
+                                       link_prefix="memory/")
+        assert r["projected"] == 1
+        txt = (ws_root / "MEMORY.md").read_text(encoding="utf-8")
+        assert "](memory/mem-" in txt          # 链接带目录前缀
+        assert "topics-x.md" in txt            # 原生行保行
+        assert not (mem_dir / "MEMORY.md").exists()  # 缺省路径无副作用
+
+        # 幂等: 重跑投影行数不涨
+        projection.synthesis_index(cwd="/test", mem_dir=mem_dir,
+                                   memory_md=ws_root / "MEMORY.md",
+                                   link_prefix="memory/")
+        txt2 = (ws_root / "MEMORY.md").read_text(encoding="utf-8")
+        assert sum(1 for ln in txt2.splitlines() if "](memory/mem-" in ln) == 1
+        assert "topics-x.md" in txt2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_format_mem_line_default_no_prefix():
+    """T2 回归: link_prefix 缺省 = CC 旧行为 (无目录前缀)。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        db.init(Path(tmp) / "mem.db")
+        eid, fid = _mk_fact()
+        line = projection._format_mem_line(
+            {"id": fid, "topic": "主题", "value": "v", "subject_id": eid}, "?")
+        assert "](mem-" in line and "](memory/mem-" not in line
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_idempotent():
     tmp = tempfile.mkdtemp()
     try:

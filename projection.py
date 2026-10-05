@@ -326,7 +326,9 @@ def _topic_representatives(facts: list[dict]) -> tuple[list[dict], int]:
     return reps, len(facts) - len(reps)
 
 
-def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None) -> dict:
+def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None,
+                    memory_md: Path | str | None = None,
+                    link_prefix: str = "") -> dict:
     """对账散 ``mem-{4hex}-{slug}.md`` → 回 KG 取现值 → 重写 MEMORY.md 投影索引(唯一写入口)。
 
     1. 扫 ``mem_dir/*.md``: ``MEM_FILE_RE`` 识别投影文件(ADR-B 单一源), 排除 MEMORY.md/*.tmp;
@@ -353,7 +355,12 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
 
     mem_dir_p = Path(mem_dir)
     mem_dir_p.mkdir(parents=True, exist_ok=True)  # 冷启动/全新项目: MEMORY.md 父目录可能不存在
-    memory_md = mem_dir_p / "MEMORY.md"
+    # memory_md 缺省与散件同目录 (CC); openclaw (2026-10-05) MEMORY.md 在
+    # workspace 根、散件在 <ws>/memory/ → 显式传路径 + link_prefix="memory/"。
+    if memory_md is None:
+        memory_md = mem_dir_p / "MEMORY.md"
+    else:
+        memory_md = Path(memory_md)
 
     # 1. 扫投影文件(MEM_FILE_RE 识别) → (fact_id, path)。MEMORY.md 与 *.tmp 排除。
     found: list[tuple[str, Path]] = []
@@ -485,6 +492,7 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
         _format_mem_line(
             f,
             ent_names.get(f["subject_id"], "?"),
+            link_prefix=link_prefix,
         )
         for f in [*prefs, *rest]
     ]
@@ -513,12 +521,14 @@ def synthesis_index(cwd: str, mem_dir: Path | str, session_id: str | None = None
     }
 
 
-def _format_mem_line(fact: dict, subj_name: str) -> str:
+def _format_mem_line(fact: dict, subj_name: str, link_prefix: str = "") -> str:
     """ADR-A 原生索引行: ``- [{topic}](mem-{4hex}-{slug}.md) — {topic}``。
 
     链接文本 = topic, 链接 = 相对路径(``mem-{4hex}-{slug}.md``, 与 MEMORY.md 同目录),
     hook = topic。无 [mem] 标记 / 无 score / 无 kg://(纯原生, CC 代码层召回可消费)。
-    H6b: atom 行 (id="atom-N") 走 ``_atom_filename`` (rowid hex4), 格式同构。"""
+    H6b: atom 行 (id="atom-N") 走 ``_atom_filename`` (rowid hex4), 格式同构。
+    link_prefix (2026-10-05 openclaw): MEMORY.md 与散件异目录时链接带目录前缀
+    (Claw: MEMORY.md 在 ws 根, 散件在 memory/ → "memory/")。"""
     topic = _fact_topic(fact, subj_name)
     _m = ATOM_FID_RE.match(str(fact.get("id") or ""))
     aid = fact.get("atom_id")
@@ -530,7 +540,7 @@ def _format_mem_line(fact: dict, subj_name: str) -> str:
         fname = _atom_filename(aid, str(fact.get("text") or fact.get("topic") or ""))
     else:
         fname = _mem_filename(fact["id"], topic)
-    return f"- [{_md_link_text(topic)}]({fname}) — {_md_link_text(topic)}"
+    return f"- [{_md_link_text(topic)}]({link_prefix}{fname}) — {_md_link_text(topic)}"
 
 
 def _rewrite_mem_lines(memory_md: Path, new_lines: list[str]) -> None:

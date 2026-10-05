@@ -149,6 +149,22 @@ def test_missing_memory_dir_and_disabled(tmp_path, tdb, monkeypatch):
     assert OW.sweep() == {"files": 0, "segments": 0, "skipped": 0}
 
 
+def test_hard_timeout_counts_attempt(tmp_path, tdb, monkeypatch):
+    """段消费超 420s 硬超时 → 按文件失败计 attempts (生产卡死实录守护)。"""
+    monkeypatch.setattr(OW, "_SEG_TIMEOUT", 0.05)
+    monkeypatch.setenv("MEM_OPENCLAW_ROOT", str(_ws(tmp_path, files={"a.md": TOPIC})))
+    import time
+
+    def hang(*a, **k):
+        time.sleep(1.0)
+        return {"atoms": 0}
+    monkeypatch.setattr(OW, "distill_chunk", hang)
+    OW.sweep()  # 超时 raise → except Exception → attempts=1 不炸
+    r = db.get_conn().execute(
+        "SELECT attempts, status FROM openclaw_seen").fetchone()
+    assert tuple(r) == (1, "ok")
+
+
 def test_multi_workspace(tmp_path, tdb, monkeypatch):
     """多 workspace 全发现, session_id 带 workspace 名。"""
     _ws(tmp_path, "claw-02", {"a.md": "记 A。"})

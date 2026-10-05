@@ -18,6 +18,7 @@ MEM_OPENCLAW_BATCH (每 cycle 文件帽, 缺省 20 — 存量回填分批不占�
 """
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import os
 import re
@@ -30,6 +31,27 @@ from distill import LayaUnavailable, distill_chunk
 _H2 = re.compile(r"^## ", re.M)
 _H3 = re.compile(r"^### ", re.M)
 _JUDGE_CAP = 6000  # 对齐 _judge_chunk 判官帽 (distill.py); atom.text 仍存全文
+
+# 段消费硬超时守护 (2026-10-05 生产卡死实录: zhipu 挂死 300s×3 重试连环,
+# daemon 主循环静默 30min) — 与 mem_daemon._distill_segment_hard 同款:
+# 单工池 + 超时 shutdown(wait=False) 重建, 僵尸线程由 provider socket 超时
+# 自行退出。超时按文件失败计 (attempts+1, 3 次 poison); 僵尸迟到成功落库
+# 由 distill_seen 段 sha 幂等吸收, 零重复入图。
+_SEG_TIMEOUT = 420.0
+_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="oc-distill")
+
+
+def _distill_hard(fn) -> dict:
+    global _POOL
+    fut = _POOL.submit(fn)
+    try:
+        return fut.result(timeout=_SEG_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        _POOL.shutdown(wait=False)
+        _POOL = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="oc-distill")
+        raise
 
 
 def _now() -> str:
@@ -163,7 +185,9 @@ def sweep() -> dict:
             segs = _chunk_md(f.read_text(encoding="utf-8", errors="replace"))
             ts = _now()
             for seg, gist in segs:
-                distill_chunk(seg, gist, f"openclaw:{ws}", str(f), ts)
+                _distill_hard(
+                    lambda s=seg, g=gist: distill_chunk(
+                        s, g, f"openclaw:{ws}", str(f), ts))
                 n_seg += 1
         except LayaUnavailable:
             raise  # 挂起: 水位不推进, 不计 attempts, 本轮放弃

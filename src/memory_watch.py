@@ -44,8 +44,11 @@ _H3 = re.compile(r"^### ", re.M)
 _JUDGE_CAP = 6000  # 对齐 _judge_chunk 判官帽 (distill.py); atom.text 仍存全文
 
 # 跳过规则 (两端同款, 防自指/防索引污染): MEMORY.md 投影索引 +
-# mem-{4hex}-*.md recall 投影散件 (T4)
-_SKIP_RE = re.compile(r"^(?:mem-[0-9a-f]{4}-.*|MEMORY)\.md$")
+# mem-{4hex}-*.md recall 投影散件 + recall-<日期>.md 投影报告 (GA review
+# 2026-10-05: 报告进 distill = KG 召回产出回灌 KG 自指; 精确日期型 —
+# recall-trail-grill-findings.md 等真知识文件不匹配)。
+# 挂账: projection.py MEM_FILE_RE 若放宽 {4,6} hex, 此处 {4} 须同步。
+_SKIP_RE = re.compile(r"^(?:mem-[0-9a-f]{4}-.*|recall-[0-9]{8}|MEMORY)\.md$")
 
 # 段消费硬超时守护 (2026-10-05 生产卡死实录: zhipu 挂死 300s×3 重试连环,
 # daemon 主循环静默 30min) — 与 mem_daemon._distill_segment_hard 同款:

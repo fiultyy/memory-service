@@ -184,28 +184,31 @@ def test_multi_workspace(tmp_path, tdb, monkeypatch):
 
 
 def test_skip_projection_artifacts(tmp_path, tdb, monkeypatch):
-    """T4 防自指: MEMORY.md + mem-{4hex}-*.md 散件永不进 ingest 车道
-    (mem-aa11 / mem-dead 均为合法 4hex → 跳; mem-xyz9 非 hex → 吃)。"""
+    """T4 防自指: MEMORY.md + mem-{4hex}-*.md 散件 + recall-<日期>.md 投影
+    报告 (GA review) 永不进 ingest 车道; mem-aa11/mem-dead 合法 4hex 跳,
+    recall-20260901.md 投影报告跳, recall-trail-*.md 真知识吃。"""
     monkeypatch.setenv(
         "MEM_OPENCLAW_ROOT",
         str(_ws(tmp_path, files={
             "MEMORY.md": "# Index\n- [x](memory/mem-aa11-y.md) — t\n",
             "mem-aa11-some-slug.md": "---\natom_id: 12\n---\n投影散件\n",
             "mem-dead-beef.md": "dead 也是合法 hex → 跳",
+            "recall-20260901.md": "# 召回投影报告 (自指防)\n",
+            "recall-trail-real.md": "---\ndescription: 真知识\n---\n# 真知识文件\n吃\n",
             "mem-xyz9-nothex.md": "---\ndescription: 普通文件\n---\n非散件 pattern → 吃",
             "topics-real.md": "真记忆 ✓",
         })))
     calls = []
     _mock_chunk(monkeypatch, calls)
     r = MW.sweep()
-    assert r["files"] == 2          # mem-xyz9-nothex + topics-real
+    assert r["files"] == 3          # mem-xyz9-nothex + recall-trail-real + topics-real
     assert not any("MEMORY" in c[0] or "mem-aa11" in c[0]
-                   or "mem-dead" in c[0] for c in calls)
-    # 水位表无 MEMORY.md 记录 (跳过在发现层, 不占 attempts)
+                   or "mem-dead" in c[0] or "recall-2026" in c[0] for c in calls)
+    # 水位表无投影产物记录 (跳过在发现层, 不占 attempts)
     rows = [row[0] for row in db.get_conn().execute(
         "SELECT path FROM openclaw_seen")]
     assert not any(p.endswith("MEMORY.md") or "mem-aa11" in p
-                   or "mem-dead" in p for p in rows)
+                   or "mem-dead" in p or "recall-2026" in p for p in rows)
 
 
 def test_cc_root_discovery_and_session_id(tmp_path, tdb, monkeypatch):

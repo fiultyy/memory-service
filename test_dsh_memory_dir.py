@@ -150,3 +150,54 @@ def test_cli_recall_project_branch_harness(monkeypatch):
     assert str(seen["dir"]) == str(projection.dsh_memory_dir(FAKE_CWD))
     cli.recall("q", cwd=FAKE_CWD, project=True)
     assert str(seen["dir"]) == str(projection.cc_memory_dir(FAKE_CWD))
+
+
+def test_cli_recall_openclaw_mem_dir_passthrough(monkeypatch):
+    """T3 (2026-10-05): openclaw mem_dir 透传 — <cwd>/memory (原生 topics 共存)。"""
+    import recall as recall_mod
+    seen = {}
+
+    def fake_recall(query, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(recall_mod, "recall", fake_recall)
+    cli.recall("q", cwd=FAKE_CWD, harness="openclaw")
+    assert str(seen["mem_dir"]) == str(pathlib.Path(FAKE_CWD) / "memory")
+
+
+def test_cli_recall_openclaw_synthesis_e2e(tmp_path, monkeypatch):
+    """T3 e2e: 真 db 造 atom → cli.recall(openclaw, cwd=ws) → 散件落
+    <ws>/memory/ + ws 根 MEMORY.md 出 (memory/mem- 索引行; 幂等重跑零重复。"""
+    import db
+    sys_path_hack = __import__("sys")
+    sys_path_hack.path.insert(0, ".")
+    db.init(tmp_path / "mem.db")
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO atom(text, label, p_dur, valid_from, source_cwd, subjects) "
+        "VALUES(?, 'fact', 0.8, ?, ?, NULL)",
+        ("openclaw 投影 e2e 验证事实 xyzqaa", "2026-10-05T00:00:00+00:00",
+         str(tmp_path)))
+    conn.commit()
+
+    ws = tmp_path / "workspace-claw-99"
+    (ws / "memory").mkdir(parents=True)
+    (ws / "MEMORY.md").write_text(
+        "- [原生主题](memory/topics-x.md) — 原生保留\n", encoding="utf-8")
+    # recall --cwd 会按 source_cwd 过滤 (ADR-14) → atom 造数带 ws 路径
+    conn.execute("UPDATE atom SET source_cwd=?", (str(ws),))
+    conn.commit()
+
+    r1 = cli.recall("openclaw 投影 e2e 验证", cwd=str(ws), harness="openclaw")
+    assert r1, "atom 应命中"
+    mem_files = list((ws / "memory").glob("mem-*.md"))
+    assert len(mem_files) == 1, "H6b 散件应落 <ws>/memory/"
+    txt = (ws / "MEMORY.md").read_text(encoding="utf-8")
+    assert "](memory/mem-" in txt and "topics-x.md" in txt
+
+    # 幂等: 重跑 (project_atom_md 同名覆盖 + synthesis 清重写) 零重复
+    cli.recall("openclaw 投影 e2e 验证", cwd=str(ws), harness="openclaw")
+    txt2 = (ws / "MEMORY.md").read_text(encoding="utf-8")
+    assert sum(1 for ln in txt2.splitlines() if "](memory/mem-" in ln) == 1
+    assert sum(1 for ln in txt2.splitlines() if "topics-x.md" in ln) == 1

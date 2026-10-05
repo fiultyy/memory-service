@@ -389,6 +389,23 @@ def recall(query: str, verbose: bool = False,
                                gate_account=gate_account, gate_scope=gate_scope,
                                gate_provider=gate_provider,
                                mem_dir=(_proj_memory_dir(None, cwd, harness) if cwd else None))
+    if harness == "openclaw" and cwd:
+        # T3 (2026-10-05): openclaw 散件投影后即时对账索引 — CC SessionStart
+        # 对账的等价物 (Claw 无 memsvc 侧 SessionStart 钩子); MEMORY.md 在 ws
+        # 根、散件在 <ws>/memory/ → memory_md 显式传 + link_prefix="memory/"。
+        # 空命中零散件 → 不对账 (与 --project 空命中不投影同款)。
+        _facts = result["results"] if isinstance(result, dict) and "results" in result \
+            else result
+        _facts = [f.get("fact", f) if isinstance(f, dict) else f
+                  for f in (_facts or [])]
+        if _facts:
+            import projection
+            stats = projection.synthesis_index(
+                cwd, _proj_memory_dir(None, cwd, harness),
+                memory_md=Path(cwd) / "MEMORY.md", link_prefix="memory/")
+            sys.stderr.write(
+                f"📋 openclaw synthesis → MEMORY.md index "
+                f"(projected={stats['projected']} deduped={stats['deduped']})\n")
     if project:
         # M18: 召回正文 → recall-<DATE>.md + MEMORY.md 索引行 (用户裁决 2026-08-27)。
         # dir = cc_memory_dir(--cwd 或 $PWD); 空命中不投影(不写空日志)。报告走

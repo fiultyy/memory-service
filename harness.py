@@ -71,9 +71,11 @@ def _dsh_spool() -> Path:
 def _locate_dsh_transcript(session_id: str, home: str) -> Path | None:
     """dsh session_id → transcript (补票下沉 2026-10-04, 自 runtime.py 内联
     glob 搬家): 桥 payload 恒带空 transcript_path → 按 session_id 回查
-    ~/.dsh/sessions/*/；多命中取 mtime 最新 (≡ ls -1t); 找不到 → None。"""
+    ~/.dsh/sessions/*/；多命中取 mtime 最新 (≡ ls -1t); 找不到 → None。
+    2026-10-05: 文件名放宽到 session*.jsonl.zstd — harness 升 0.2.0 后
+    写开会话更名 session.v4.jsonl.zstd (V4 单向门), 旧名仍需匹配。"""
     cands = list((Path(home) / ".dsh" / "sessions").glob(
-        f"*/{session_id}/session.jsonl.zstd"))
+        f"*/{session_id}/session*.jsonl.zstd"))
     return max(cands, key=lambda p: p.stat().st_mtime) if cands else None
 
 

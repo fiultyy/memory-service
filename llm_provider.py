@@ -246,15 +246,19 @@ class ZhipuAnthropicProvider:
     base_url: str = "https://open.bigmodel.cn/api/anthropic"
     model: str = "glm-5-turbo"
     api_key: str = ""  # 空 → _load_zhipu_key 从 env ZHIPU_API_KEY 读
-    timeout: float = 60.0
+    timeout: float = 300.0  # 2026-10-05: 18.7KB 全文提取实测 54s, 60s 帽压线
 
     def extract_facts(self, text: str) -> Extraction:
         key = self.api_key or _load_zhipu_key()
         if not key:
             return Extraction(confidence=0.0, source_meta={
                 "provider": "zhipu", "error": "no api_key (set ZHIPU_API_KEY in .env)"})
+        # max_tokens 16384 (2026-10-05): glm-5-turbo thinking 默认开, 512/2048
+        # 帽会被 thinking 吃光 → text block 空 ("no content block") 或 JSON 截断。
+        # 实测 18.7KB md: 16k 帽下 thinking+完整 JSON 闭合 (80 实体/54 边, 54s);
+        # 8192 帽同文本曾只出 36 实体 (被 stop 前截)。
         body = json.dumps({
-            "model": self.model, "max_tokens": 512,
+            "model": self.model, "max_tokens": 16384,
             "messages": [{"role": "user", "content": _EXTRACT_PROMPT + text}],
         }).encode("utf-8")
         req = urllib.request.Request(

@@ -63,13 +63,16 @@ def test_precompact_golden_cc(gold_env):
     assert spool_file.with_name(spool_file.name + ".harness").read_text() == "cc"
 
 
-def test_precompact_golden_dsh(gold_env):
+@pytest.mark.parametrize("log_name", ["session.jsonl.zstd", "session.v4.jsonl.zstd"])
+def test_precompact_golden_dsh(gold_env, log_name):
     """dsh 形: transcript_path 空 → HOME 回查 ~/.dsh/sessions; zstd 明文化;
-    幂等键 = <sid>-<cid12> (compaction_id 去 '-' 前 12)。"""
+    幂等键 = <sid>-<cid12> (compaction_id 去 '-' 前 12)。文件名两代都要回查:
+    harness 升 0.2.0 后写开会话更名 session.v4.jsonl.zstd (V4 单向门),
+    glob 已放宽 session*.jsonl.zstd (harness.py 2026-10-05)。"""
     sid_dir = gold_env["home"] / ".dsh" / "sessions" / "proj" / "gold-dsh-sess"
     sid_dir.mkdir(parents=True)
     plain = (GOLDEN / "payloads" / "dsh_transcript.jsonl").read_bytes()
-    zst = sid_dir / "session.jsonl.zstd"
+    zst = sid_dir / log_name
     zst.write_bytes(subprocess.run(["zstd", "-q", "-c", "-"], input=plain,
                                    capture_output=True, check=True).stdout)
     r = _run_hook(REPO / "hooks" / "pre-compact-mem.sh",

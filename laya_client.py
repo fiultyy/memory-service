@@ -36,6 +36,16 @@ JEV_DECISIONS_URL = os.environ.get(
 JEV_MODEL = os.environ.get("MEM_JEV_MODEL", "typesafe/jev-1.13")
 JEV_STYLE_URL = os.environ.get("MEM_JEV_STYLE_URL", "http://127.0.0.1:8191")
 
+# workers-ai (2026-10-05): Cloudflare Workers AI @cf/cloudflare/clef(-flash)
+# — SystemOne 原生判官 API (与 jev/openrouter 同族), 需 CF_ACCOUNT_ID +
+# CF_API_TOKEN (Workers AI 权限); 模型 MEM_CLEF_MODEL 覆盖 (缺省 clef-flash,
+# 9B; "clef"=27B, 65k ctx, 单价 4×)。实测 (2026-10-05, 上海出发):
+# 3 题 @2.4k tok 0.6-1.2s (跨境 RTT 主导, 服务端 H200); 16k tok 全量 1.5s;
+# 服务端截断行为不稳定 (同输入两次 2371 / 18641 tokens) → 客户端滑窗保平安,
+# est 帽 4500 (×4≈18k 真实, 留裕量)。
+CF_ACCT_URL = "https://api.cloudflare.com/client/v4/accounts/{acct}/ai/run/@cf/cloudflare/{model}"
+CLEF_MODEL = os.environ.get("MEM_CLEF_MODEL", "clef-flash")
+
 def _backend() -> str:
     return os.environ.get("MEM_LAYA_BACKEND", "local")
 
@@ -70,6 +80,45 @@ def _openrouter_post(state: str, questions: dict, timeout: float) -> dict | None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return None
 
+
+def _workersai_post(state: str, questions: dict, timeout: float) -> dict | None:
+    """Cloudflare Workers AI @cf/cloudflare/clef(-flash) → /predict 同形返回。
+
+    实测 (2026-10-05): body {model, state, questions} → 包络 {success,
+    result: {answers, usage}}; answers 与 /predict 逐位同形 (noul 型
+    {type, noul}; choice 型含 probabilities/confidence; score 型含
+    score/legend/probabilities)。失败/包络 success=False/answers 缺失 → None,
+    与 _openrouter_post 失败语义一致。"""
+    acct = os.environ.get("CF_ACCOUNT_ID", "")
+    token = os.environ.get("CF_API_TOKEN", "")
+    if not (acct and token):
+        return None
+    url = CF_ACCT_URL.format(acct=acct, model=CLEF_MODEL)
+    # qid 映射 (2026-10-05): Workers AI 校验 question id ^[A-Za-z0-9_.-]{1,100}$
+    # — atom 面传 "atom:7599" 带冒号直接 422。位置映射 q0..qN 无冲突风险,
+    # 返回后映射回原 id, 调用方契约零变 (本地/openrouter 面不校验, 历史无感)。
+    qmap = {f"q{i}": qid for i, qid in enumerate(questions)}
+    payload_qs = {f"q{i}": q for i, q in enumerate(questions.values())}
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"model": CLEF_MODEL, "state": state,
+                         "questions": payload_qs}, ensure_ascii=False).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read())
+        if not (isinstance(body, dict) and body.get("success")):
+            return None
+        answers = (body.get("result") or {}).get("answers")
+        if not isinstance(answers, dict):
+            return None
+        return {"answers": {qmap[k]: v for k, v in answers.items() if k in qmap}}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+
 # 进程级 TTL 缓存: 成功/失败都缓存, 避免交互路径每次探测
 _avail_cache: tuple[float, bool] | None = None
 _AVAIL_TTL = 60.0
@@ -98,6 +147,8 @@ def laya_available() -> bool:
 
     openrouter 后端: key 在即视为可用 (无本地 health 面; 真失败走 laya_batch
     → None 的既有回落链, 不额外探测花钱)。
+    workers-ai 后端: CF_ACCOUNT_ID+CF_API_TOKEN 在即视为可用 (同 openrouter
+    模式; 花钱探测不预发)。
     jevstyle 后端: GET /healthz (jev-style server 的 health 面与 laya /health
     不同名)。"""
     global _avail_cache
@@ -105,6 +156,9 @@ def laya_available() -> bool:
         return False
     if _backend() == "openrouter":
         return bool(os.environ.get("OPENROUTER_API_KEY"))
+    if _backend() == "workers-ai":
+        return bool(os.environ.get("CF_ACCOUNT_ID")
+                    and os.environ.get("CF_API_TOKEN"))
     now = time.monotonic()
     if _avail_cache is not None and now - _avail_cache[0] < _AVAIL_TTL:
         return _avail_cache[1]
@@ -128,11 +182,18 @@ def _token_budget() -> int:
     全长中文 instructions est 2136 真实已撞顶 503) → est 帽 2048 (实测 n=19
     est≈2025 过, 留裕量)。env MEM_LAYA_LOCAL_BUDGET 覆盖。
     jevstyle: 25.6k 真实上下文, 过长整请求拒收 (不截断) → est 帽 6000
-    (est×4≈24k, 留 6% 裕量)。env MEM_JEV_STYLE_BUDGET 覆盖。"""
+    (est×4≈24k, 留 6% 裕量)。env MEM_JEV_STYLE_BUDGET 覆盖。
+    workers-ai: clef-flash 实测 ≥18.6k 真实可进, 但服务端截断不稳定 →
+    est 帽 4500 (×4≈18k, 留裕量); clef (27B, 65k ctx) → est 帽 15000。
+    env MEM_CLEF_BUDGET 覆盖。"""
     if _backend() == "local":
         return int(os.environ.get("MEM_LAYA_LOCAL_BUDGET", "2048"))
     if _backend() == "jevstyle":
         return int(os.environ.get("MEM_JEV_STYLE_BUDGET", "6000"))
+    if _backend() == "workers-ai":
+        if "MEM_CLEF_BUDGET" in os.environ:
+            return int(os.environ["MEM_CLEF_BUDGET"])
+        return 15000 if CLEF_MODEL == "clef" else 4500
     return TOKEN_BUDGET
 
 
@@ -143,13 +204,16 @@ def laya_batch(state: str, questions: dict, timeout: float = 30.0) -> dict | Non
     """
     if not questions:
         return {}
-    # 后端分发: openrouter (jev 云端) / jevstyle (本地 jev-style 容器) / local
-    # 共用分片/预算/失败语义 — 三者 answers 同形
+    # 后端分发: openrouter (jev 云端) / workers-ai (clef 云端) /
+    # jevstyle (本地 jev-style 容器) / local — 共用分片/预算/失败语义, 同形 answers
     _path = "/v1/systemone" if _backend() == "jevstyle" else "/predict"
-    _send = ((lambda st, qs: _openrouter_post(st, qs, timeout))
-             if _backend() == "openrouter"
-             else (lambda st, qs: _post(_path,
-                                        {"state": st, "questions": qs}, timeout)))
+    if _backend() == "openrouter":
+        _send = lambda st, qs: _openrouter_post(st, qs, timeout)
+    elif _backend() == "workers-ai":
+        _send = lambda st, qs: _workersai_post(st, qs, timeout)
+    else:
+        _send = lambda st, qs: _post(_path,
+                                     {"state": st, "questions": qs}, timeout)
     n_shards = max(1, -(-_est_tokens(state, questions) // _token_budget()))
     if n_shards <= 1:
         resp = _send(state, questions)

@@ -1,6 +1,6 @@
 ---
 name: memsvc
-description: 手动操作 memory-service 知识图谱（KG）——召回/入库/导入/投影/写事实。用户要"查记忆""记一下这个""导入 memory""刷新投影""补最近会话入库"或任何涉及 memsvc 记忆库的操作时使用。CLI 位于 /home/yy/projects/memory-service/cli.py，db/路径全部模块相对，任意 cwd 可用。自动面已接 cc/dsh 两 harness（pi 手动面通，omp 搁置）。
+description: 手动操作 memory-service 知识图谱（KG）——召回/入库/导入/投影/写事实。用户要"查记忆""记一下这个""导入 memory""刷新投影""补最近会话入库"或任何涉及 memsvc 记忆库的操作时使用。CLI 位于 /home/yy/projects/memory-service/cli.py，db/路径全部模块相对，任意 cwd 可用。自动面已接 cc/dsh/openclaw 三 harness（pi 手动面通，omp 搁置）。
 ---
 
 # memsvc 手动操作
@@ -15,7 +15,7 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 
 库: `data/memory.db`（~1400 live atoms：段级 954 + 句级 445 遗留；11526 实体；599 语义 tag；SQLite WAL，词法召回毫秒级）。
 
-**解耦架构** (2026-10-04): hooks/*.sh 守护壳 → `runtime.py`（SDK: snapshot/project/inject）→ `harness.py` SPECS（五家 harness 注册表）→ 核心层。agent 手动面只依赖 cli.py 22 子命令（签名零改动）——任意 harness 能起进程即可裸调。
+**解耦架构** (2026-10-04): hooks/*.sh 守护壳 → `runtime.py`（SDK: snapshot/project/inject）→ `harness.py` SPECS（六家 harness 注册表）→ 核心层。agent 手动面只依赖 cli.py 22 子命令（签名零改动）——任意 harness 能起进程即可裸调。
 
 ## 意图 → 命令
 
@@ -23,7 +23,7 @@ description: 手动操作 memory-service 知识图谱（KG）——召回/入库
 
 | 意图 | 命令 |
 |---|---|
-| 查记忆/召回 | `python3 …/cli.py recall "<query>" --json --top-k 8` |
+| 查记忆/召回 | `python3 …/cli.py recall "<query>" --json --top-k 8`；OpenClaw workspace 内落散件: 加 `--harness openclaw --cwd <workspace绝对路径>`（per-hit `mem-*.md` → `<ws>/memory/` + MEMORY.md 索引行 `memory/` 前缀） |
 | 查记忆 + 落盘到当日 recall 日志 | 同上 + `--project`（正文→`memory/recall-<DATE>.md`，MEMORY.md 注入索引行；空命中不投影） |
 | 召回（向量融合，解字面盲区） | 同上 + `--vector`（**需 LM Studio 127.0.0.1:16666 在线**） |
 | 召回（图近字面远） | 同上 + `--bfs` |

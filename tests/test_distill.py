@@ -83,6 +83,10 @@ def _zhipu_arr(items):
 
 @pytest.fixture(autouse=True)
 def _fast(monkeypatch):
+    # distill 主流程在 mock 链之前有 ZHIPU_API_KEY 存在性守护 (无 key →
+    # ConfigIncomplete 挂起); 本套件全 mock zhipu/laya/embed 不打网络,
+    # key 只需非空。自足化: 不再依赖外部 env (本地 .env 渗透 / CI 无 key)。
+    monkeypatch.setenv("ZHIPU_API_KEY", "test-offline")
     monkeypatch.setattr(time, "sleep", lambda s: None)
 
 

@@ -21,6 +21,7 @@ import bootstrap
 import cli
 import db
 import projection
+import store
 
 
 def _fact(fid="ab12cd34ef", topic="t", value="v", score=None, mem_path=None):
@@ -118,10 +119,16 @@ def test_cli_recall_project_e2e(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     db.init(tmp_path / "db.sqlite")
     proj_cwd = str(tmp_path / "proj")  # cc_memory_dir(proj_cwd) 在假 HOME 下
-    cli.ingest("张三在甲项目负责后端", source_cwd=proj_cwd)
+    # 造数走 store 直插 (本用例测 recall 投影, 不测 LLM 抽取)。历史上
+    # cli.ingest 靠 shell/.env 渗透真 key 走 LLM 通道; CI 无 key 时 adapter
+    # 直接 raise (regex fallback removed) — 仓根测试吃不到 tests/conftest 的
+    # env, 离线自足只有绕开 ingest。
+    eid = store.put_entity("张三", "person")
+    store.put_fact(eid, "负责", "甲项目后端开发", source_cwd=proj_cwd,
+                   topic="张三负责甲项目后端")
     out = cli.recall("张三 后端", cwd=proj_cwd, project=True)
     facts = out["results"] if isinstance(out, dict) and "results" in out else out
-    assert facts, "regex 通道应至少命中一条"
+    assert facts, "store 造数应至少命中一条"
     mem_dir = projection.cc_memory_dir(proj_cwd)
     import os as _os
     assert _os.environ.get("HOME") == str(tmp_path / "home")

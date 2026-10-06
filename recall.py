@@ -113,6 +113,24 @@ def _temporal_clause(as_of: str | None = None) -> tuple[str, list]:
     )
 
 
+def _cwd_scope_sql(cwd: str) -> tuple[str, list]:
+    """ADR-14 cwd 过滤片段: == 或前缀 ``cwd/`` 或 NULL。
+
+    前缀语义 (2026-10-06 修): watchdog md 车道落库 source_cwd = 文件全路径
+    ``<ws>/memory/x.md``, 而 agent/教学面传 workspace 根 — 精确 == 会把本
+    workspace 的 md atom 全滤掉 (claw-02 实测 1488 条不可见)。斜杠收尾防
+    邻居前缀串门 (``/ws-a`` 不匹配 ``/ws-ab/``); substr 精确前缀比较避开
+    LIKE 元字符 (路径常含 ``_``)。返回 ``(sql 片段含前导 AND, params)``。"""
+    return (" AND (source_cwd = ? OR substr(source_cwd, 1, ?) = ?"
+            " OR source_cwd IS NULL)",
+            [cwd, len(cwd) + 1, cwd + "/"])
+
+
+def _cwd_match(sc: str | None, cwd: str) -> bool:
+    """_cwd_scope_sql 的 Python 侧同款 (向量/tag/边翼的行级过滤)。"""
+    return not sc or sc == cwd or sc.startswith(cwd + "/")
+
+
 def _build_entity_graph(
     as_of: str | None = None, source_cwd: str | None = None,
 ) -> tuple[nx.Graph, dict[str, float]]:
@@ -136,10 +154,10 @@ def _build_entity_graph(
             tp,
         ).fetchall()
     else:
+        _sc, _sp = _cwd_scope_sql(source_cwd)
         rows = conn.execute(
-            f"SELECT subject_id, object_id FROM fact WHERE {tc} "
-            f"AND (source_cwd = ? OR source_cwd IS NULL)",
-            (*tp, source_cwd),
+            f"SELECT subject_id, object_id FROM fact WHERE {tc}{_sc}",
+            (*tp, *_sp),
         ).fetchall()
     g = nx.Graph()
     seen: set[str] = set()
@@ -374,9 +392,10 @@ def _recall_atoms(
     conn = db.get_conn()
     tc, tp = _atom_temporal_clause(as_of)
     if cwd:
+        _sc, _sp = _cwd_scope_sql(cwd)
         rows = conn.execute(
-            f"SELECT * FROM atom WHERE {tc} AND (source_cwd = ? OR source_cwd IS NULL)",
-            (*tp, cwd),
+            f"SELECT * FROM atom WHERE {tc}{_sc}",
+            (*tp, *_sp),
         ).fetchall()
     else:
         rows = conn.execute(f"SELECT * FROM atom WHERE {tc}", tp).fetchall()
@@ -421,7 +440,7 @@ def _recall_atoms(
         # ADR-14 cwd 过滤 (向量腿候选; 文本腿 SQL 已过滤, 同 fact 面口径)
         if cwd:
             cand = {aid: a for aid, a in cand.items()
-                    if not a["source_cwd"] or a["source_cwd"] == cwd}
+                    if _cwd_match(a["source_cwd"], cwd)}
 
     # ── tag 遍历腿 (spec §一 召回联动): 命中 atom 的 semantic tag
     #    (top TAG_TOP_PER_ATOM by w) → 同 tag 兄弟 atom (排除已命中, 去重,
@@ -472,7 +491,7 @@ def _recall_atoms(
                         continue
                     if aid in cand:
                         continue  # 排除已命中
-                    if cwd and r["source_cwd"] and r["source_cwd"] != cwd:
+                    if cwd and not _cwd_match(r["source_cwd"], cwd):
                         continue  # ADR-14
                     rel = sim_by_id.get(aid, 0.0)
                     if rel <= 0.0:
@@ -564,7 +583,7 @@ def _recall_atoms(
                 r = erows.get(o)
                 if r is None:
                     continue  # 对端非 live (supersede 结算等)
-                if cwd and r["source_cwd"] and r["source_cwd"] != cwd:
+                if cwd and not _cwd_match(r["source_cwd"], cwd):
                     continue  # ADR-14
                 tag_wing[o] = min(1.0, w)
                 cand[o] = _row_to_atom(r)
@@ -825,9 +844,10 @@ def recall(
     conn = db.get_conn()
     tc, tp = _temporal_clause(as_of)
     if cwd:
+        _sc, _sp = _cwd_scope_sql(cwd)
         value_rows = conn.execute(
-            f"SELECT * FROM fact WHERE {tc} AND (source_cwd = ? OR source_cwd IS NULL)",
-            (*tp, cwd),
+            f"SELECT * FROM fact WHERE {tc}{_sc}",
+            (*tp, *_sp),
         ).fetchall()
     else:
         value_rows = conn.execute(
@@ -878,7 +898,7 @@ def recall(
     # ADR-14 cwd 过滤 entity-based candidates(entity 可跨 cwd, Python 过滤; NULL 兼容老数据)
     if cwd:
         candidates = [f for f in candidates
-                      if not f.get("source_cwd") or f["source_cwd"] == cwd]
+                      if _cwd_match(f.get("source_cwd"), cwd)]
         seen_ids = {f["id"] for f in candidates}
     # ADR-2v2: on-the-fly pagerank centrality over the full active-fact graph
     # (one build per recall, no persistence). Each fact's centrality = the

@@ -743,9 +743,14 @@ def get_semantic_edges(as_of: str | None = None,
         params = [as_of, as_of, as_of, as_of]
     cwd_sql = ""
     if source_cwd is not None:
-        cwd_sql = (" AND (s.source_cwd = ? OR s.source_cwd IS NULL) "
-                   "AND (t.source_cwd = ? OR t.source_cwd IS NULL)")
-        params = [*params, source_cwd, source_cwd]
+        # 前缀语义同 recall._cwd_scope_sql (watchdog md 车道 source_cwd 是
+        # 文件全路径; substr 避开 LIKE 元字符), 双端各一组参数。
+        cwd_sql = (" AND (s.source_cwd = ? OR substr(s.source_cwd, 1, ?) = ?"
+                   " OR s.source_cwd IS NULL)"
+                   " AND (t.source_cwd = ? OR substr(t.source_cwd, 1, ?) = ?"
+                   " OR t.source_cwd IS NULL)")
+        params = [*params, source_cwd, len(source_cwd) + 1, source_cwd + "/",
+                  source_cwd, len(source_cwd) + 1, source_cwd + "/"]
     rows = db.get_conn().execute(
         f"""SELECT r.source_id, r.target_id, r.edge_type, r.weight,
                    r.created_by, r.created_at,

@@ -310,6 +310,19 @@ def test_recall_scored_with_cwd_filter(tmp_path, monkeypatch):
     assert set(ids) == {"atom:1", "atom:3"}, ids  # 异 cwd 排除, NULL 兼容
 
 
+def test_recall_cwd_prefix_file_path(tmp_path, monkeypatch):
+    """2026-10-06 修: watchdog md 车道 source_cwd=文件全路径 <ws>/memory/x.md,
+    agent 传 workspace 根 — 前缀 cwd/ 须命中; 邻居前缀 (/x vs /xy) 不串门。"""
+    conn = _init(tmp_path, monkeypatch)
+    _atom(conn, "sqlite-vec md 车道条目",
+          source_cwd="/ws/claw/memory/topics-a.md")      # 文件全路径形态
+    _atom(conn, "sqlite-vec 邻居 workspace",
+          source_cwd="/ws/claw-extra/memory/topics-b.md")  # 前缀相似非子路径
+    _atom(conn, "sqlite-vec 别库", source_cwd="/other")
+    ids = _ids(recall_mod.recall("sqlite", cwd="/ws/claw"))
+    assert set(ids) == {"atom:1"}, ids  # 只 md 车道条目; claw-extra 不串门
+
+
 # ── 10. v3: subjects 锚定 / related 第四腿 / freshness / parent 爬层 ──
 
 def test_subjects_anchor(tmp_path, monkeypatch):

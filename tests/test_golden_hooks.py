@@ -89,8 +89,13 @@ def test_registration_surfaces_frozen():
     """注册面零 diff 快照: settings.json memsvc hooks 段 + dsh-hooks.json。
 
     解耦全程 (S2-S7) 两注册面不许动 — 本测漂移红即注册面被动过的信号
-    (合并前重冻结需明示理由)。"""
-    S = json.load(open("/home/yy/.claude/settings.json"))
+    (合并前重冻结需明示理由)。
+    本机环境守卫: 对账对象是 ~/.claude/settings.json 真机文件, CI 干净
+    runner 无此文件 → skip (非 repo 单元性, 无可对账面)。"""
+    _s = Path.home() / ".claude" / "settings.json"
+    if not _s.exists():
+        pytest.skip(f"本机注册面对账: {_s} 不在 (CI runner), 无可对账面")
+    S = json.load(open(_s))
     cur = {}
     for ev, entries in (S.get("hooks") or {}).items():
         keep = [e for e in (entries if isinstance(entries, list) else [entries])

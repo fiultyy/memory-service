@@ -53,10 +53,15 @@ print(f"Test 3 (offline degrade): created '{ent['name']}' emb={ent['name_embeddi
 
 # ── 下面 mock-vector 测试: monkeypatch embedding.embed 返回固定向量 ──
 # (确定性, 不依赖 embeddings.db cache / 不触网络; resolver 在调用时查模块属性)
+# embed_batch 同 mock (2026-10-06 CI 红): heal_entities_if_pending 走批口 —
+# 只 mock embed 时 heal 打真 LM Studio (localhost:16666, 本地常驻故绿),
+# CI 无本地服务 → 空 vec → heal 0 行 → dim-mismatch 断言红。
 _orig_embed = embedding.embed
+_orig_embed_batch = embedding.embed_batch
 import vec_index as _vi
 _VEC = [1.0, 0.0, 0.0] + [0.0] * (_vi.VEC_DIM - 3)  # perf/vec-index: pad 到索引维度 (小维 fixture 不入 vec0)
 embedding.embed = lambda text, providers=None: list(_VEC)
+embedding.embed_batch = lambda texts, providers=None: [list(_VEC) for _ in texts]
 
 # ── providers=[] 跳过 LLM: 有候选也不 merge, 直接新建 ──────────────
 _fresh_db()
@@ -259,5 +264,10 @@ print("Test 14 (empty name): resolve_entity('') → None")
 assert str(db._conn_path).startswith("/tmp"), (
     f"conn must be on tmp, got {db._conn_path}")
 print(f"Test 15 (tmp isolation): conn_path={db._conn_path}")
+
+# ── 还原模块级 mock (pytest 收集期先 import 本文件, 直接赋值会污染
+# 同进程后续文件的真实现测试 — 如 test_b3c_hygiene 的 embed_batch 守卫) ──
+embedding.embed = _orig_embed
+embedding.embed_batch = _orig_embed_batch
 
 print("\nAll tests passed")

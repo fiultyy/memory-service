@@ -1,0 +1,19 @@
+{
+  "id": "memsvc",
+  "name": "memsvc",
+  "version": "1.0.0",
+  "description": "memsvc KG auto-recall injection + compaction snapshot to transcript-spool",
+  "main": "index.js",
+  "type": "module",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable memsvc auto-recall and compaction snapshot"
+      }
+    },
+    "required": []
+  }
+}

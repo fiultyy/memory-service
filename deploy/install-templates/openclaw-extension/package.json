@@ -1,0 +1,10 @@
+{
+  "name": "memsvc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "memsvc KG auto-recall injection + compaction snapshot to transcript-spool",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}

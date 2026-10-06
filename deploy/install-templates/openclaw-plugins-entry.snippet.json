@@ -1,0 +1,16 @@
+{
+  "plugins": {
+    "entries": {
+      "memsvc": {
+        "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true,
+          "timeouts": {
+            "before_prompt_build": 12000,
+            "before_compaction": 15000
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+# 追加进 ~/.dsh/cordis.patch.yml 的 plugins patch 链 (路径按需替换)
+- insert:
+    - id: hooks-claude-code-memsvc
+      name: '/home/yy/.dsh/plugins/hooks-claude-code-wrap.mjs'
+      config:
+        configPath: '/home/yy/projects/memory-service/hooks/dsh-hooks.json'
+        defaultTimeoutMs: 30000

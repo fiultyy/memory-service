@@ -7,6 +7,17 @@ import db
 import migrate_v2 as mig
 import store
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _pin_repo_root(monkeypatch):
+    """_REPO_ROOT 是 Path.home() 派生的本机白名单根; CI HOME=/home/runner
+    下 '/home/yy/projects/...' fixture 不再命中 → repo tag 不铸、断言差元素。
+    pin 回本机根: repo_tag 是纯路径运算 (不 touch 文件系统), 路径无需存在,
+    本套件的硬编码 cwd/断言跨机成立。"""
+    monkeypatch.setattr(mig, "_REPO_ROOT", Path("/home/yy/projects"))
+
 
 def _fixture(root: Path) -> dict:
     """最小蒸馏产物: 3 atom / 2 edge (1 条 a>b 反序验 a<b 规范化) / 溯源齐备。"""

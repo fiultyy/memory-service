@@ -16,5 +16,5 @@ jobs:
       # env -u 纪律 (key 相关 fixture 自足, 见 tests/test_distill.py)
       # sqlite-vec pin 0.1.9 = 本地已验证版本 (新版 vec0 行为差异曾致
       # test_resolver dim-mismatch heal 断言红)
-      - run: pip install pytest networkx numpy scikit-surprise sqlite-vec==0.1.9
+      - run: pip install pytest networkx numpy scikit-surprise pyyaml sqlite-vec==0.1.9
       - run: python -m pytest -q

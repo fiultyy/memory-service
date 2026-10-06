@@ -33,6 +33,7 @@ def snapshot(db_path: str | Path) -> str:
     db_path = Path(db_path)
     ts = time.strftime("%Y%m%d-%H%M%S")
     dest = _ROOT / "data" / f"migration-backup-{ts}.db"
+    dest.parent.mkdir(parents=True, exist_ok=True)  # data/ gitignored, 干净 checkout 无此目录
     shutil.copy2(db_path, dest)
     for suf in ("-wal", "-shm"):
         side = Path(str(db_path) + suf)

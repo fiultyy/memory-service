@@ -1,0 +1,17 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # 测试套件离线 (LLM 全 mock); CI 天然无 ZHIPU_API_KEY ≡ 本地 env -u 纪律
+      - run: pip install pytest networkx numpy scikit-surprise
+      - run: python -m pytest -q

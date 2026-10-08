@@ -227,3 +227,45 @@ def test_cc_root_discovery_and_session_id(tmp_path, tdb, monkeypatch):
     # 显式空 → 关
     monkeypatch.setenv("MEM_CC_MEMORY_ROOT", "")
     assert MW.sweep() == {"files": 0, "segments": 0, "skipped": 0}
+
+
+def test_delete_reaps_atoms(tmp_path, tdb, monkeypatch):
+    """#14 删除回传: 文件删 → 该文件 atoms valid_to 软删 + 边/水位清,
+    前缀外路径不误删 (env 挪走防全扫射)。"""
+    root = _ws(tmp_path, files={"a.md": TOPIC, "b.md": "记 B。"})
+    monkeypatch.setenv("MEM_OPENCLAW_ROOT", str(root))
+    _mock_chunk(monkeypatch, [])
+    MW.sweep()
+    conn = db.get_conn()
+    # 造文件级溯源 atoms (真实形态: source_cwd=文件全路径) + 一条边
+    md = root / "workspace-claw-02" / "memory"
+    a1 = conn.execute(
+        "INSERT INTO atom(text, label, source_cwd, valid_from) "
+        "VALUES('甲事实', 'fact', ?, '2026-10-08T00:00:00+00:00')",
+        (str(md / "a.md"),)).lastrowid
+    a2 = conn.execute(
+        "INSERT INTO atom(text, label, source_cwd, valid_from) "
+        "VALUES('乙事实', 'fact', ?, '2026-10-08T00:00:00+00:00')",
+        (str(md / "gone.md"),)).lastrowid  # 从未在盘上 (＝已删除形态)
+    conn.execute("INSERT INTO atom_edge(a_id, b_id, w) VALUES(?,?,0.9)",
+                 (min(a1, a2), max(a1, a2)))
+    conn.execute(
+        "INSERT INTO openclaw_seen(path, sha256, updated_at) "
+        "VALUES(?, 'dead', '2026-10-08T00:00:00+00:00')", (str(md / "gone.md"),))
+    conn.commit()
+    r = MW.sweep()
+    assert r["reaped"] == 1
+    row = conn.execute("SELECT valid_to FROM atom WHERE id=?", (a2,)).fetchone()
+    assert row[0] is not None                      # 软删 (bi-temporal)
+    assert conn.execute("SELECT valid_to FROM atom WHERE id=?",
+                        (a1,)).fetchone()[0] is None  # 在世文件不动
+    assert conn.execute("SELECT COUNT(*) FROM atom_edge").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM openclaw_seen WHERE path LIKE '%gone%'"
+    ).fetchone()[0] == 0                            # 水位行清
+    # env 挪走 (前缀外) → 同一行不再被扫射 (已清, 用另一目录验证)
+    (md / "a.md").unlink()
+    monkeypatch.setenv("MEM_OPENCLAW_ROOT", str(tmp_path / "elsewhere-not-exist"))
+    assert MW.sweep().get("reaped", 0) == 0  # dirs 空 early return, a.md 溯源幸存
+    assert conn.execute("SELECT valid_to FROM atom WHERE id=?",
+                        (a1,)).fetchone()[0] is None

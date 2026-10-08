@@ -186,9 +186,36 @@ def _ensure_table(conn) -> None:
         )""")
 
 
+def _reap_deleted(conn, dirs, seen) -> int:
+    """删除回传 (2026-10-08 #14): 水位行在、文件不在 → 该文件 atoms 级联退场。
+
+    - atom **valid_to 软删** (bi-temporal D4: --as-of 可回溯), 非硬 DELETE —
+      硬删面 = cli prune (sanctioned 显式命令)。
+    - 派生物硬删: atom_edge (纯派生) + vec_atom (缓存, 重建可 heal);
+      失败不阻塞软删。
+    - 参与对账前提: path 落在本次某个 watch dir 前缀下 (env 挪动/单测关源
+      防误删)。
+    - 范围: 仅文件级 source_cwd (10-05 后 md 车道形态); 早期目录级溯源
+      (source_cwd=<dir>) 的存量 atom 不在此机制覆盖。
+    - distill_seen 不动: 段 sha 水位防 replay 语义保持 (同内容再现跳过)。"""
+    prefixes = tuple(str(d) + "/" for _, d in dirs)
+    n_atoms = 0
+    for path in seen:
+        if not any(path.startswith(p) for p in prefixes) or Path(path).exists():
+            continue
+        ids = [r[0] for r in conn.execute(
+            "SELECT id FROM atom WHERE source_cwd=? AND valid_to IS NULL",
+            (path,)).fetchall()]
+        n_atoms += db.retire_atoms(ids)  # 级联公共面 (软删+边+vec)
+        conn.execute("DELETE FROM openclaw_seen WHERE path=?", (path,))
+    conn.commit()  # 水位行删除 (n_atoms=0 时也需落)
+    return n_atoms
+
+
 def sweep() -> dict:
-    """一轮 watchdog: 新/变文件切段入图。挂起语义 = raise 上抛 LayaUnavailable
-    (daemon 本轮放弃, 下轮再来); 毒文件 3 试后 status=poison 跳过。"""
+    """一轮 watchdog: 新/变文件切段入图 + 已删文件回传退场。挂起语义 =
+    raise 上抛 LayaUnavailable (daemon 本轮放弃, 下轮再来); 毒文件 3 试后
+    status=poison 跳过。"""
     dirs = _watch_dirs()
     if not dirs:
         return {"files": 0, "segments": 0, "skipped": 0}
@@ -197,6 +224,7 @@ def sweep() -> dict:
     _ensure_table(conn)
     seen = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT path, sha256, status FROM openclaw_seen")}
+    reaped = _reap_deleted(conn, dirs, seen)  # #14: 删除回传先于 ingest
     todo: list[tuple[str, Path, str]] = []  # (session_id, file, sha)
     for sid, d in dirs:
         for f in sorted(d.glob("*.md")):
@@ -244,7 +272,8 @@ def sweep() -> dict:
             "SET sha256=?, attempts=0, status='ok', updated_at=?",
             (str(f), sha, _now(), sha, _now()))
         conn.commit()
-    return {"files": len(todo), "segments": n_seg, "skipped": skipped}
+    return {"files": len(todo), "segments": n_seg, "skipped": skipped,
+            "reaped": reaped}
 
 
 if __name__ == "__main__":  # 手动 dry: python3 src/memory_watch.py

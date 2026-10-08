@@ -273,3 +273,30 @@ def transaction(*, immediate: bool = True):
         _txn_depth -= 1
         if _txn_depth == 0 and started:
             conn.commit()
+
+
+def retire_atoms(ids: list[int], ts: str | None = None) -> int:
+    """atom 级联退场 (2026-10-08 #14/#15 公共面): valid_to 软删 (D4 双时态,
+    --as-of 可回溯) + atom_edge 硬删 (纯派生) + vec_atom 缓存清 (heal 可重建)。
+
+    物理不 DELETE — 回滚 = valid_to 置 NULL。tag 挂载/distill_seen 不动
+    (防 replay 语义保持)。消费面: memory_watch._reap_deleted (daemon 自动
+    回传) / bootstrap.prune_openclaw (sanctioned CLI)。"""
+    if not ids:
+        return 0
+    import time as _t
+    now = ts or _t.strftime("%Y-%m-%dT%H:%M:%S+00:00", _t.gmtime())
+    conn = get_conn()
+    ph = ",".join("?" * len(ids))
+    conn.execute(f"UPDATE atom SET valid_to=? WHERE id IN ({ph}) "
+                 "AND valid_to IS NULL", [now] + ids)
+    conn.execute(f"DELETE FROM atom_edge WHERE a_id IN ({ph}) "
+                 f"OR b_id IN ({ph})", ids + ids)
+    try:
+        import vec_index
+        for aid in ids:
+            vec_index.delete_atom(aid)
+    except Exception:
+        pass  # 向量缓存派生物; heal 路径可重建, 不阻塞软删
+    conn.commit()
+    return len(ids)

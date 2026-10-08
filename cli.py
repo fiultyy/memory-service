@@ -666,13 +666,18 @@ def synthesis_index(scope: str | None = None, memory_dir: str | None = None,
 # ── prune (DELETE 同步, ADR-17d) ─────────────────────────────────────
 
 def prune(scope: str | None = None, memory_dir: str | None = None,
-          dry_run: bool = False, harness: str = "cc") -> dict:
+          dry_run: bool = False, harness: str = "cc",
+          file: str | None = None) -> dict:
     """CC memory md 删除 → 新图 atom 双时态软删 valid_to=now (ADR-17d, v2)。
     手动触发 (PostToolUse 不捕 ``rm``, 无 tool 触发删除 → 不自动)。
     re-ingest 的 DELETE 对称; 多源 atom 不动, 物理不 DELETE。
     Thin wrapper over ``bootstrap.prune_memory``。``harness`` 同 synthesis-index。"""
     cwd = scope or os.getcwd()
     mem_dir = _proj_memory_dir(memory_dir, cwd, harness)
+    if harness == "openclaw":
+        # #15: watchdog md 车道 atom 溯源 = 文件/目录路径 (无 tag 挂载面),
+        # prune_memory 的 tag 面 + scope IN 过滤双盲 → 路径前缀直扫。
+        return bootstrap.prune_openclaw(mem_dir, dry_run=dry_run, file=file)
     return bootstrap.prune_memory(mem_dir, source_cwd=cwd, dry_run=dry_run)
 
 
@@ -856,10 +861,18 @@ def _main(argv: list[str] | None = None) -> int:
     pr.add_argument("--scope", default=None, help="来源 cwd(默认 os.getcwd)")
     pr.add_argument("--memory-dir", dest="memory_dir", default=None,
                     help="CC memory dir(默认 cc_memory_dir(scope))")
-    pr.add_argument("--harness", dest="harness", default="cc", choices=["cc", "dsh"],
-                    help="存放位置方案(dsh → ~/.dsh/projects/<enc>/memory; 默认 cc)")
+    pr.add_argument("--harness", dest="harness", default="cc",
+                    choices=["cc", "dsh", "openclaw"],
+                    help="存放位置方案(dsh → ~/.dsh/projects/<enc>/memory; "
+                         "openclaw → <cwd>/memory 路径前缀直扫; 默认 cc)")
     pr.add_argument("--dry-run", dest="dry_run", action="store_true",
                     help="只报不删(预览将 prune 的孤儿 fact)")
+    pr.add_argument("--file", default=None,
+                    help="单文件粒度 (openclaw 车道: source_cwd=该文件的 atoms; "
+                         "缺省 = 整个 memory 目录前缀)")
+    pr.add_argument("--yes", dest="yes", action="store_true",
+                    help="确认执行删除 (生产安全阀 2026-10-08: 非 dry-run 且未 --yes "
+                         "→ 拒绝执行只报数; 防 sanctioned 命令手滑真删)")
     sub.add_parser("embed-backfill",
                    help="回填 active fact value → L2 embedding cache (ADR-13 向量通电)")
     sub.add_parser("vec-backfill",
@@ -954,8 +967,17 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(synthesis_index(scope=args.scope, memory_dir=args.memory_dir,
                                          session=args.session, harness=args.harness), ensure_ascii=False))
     elif args.cmd == "prune":
-        print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir,
-                               dry_run=args.dry_run, harness=args.harness), ensure_ascii=False))
+        if not args.dry_run and not getattr(args, "yes", False):
+            # 安全阀: 只报数不执行 — 真删必须 --dry-run 预览后 --yes
+            preview = prune(scope=args.scope, memory_dir=args.memory_dir,
+                            dry_run=True, harness=args.harness, file=args.file)
+            preview["executed"] = False
+            preview["hint"] = "非 dry-run 需 --yes 确认 (先 --dry-run 预览)"
+            print(json.dumps(preview, ensure_ascii=False))
+        else:
+            print(json.dumps(prune(scope=args.scope, memory_dir=args.memory_dir,
+                                   dry_run=args.dry_run, harness=args.harness,
+                                   file=args.file), ensure_ascii=False))
     elif args.cmd == "embed-backfill":
         print(json.dumps(embed_backfill(), ensure_ascii=False))
     elif args.cmd == "vec-backfill":

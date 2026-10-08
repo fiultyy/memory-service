@@ -758,7 +758,7 @@ def run(cwd: str | None = None, interval: int = POLL_INTERVAL, once: bool = Fals
                         0, str(Path(__file__).resolve().parent / "src"))
                     from memory_watch import sweep as _sweep_memory
                 r = _sweep_memory()
-                if r["files"]:
+                if r["files"] or r.get("reaped"):
                     _log(f"memory sweep: {r}")
             except Exception as _exc:
                 _log(f"memory sweep: {_exc} (deferred)")

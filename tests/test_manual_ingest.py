@@ -289,3 +289,41 @@ def test_init_memory_propagates_suspend(tmp_path, monkeypatch):
     (d / "x.md").write_text("句子。", encoding="utf-8")
     with pytest.raises(RuntimeError, match="down"):
         bootstrap.init_memory(d)
+
+
+# ── prune_openclaw (#15): 路径前缀直扫 + --file 粒度 + dry_run ──────
+def test_prune_openclaw_prefix_and_file(tmp_path):
+    conn = db.init(tmp_path / "oc.db")
+    mem = tmp_path / "ws" / "memory"
+    mem.mkdir(parents=True)
+    f1, f2 = mem / "a.md", mem / "b.md"
+    f1.write_text("x", encoding="utf-8")
+    f2.write_text("x", encoding="utf-8")
+    a1 = conn.execute(
+        "INSERT INTO atom(text, label, source_cwd) VALUES('甲', 'fact', ?)",
+        (str(f1),)).lastrowid
+    a2 = conn.execute(
+        "INSERT INTO atom(text, label, source_cwd) VALUES('乙', 'fact', ?)",
+        (str(f2),)).lastrowid
+    a3 = conn.execute(  # 目录级存量溯源 (10-05 前形态)
+        "INSERT INTO atom(text, label, source_cwd) VALUES('丙', 'fact', ?)",
+        (str(mem),)).lastrowid
+    a4 = conn.execute(  # 车道外, 前缀不中
+        "INSERT INTO atom(text, label, source_cwd) VALUES('丁', 'fact', ?)",
+        (str(tmp_path / "other"),)).lastrowid
+    conn.commit()
+    # dry_run 零写入
+    r = bootstrap.prune_openclaw(mem, dry_run=True)
+    assert r["checked"] == 3 and r["pruned"] == 0 and r["dry_run"] is True
+    assert all(_valid_to(conn, a) is None for a in (a1, a2, a3, a4))
+    # --file 单文件粒度: 只 a1
+    r = bootstrap.prune_openclaw(mem, file=str(f1))
+    assert r["pruned"] == 1 and r["pruned_ids"] == [a1]
+    assert _valid_to(conn, a1) is not None
+    assert _valid_to(conn, a2) is None and _valid_to(conn, a3) is None
+    # 全前缀: a2 + 目录级 a3, 车道外 a4 不动
+    r = bootstrap.prune_openclaw(mem)
+    assert r["pruned"] == 2 and sorted(r["pruned_ids"]) == sorted([a2, a3])
+    assert _valid_to(conn, a4) is None
+    # 幂等: 全软删后 checked=0
+    assert bootstrap.prune_openclaw(mem)["checked"] == 0

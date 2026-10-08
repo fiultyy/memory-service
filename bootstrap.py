@@ -241,6 +241,38 @@ def prune_memory(memory_dir: str | Path,
             "native_md_present": sorted(existing), "dry_run": dry_run}
 
 
+def prune_openclaw(memory_dir: str | Path, dry_run: bool = False,
+                   file: str | None = None) -> dict:
+    """OpenClaw workspace memory 删除 → atom 软删 (ADR-17d openclaw 车道,
+    2026-10-08 #15)。
+
+    范围 = ``file`` (精确单文件, 溯源含文件级+目录级存量两类都按文件名
+    兜底) 或缺省 source_cwd 前缀 ``<memory_dir>/`` 全量 — 文件级
+    (watchdog md 车道 10-05 后形态) 与目录级 (存量迁移) 同吃。
+    prune_memory 的 tag 挂载面/watchdog 车道不挂 tag → 双重盲区, 本函数
+    按路径直扫补位。级联同 daemon 自动回传 (db.retire_atoms): valid_to
+    软删 + 边/向量清; 物理不 DELETE, 回滚 = valid_to 置 NULL。
+    注意: 文件仍在盘且后续再变更 → watchdog 重 ingest 复活 (显式删除与
+    ingest 固有竞争; 永久下线 = 连文件一起删, #14 回传接管)。"""
+    conn = db.get_conn()
+    if file:
+        # 仅命中文件级溯源; 目录级存量 (source_cwd=<dir>) 粒度不到文件,
+        # 要清 = 缺省全量前缀形态。
+        ids = [r[0] for r in conn.execute(
+            "SELECT id FROM atom WHERE valid_to IS NULL AND "
+            "(source_cwd=? OR source_cwd=?)",
+            (str(file), str(Path(file).resolve()))).fetchall()]
+    else:
+        prefix = str(memory_dir).rstrip("/") + "/"
+        ids = [r[0] for r in conn.execute(
+            "SELECT id FROM atom WHERE (source_cwd LIKE ? OR source_cwd=?) "
+            "AND valid_to IS NULL",
+            (prefix + "%", prefix.rstrip("/"),)).fetchall()]
+    pruned = 0 if dry_run else db.retire_atoms(ids)
+    return {"checked": len(ids), "pruned": pruned,
+            "pruned_ids": sorted(ids), "dry_run": dry_run}
+
+
 # ── legacy: fact 表 (v1 归档) prune, 生产入口已切 prune_memory ──────────
 def prune_deleted(
     memory_dir: str | Path,

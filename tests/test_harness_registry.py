@@ -42,6 +42,14 @@ def test_identity_spec_fields_reference_existing_functions():
     assert oc.memory_dir is projection.openclaw_memory_dir
     assert oc.scenes is transcripts._SCENES["cc"]
     assert oc.end_steps is transcripts._ADAPTORS["cc"][2]
+    # dais (2026-11-17): transcript 组静态借 cc 宿主 adaptor (ADR
+    # dais-hub-harness-entry — dais-hub 无自有 transcript 文件面)
+    da = harness.SPECS["dais"]
+    assert da.project_dir is transcripts._ADAPTORS["cc"][0]
+    assert da.session_id is transcripts._ADAPTORS["cc"][1]
+    assert da.end_steps is transcripts._ADAPTORS["cc"][2]
+    assert da.keep is transcripts._ADAPTORS["cc"][3]
+    assert da.scenes is transcripts._SCENES["cc"]
 
 
 def test_harness_name_lists_equal():
@@ -60,6 +68,11 @@ def test_capability_none_for_manual_only_harnesses():
     assert harness.SPECS["cc"].memory_dir is not None
     assert harness.SPECS["dsh"].memory_dir is not None
     assert harness.SPECS["openclaw"].memory_dir is not None
+    # dais: memory 投影无约定 (能力关闭) + spool 复用 CC 共用池 + 无 env 面
+    assert harness.SPECS["dais"].memory_dir is None
+    assert harness.SPECS["dais"].spool_env is None
+    assert harness.SPECS["dais"].session_env is None
+    assert harness.SPECS["dais"].spool_default() == harness._svc_spool()
     assert harness.SPECS["cc"].spool_env == "MEM_SPOOL_DIR"
     assert harness.SPECS["cc"].session_env == "CLAUDE_CODE_SESSION_ID"
 
@@ -72,6 +85,7 @@ def test_corpus_keys_resolve():
 def test_resolve_harness_whitelist_matches_bash_case():
     assert harness.resolve_harness("dsh") == "dsh"
     assert harness.resolve_harness("openclaw") == "openclaw"
+    assert harness.resolve_harness("dais") == "dais"
     for v in (None, "", "cc", "unknown", "pi"):
         assert harness.resolve_harness(v) == "cc"
 
@@ -80,6 +94,8 @@ def test_memory_dir_or_raise_loud_on_capability_none():
     import pytest
     with pytest.raises(ValueError, match="无 memory 投影约定"):
         harness.memory_dir_or_raise("pi", "/tmp/x")
+    with pytest.raises(ValueError, match="无 memory 投影约定"):
+        harness.memory_dir_or_raise("dais", "/tmp/x")
     # cc/dsh 走真函数 (与 cli._proj_memory_dir 旧实现同路径)
     assert harness.memory_dir_or_raise(
         "dsh", "/tmp/x") == projection.dsh_memory_dir("/tmp/x")

@@ -175,6 +175,8 @@ HARNESS_RULES: dict[str, list[BlockRule]] = {
         "omp": PI_RULES,  # omp 与 pi 同 wire 格式 (transcripts 同款别名)
         # openclaw 与 cc 同 wire 格式 (2026-10-05: 插件快照 CC 兼容行)
         "openclaw": CC_RULES,
+        # dais 借 cc 宿主 wire 格式 (2026-11-17, ADR dais-hub-harness-entry)
+        "dais": CC_RULES,
     }.items()
 }
 

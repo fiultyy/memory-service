@@ -538,7 +538,15 @@ _ADAPTERS = _ADAPTORS
 _ADAPTORS["openclaw"] = _ADAPTORS["cc"]
 _SCENES["openclaw"] = _cc_scenes
 
-HARNESSES = ("cc", "dsh", "pi", "omp", "codex", "openclaw")
+# dais 与 cc 同 wire 格式 (2026-11-17, ADR dais-hub-harness-entry): dais-hub
+# 无自有 transcript 文件面 — 四通道中唯 jsonl 通道有持久文件, 且为宿主
+# harness 原生 jsonl (dais 只 tail 消费, 不构成数据源)。worker harness=
+# cc-dais 时 transcript 即 CC 布局, 本别名零改命中; 多宿主张力与分派预案
+# 见 ADR (本段静态借 cc, P2-2/4 真跑多宿主再议 canParse 分派)。
+_ADAPTORS["dais"] = _ADAPTORS["cc"]
+_SCENES["dais"] = _cc_scenes
+
+HARNESSES = ("cc", "dsh", "pi", "omp", "codex", "openclaw", "dais")
 
 
 def locate(cwd: str, harness: str = "cc", limit: int = 10) -> list[Path]:

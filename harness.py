@@ -129,14 +129,21 @@ SPECS: dict[str, HarnessSpec] = {
     "openclaw": _mk("openclaw",
                     memory_dir=projection.openclaw_memory_dir,
                     spool_default=_svc_spool),
+    # dais (2026-11-17, ADR dais-hub-harness-entry): dais-hub 编排的 cc-dais
+    # worker。无自有 transcript 文件面 (四通道唯 jsonl 有持久文件 = 宿主
+    # CC 原生 jsonl) → transcript 组静态借 cc adaptor (多宿主张力与 canParse
+    # 分派预案见 ADR); memory 投影无约定 = 能力关闭; spool 复用 CC 共用池;
+    # session env 由宿主透传承担 (ADR-0002 全量环境继承, 不另设)。
+    "dais": _mk("dais",
+                spool_default=_svc_spool),
 }
 
 
 def resolve_harness(value: str | None) -> str:
-    """env/旗标值 → SPECS 键。白名单放行 dsh/openclaw, 其余 (空/None/cc/
-    未知) → cc (与 hooks/session-start-mem.sh bash case 等价 — 防任意旗标
-    注入; openclaw 仅 cli 投影面出现, hooks 场景不遇)。"""
-    return value if value in ("dsh", "openclaw") else "cc"
+    """env/旗标值 → SPECS 键。白名单放行 dsh/openclaw/dais, 其余 (空/None/
+    cc/未知) → cc (与 hooks/session-start-mem.sh bash case 等价 — 防任意
+    旗标注入; openclaw/dais 仅 cli 投影面出现, hooks 场景不遇)。"""
+    return value if value in ("dsh", "openclaw", "dais") else "cc"
 
 
 def memory_dir_or_raise(harness: str, cwd: str) -> Path:
